@@ -140,7 +140,9 @@ listen = ${listen_addr}:${snell_port}
 psk = ${snell_psk}
 ipv6 = ${ipv6_enabled}
 EOF
+    systemctl start snell
     msg ok "Snell configuration established."
+
 }
 
 create_shadow_tls_systemd() {
