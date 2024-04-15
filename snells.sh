@@ -263,7 +263,7 @@ install_snell() {
     get_ip
     create_snell_systemd
     create_snell_conf
-    echo -e "Proxy-Snell = snell, ${server_ip}, $snell_port, psk=${snell_psk
+    echo -e "Proxy-Snell = snell, ${server_ip}, $snell_port, psk=${snell_psk}"
 }
 
 # Install Shadow-TLS only
