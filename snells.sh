@@ -96,11 +96,22 @@ find_unused_port() {
     done
 }
 
-# Function to check server IP
+# Function to check server IP (supports both IPv4 and IPv6)
 get_ip() {
-    server_ip=$(curl -s4 https://cloudflare.com/cdn-cgi/trace | grep -oP '(?<=ip=)[^,]*' || curl -s4 https://api.country.is | jq -r '.ip' || curl -s6 https://api64.ipify.org)
-    ip_type=$(echo "$server_ip" | grep -qP "^\s*((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\s*$" && echo "ipv4" || echo "ipv6")
-    [[ -z $server_ip ]] && msg err "Unable to get server IP address." && exit 1
+    ipv4=$(curl -s4 https://cloudflare.com/cdn-cgi/trace | grep -oP '(?<=ip=)[^,]*' || curl -s4 https://api.country.is | jq -r '.ip')
+    ipv6=$(curl -s6 https://cloudflare.com/cdn-cgi/trace | grep -oP '(?<=ip=)[^,]*' || curl -s6 https://api64.ipify.org)
+
+    if [[ -n $ipv4 && -n $ipv6 ]]; then
+        ip_type="both"
+    elif [[ -n $ipv4 ]]; then
+        ip_type="ipv4"
+    elif [[ -n $ipv6 ]]; then
+        ip_type="ipv6"
+    else
+        msg err "Unable to get server IP address." && exit 1
+    fi
+
+    server_ip=${ipv4:-$ipv6}
 }
 
 # Create systemd service file for Snell
@@ -125,15 +136,28 @@ EOF
     msg ok "Snell systemd service created."
 }
 
+# Function to create Snell configuration file
 create_snell_conf() {
     read -rp "Assign a port for Snell (Leave it blank for a random one): " snell_port
     [[ -z ${snell_port} ]] && snell_port=$(find_unused_port) && echo "[INFO] Assigned a random port for Snell: $snell_port"
     read -rp "Enter PSK for Snell (Leave it blank to generate a random one): " snell_psk
     [[ -z ${snell_psk} ]] && snell_psk=$(generate_random_psk) && echo "[INFO] Generated a random PSK for Snell: $snell_psk"
-    
-    listen_addr=$([[ $ip_type == "ipv6" ]] && echo "::0" || echo "0.0.0.0")
-    ipv6_enabled=$([[ $ip_type == "ipv6" ]] && echo "true" || echo "false")
-    
+
+    # Ask user if they want to enable IPv6 support
+    if [[ $ip_type == "both" ]]; then
+        read -rp "Enable IPv6 support? (y/n): " enable_ipv6
+        if [[ $enable_ipv6 =~ ^[Yy]$ ]]; then
+            listen_addr="::0"
+            ipv6_enabled="true"
+        else
+            listen_addr="0.0.0.0"
+            ipv6_enabled="false"
+        fi
+    else
+        listen_addr=$([[ $ip_type == "ipv6" ]] && echo "::0" || echo "0.0.0.0")
+        ipv6_enabled=$([[ $ip_type == "ipv6" ]] && echo "true" || echo "false")
+    fi
+
     cat > ${snell_workspace}/snell-server.conf <<-EOF
 [snell-server]
 listen = ${listen_addr}:${snell_port}
@@ -142,7 +166,6 @@ ipv6 = ${ipv6_enabled}
 EOF
     systemctl start snell
     msg ok "Snell configuration established."
-
 }
 
 create_shadow_tls_systemd() {
