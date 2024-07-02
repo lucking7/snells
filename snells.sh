@@ -1,3 +1,4 @@
+检查下脚本
 #!/bin/bash
 
 # SCP Foundation - Snell with Shadow-TLS Deployment Protocol Simplified
@@ -124,7 +125,7 @@ After=network.target
 [Service]
 User=root
 WorkingDirectory=${snell_workspace}
-ExecStart=${snell_workspace}/snell-server -c snell-server.conf
+ExecStart=/bin/bash -c '${snell_workspace}/snell-server -c snell-server.conf 2>&1 | tee /var/log/snell.log'
 Restart=on-failure
 RestartSec=5
 
@@ -142,7 +143,21 @@ create_snell_conf() {
     [[ -z ${snell_port} ]] && snell_port=$(find_unused_port) && echo "[INFO] Assigned a random port for Snell: $snell_port"
     read -rp "Enter PSK for Snell (Leave it blank to generate a random one): " snell_psk
     [[ -z ${snell_psk} ]] && snell_psk=$(generate_random_psk) && echo "[INFO] Generated a random PSK for Snell: $snell_psk"
-
+    read -rp "Enter custom DNS servers (comma-separated, leave blank for default): " custom_dns
+    if [[ -n $custom_dns ]]; then
+        dns_config="dns = $custom_dns"
+    else
+        dns_config=""
+    fi
+    
+    cat > ${snell_workspace}/snell-server.conf <<-EOF
+    [snell-server]
+    listen = ${listen_addr}:${snell_port}
+    psk = ${snell_psk}
+    ipv6 = ${ipv6_enabled}
+    $dns_config
+    EOF
+    
     # Ask user if they want to enable IPv6 support
     if [[ $ip_type == "both" ]]; then
         read -rp "Enable IPv6 support? (y/n): " enable_ipv6
@@ -274,9 +289,12 @@ install_snell() {
     cd "${snell_workspace}" || exit 1
     arch=$(uname -m)
     case $arch in
-        x86_64) snell_url="https://dl.nssurge.com/snell/snell-server-v4.0.1-linux-amd64.zip" ;;
-        aarch64) snell_url="https://dl.nssurge.com/snell/snell-server-v4.0.1-linux-aarch64.zip" ;;
-        *) msg err "Unsupported architecture: $arch" && exit 1 ;;
+    x86_64) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.0rc1-linux-amd64.zip" ;;
+    aarch64) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.0rc1-linux-aarch64.zip" ;;
+    armv7l) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.0rc1-linux-armv7l.zip" ;;
+    i386) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.0rc1-linux-i386.zip" ;;
+    *) msg err "Unsupported architecture: $arch" && exit 1 ;;
+    
     esac
     wget -O snell-server.zip "${snell_url}"
     unzip -o snell-server.zip
@@ -411,6 +429,15 @@ checkconfig() {
     systemctl cat shadow-tls | grep -E "listen|server|tls|password"
 }
 
+show_snell_log() {
+    if [ -f "/var/log/snell.log" ]; then
+        echo "Snell Server Log:"
+        cat /var/log/snell.log
+    else
+        msg err "Snell log file not found."
+    fi
+}
+
 # Modify Snell and Shadow-TLS configuration  
 modify() {
     _green "1. Modify Snell Configuration"
@@ -419,8 +446,8 @@ modify() {
     read -p "Select operation (1-3): " operation
     
     case $operation in  
-        1) vi "${snell_workspace}/snell-server.conf" ;;
-        2) vi "${shadow_tls_service}" ;;
+        1) nano "${snell_workspace}/snell-server.conf" ;;
+        2) nano "${shadow_tls_service}" ;;
         3) menu ;;  
         *) msg err "Invalid operation." ;;
     esac
@@ -434,18 +461,21 @@ manage() {
     _red "2. Stop"
     _yellow "3. Restart"
     echo "4. Modify Config"
-    echo "5. Back to Main Menu"  
-    read -p "Select operation (1-5): " operation
+    echo "5. Show Snell Log"
+    echo "6. Back to Main Menu"  
+    read -p "Select operation (1-6): " operation
     
     case $operation in
         1) run ;;  
         2) stop ;;
         3) restart ;;
         4) modify ;; 
-        5) menu ;;
+        5) show_snell_log ;;
+        6) menu ;;
         *) msg err "Invalid operation." ;;
     esac  
 }
+
 
 # Main menu
 menu() {  
