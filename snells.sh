@@ -56,7 +56,7 @@ install_dependencies() {
     if ! command -v apt-get >/dev/null 2>&1; then
         err "This script only supports Debian/Ubuntu systems"
         exit 1
-    }
+    fi
 
     msg info "Updating package lists..."
     apt-get update -y >/dev/null 2>&1
