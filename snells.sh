@@ -288,12 +288,11 @@ install_snell() {
     cd "${snell_workspace}" || exit 1
     arch=$(uname -m)
     case $arch in
-    x86_64) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.0rc1-linux-amd64.zip" ;;
-    aarch64) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.0rc1-linux-aarch64.zip" ;;
-    armv7l) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.0rc1-linux-armv7l.zip" ;;
-    i386) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.0rc1-linux-i386.zip" ;;
+    x86_64) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-amd64.zip" ;;
+    aarch64) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-aarch64.zip" ;;
+    armv7l) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-armv7l.zip" ;;
+    i386) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-i386.zip" ;;
     *) msg err "Unsupported architecture: $arch" && exit 1 ;;
-    
     esac
     wget -O snell-server.zip "${snell_url}"
     unzip -o snell-server.zip
