@@ -138,46 +138,50 @@ EOF
 
 # Function to create Snell configuration file
 create_snell_conf() {
+    # Get port
     read -rp "Assign a port for Snell (Leave it blank for a random one): " snell_port
     [[ -z ${snell_port} ]] && snell_port=$(find_unused_port) && echo "[INFO] Assigned a random port for Snell: $snell_port"
+    
+    # Get PSK
     read -rp "Enter PSK for Snell (Leave it blank to generate a random one): " snell_psk
     [[ -z ${snell_psk} ]] && snell_psk=$(generate_random_psk) && echo "[INFO] Generated a random PSK for Snell: $snell_psk"
+    
+    # Get DNS settings
     read -rp "Enter custom DNS servers (comma-separated, leave blank for default): " custom_dns
     if [[ -n $custom_dns ]]; then
         dns_config="dns = $custom_dns"
     else
         dns_config=""
     fi
-    
-    cat > ${snell_workspace}/snell-server.conf <<-EOF
-    [snell-server]
-    listen = ${listen_addr}:${snell_port}
-    psk = ${snell_psk}
-    ipv6 = ${ipv6_enabled}
-    $dns_config
-    EOF
-    
-    # Ask user if they want to enable IPv6 support
+
+    # Configure IPv6 settings
     if [[ $ip_type == "both" ]]; then
         read -rp "Enable IPv6 support? (y/n): " enable_ipv6
         if [[ $enable_ipv6 =~ ^[Yy]$ ]]; then
-            listen_addr="::0"
+            listen_addr="[::]:$snell_port"
             ipv6_enabled="true"
         else
-            listen_addr="0.0.0.0"
+            listen_addr="0.0.0.0:$snell_port"
             ipv6_enabled="false"
         fi
+    elif [[ $ip_type == "ipv6" ]]; then
+        listen_addr="[::]:$snell_port"
+        ipv6_enabled="true"
     else
-        listen_addr=$([[ $ip_type == "ipv6" ]] && echo "::0" || echo "0.0.0.0")
-        ipv6_enabled=$([[ $ip_type == "ipv6" ]] && echo "true" || echo "false")
+        listen_addr="0.0.0.0:$snell_port"
+        ipv6_enabled="false"
     fi
 
-    cat > ${snell_workspace}/snell-server.conf <<-EOF
+    # Write the configuration file
+    cat > "${snell_workspace}/snell-server.conf" << EOF
 [snell-server]
-listen = ${listen_addr}:${snell_port}
+listen = ${listen_addr}
 psk = ${snell_psk}
 ipv6 = ${ipv6_enabled}
+${dns_config}
 EOF
+
+    msg ok "Snell configuration file created at ${snell_workspace}/snell-server.conf"
     systemctl start snell
     msg ok "Snell configuration established."
 }
