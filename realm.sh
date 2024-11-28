@@ -1,442 +1,472 @@
 #!/bin/bash
 
-# ================================
-#       Enhanced Realm Manager
-# ================================
+# Colors for output
+GREEN="\033[0;32m"
+RED="\033[0;31m"
+YELLOW="\033[0;33m"
+BOLD="\033[1m"
+NC="\033[0m" # No Color
 
-# Enhanced Realm Manager Script with Colored Output, Conditional Sudo,
-# and Interactive Menu for Managing Forwarding Endpoints.
-# Provides installation, uninstallation, and advanced forwarding management for Realm.
+# 检查依赖函数
+require_command() {
+    if ! command -v "$1" &> /dev/null; then
+        echo -e "${RED}Error: '$1' command not found. Please install it and rerun the script.${NC}"
+        exit 1
+    fi
+}
 
-# ================================
-#         Color Definitions
-# ================================
+# 必要依赖检查
+require_command curl
+require_command lsof
+require_command systemctl
 
-# Reset
-RESET="\e[0m"
-
-# Regular Colors
-RED="\e[31m"
-GREEN="\e[32m"
-YELLOW="\e[33m"
-BLUE="\e[34m"
-MAGENTA="\e[35m"
-CYAN="\e[36m"
-
-# Bold
-BOLD="\e[1m"
-
-# ================================
-#        Sudo Configuration
-# ================================
-
-# Determine if the script is run as root
-if [ "$(id -u)" -eq 0 ]; then
-    SUDO=""
-else
-    SUDO="sudo"
+# jq为可选依赖，如果不存在则采用grep方式
+use_jq=false
+if command -v jq &> /dev/null; then
+    use_jq=true
 fi
 
-# ================================
-#           Configuration
-# ================================
-
-REALM_VERSION="v2.6.2"
-REALM_BINARY_NAME="realm-x86_64-unknown-linux-gnu.tar.gz"
-REALM_BINARY_URL="https://github.com/zhboner/realm/releases/download/${REALM_VERSION}/${REALM_BINARY_NAME}"
-INSTALL_DIR="/usr/local/bin"
-CONFIG_DIR="/etc/realm"
-CONFIG_FILE="${CONFIG_DIR}/config.toml"
-SERVICE_FILE="/etc/systemd/system/realm.service"
-
-# ================================
-#             Functions
-# ================================
-
-# Print in GREEN
-print_success() {
-    echo -e "${GREEN}$1${RESET}"
-}
-
-# Print in RED
-print_error() {
-    echo -e "${RED}$1${RESET}"
-}
-
-# Print in YELLOW
-print_warning() {
-    echo -e "${YELLOW}$1${RESET}"
-}
-
-# Print in BLUE
-print_info() {
-    echo -e "${BLUE}$1${RESET}"
-}
-
-# Display Menu
-show_menu() {
-    echo -e "${BOLD}${CYAN}Realm Manager Menu${RESET}"
-    echo "1. Install Realm"
-    echo "2. Uninstall Realm"
-    echo "3. Add New Forward"
-    echo "4. List All Forwards"
-    echo "5. Delete a Forward"
-    echo "6. Exit"
-    echo -n "Please enter your choice [1-6]: "
-}
-
-# Install Realm
-install_realm() {
-    print_info "Installing Realm ${REALM_VERSION}..."
-
-    # Create configuration directory
-    ${SUDO} mkdir -p "${CONFIG_DIR}" && print_success "Created configuration directory at ${CONFIG_DIR}."
-
-    # Download and extract Realm
-    print_info "Downloading Realm binary from ${REALM_BINARY_URL}..."
-    wget "${REALM_BINARY_URL}" -O /tmp/realm.tar.gz
-    if [[ $? -ne 0 ]]; then
-        print_error "Failed to download Realm binary."
+# Function to deploy Realm
+deploy_realm() {
+    mkdir -p /root/realm && cd /root/realm || { echo -e "${RED}Failed to access /root/realm directory.${NC}"; exit 1; }
+    wget -qO realm.tar.gz https://github.com/zhboner/realm/releases/download/v2.6.2/realm-x86_64-unknown-linux-gnu.tar.gz
+    if [ ! -f realm.tar.gz ]; then
+        echo -e "${RED}Download realm.tar.gz failed. Please check network or URL.${NC}"
         exit 1
     fi
-
-    print_info "Extracting Realm binary..."
-    tar -xzf /tmp/realm.tar.gz -C /tmp
-    if [[ $? -ne 0 ]]; then
-        print_error "Failed to extract Realm binary."
-        exit 1
-    fi
-
-    ${SUDO} mv /tmp/realm "${INSTALL_DIR}/realm" && print_success "Moved Realm binary to ${INSTALL_DIR}."
-    ${SUDO} chmod +x "${INSTALL_DIR}/realm" && print_success "Set executable permissions for Realm."
-
-    # Create a default config file if it doesn't exist
-    if [[ ! -f "${CONFIG_FILE}" ]]; then
-        print_info "Creating default configuration at ${CONFIG_FILE}..."
-        ${SUDO} bash -c "cat > ${CONFIG_FILE}" <<EOL
-[[endpoints]]
-listen = "0.0.0.0:5000"
-remote = "1.1.1.1:443"
-protocol = "both"    # Options: udp, tcp, both
-ip_version = "both"  # Options: ipv4, ipv6, both
-EOL
-        print_success "Default configuration created."
-    else
-        print_warning "Configuration file already exists at ${CONFIG_FILE}."
-    fi
-
-    # Create systemd service
-    print_info "Setting up systemd service for Realm..."
-    ${SUDO} bash -c "cat > ${SERVICE_FILE}" <<EOL
+    tar -xzf realm.tar.gz && chmod +x realm
+    # Create service file
+    cat <<EOF >/etc/systemd/system/realm.service
 [Unit]
-Description=Realm Relay Service
-After=network.target
+Description=Realm Service
+After=network-online.target
+Wants=network-online.target systemd-networkd-wait-online.service
 
 [Service]
-ExecStart=${INSTALL_DIR}/realm -c ${CONFIG_FILE}
-Restart=always
-User=nobody
-Group=nogroup
+Type=simple
+User=root
+Restart=on-failure
+RestartSec=5s
+WorkingDirectory=/root/realm
+ExecStart=/root/realm/realm -c /root/realm/config.toml
 
 [Install]
 WantedBy=multi-user.target
-EOL
-    print_success "Systemd service file created at ${SERVICE_FILE}."
-
-    # Reload systemd, enable and start Realm service
-    print_info "Reloading systemd daemon..."
-    ${SUDO} systemctl daemon-reload
-
-    print_info "Enabling Realm service to start on boot..."
-    ${SUDO} systemctl enable realm
-
-    print_info "Starting Realm service..."
-    ${SUDO} systemctl start realm
-
-    print_success "Realm installed and service started successfully."
+EOF
+    systemctl daemon-reload
+    # Initialize config.toml
+    if [ ! -f /root/realm/config.toml ]; then
+        cat <<EONET >/root/realm/config.toml
+[network]
+no_tcp = false
+use_udp = true
+ipv6_only = false
+EONET
+        echo -e "${GREEN}[network] configuration added to config.toml.${NC}"
+    fi
+    realm_status="Installed"
+    realm_status_color="$GREEN"
+    echo -e "${GREEN}Deployment completed.${NC}"
 }
 
-# Uninstall Realm
+# Function to uninstall Realm
 uninstall_realm() {
-    print_info "Uninstalling Realm..."
-
-    # Stop and disable service
-    print_info "Stopping Realm service..."
-    ${SUDO} systemctl stop realm
-
-    print_info "Disabling Realm service..."
-    ${SUDO} systemctl disable realm
-
-    # Remove service file
-    print_info "Removing systemd service file..."
-    ${SUDO} rm -f "${SERVICE_FILE}" && print_success "Removed service file."
-
-    # Remove binary
-    print_info "Removing Realm binary from ${INSTALL_DIR}..."
-    ${SUDO} rm -f "${INSTALL_DIR}/realm" && print_success "Removed Realm binary."
-
-    # Remove configuration
-    print_info "Removing configuration directory at ${CONFIG_DIR}..."
-    ${SUDO} rm -rf "${CONFIG_DIR}" && print_success "Removed configuration directory."
-
-    # Reload systemd
-    print_info "Reloading systemd daemon..."
-    ${SUDO} systemctl daemon-reload
-
-    print_success "Realm uninstalled successfully."
+    systemctl stop realm &>/dev/null
+    systemctl disable realm &>/dev/null
+    rm -f /etc/systemd/system/realm.service
+    systemctl daemon-reload
+    rm -rf /root/realm
+    if [ -f "/etc/crontab" ]; then
+        sed -i '/realm/d' /etc/crontab
+    else
+        echo -e "${YELLOW}Warning: /etc/crontab not found. Skipping crontab cleanup.${NC}"
+    fi
+    realm_status="Not Installed"
+    realm_status_color="$RED"
+    echo -e "${RED}Realm has been uninstalled.${NC}"
 }
 
-# Add a new forward
-add_forward() {
-    echo -e "${BOLD}${CYAN}Add New Forward${RESET}"
-
-    # Prompt for listening address type
-    echo "Select Listening Address Type:"
-    echo "1. IPv4 (e.g., 0.0.0.0)"
-    echo "2. IPv6 (e.g., [::])"
-    echo "3. Both"
-    read -p "Enter choice [1-3]: " addr_type
-
-    case "$addr_type" in
-        1)
-            LISTEN_ADDR="0.0.0.0"
-            IP_VERSION="ipv4"
-            ;;
-        2)
-            LISTEN_ADDR="[::]"
-            IP_VERSION="ipv6"
-            ;;
-        3)
-            LISTEN_ADDR="0.0.0.0,[::]"
-            IP_VERSION="both"
-            ;;
-        *)
-            print_error "Invalid choice. Defaulting to both."
-            LISTEN_ADDR="0.0.0.0,[::]"
-            IP_VERSION="both"
-            ;;
-    esac
-
-    # Prompt for listening port
-    read -p "Enter Listening Port (e.g., 5000): " LISTEN_PORT
-    if [[ -z "$LISTEN_PORT" ]]; then
-        print_error "Listening port cannot be empty."
-        return
-    fi
-
-    # Prompt for remote address
-    read -p "Enter Remote Address (e.g., 1.1.1.1 or [2001:db8::1]): " REMOTE_ADDR
-    if [[ -z "$REMOTE_ADDR" ]]; then
-        print_error "Remote address cannot be empty."
-        return
-    fi
-
-    # Add square brackets for IPv6 remote addresses if not present
-    if [[ "$REMOTE_ADDR" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-        REMOTE_FORMATTED="$REMOTE_ADDR"
-    elif [[ "$REMOTE_ADDR" =~ ^\[[0-9a-fA-F:]+\]$ ]]; then
-        REMOTE_FORMATTED="$REMOTE_ADDR"
+# Function to check Realm installation
+check_realm_installation() {
+    if [ -f "/root/realm/realm" ]; then
+        realm_status="Installed"
+        realm_status_color="$GREEN"
     else
-        # Assume IPv6 and add brackets
-        REMOTE_FORMATTED="[$REMOTE_ADDR]"
+        realm_status="Not Installed"
+        realm_status_color="$RED"
+        echo -e "${RED}Realm is not installed. Installing now...${NC}"
+        deploy_realm
+    fi
+}
+
+# Function to check and fix Realm service status
+check_realm_service_status() {
+    if systemctl is-active --quiet realm; then
+        echo -e "${GREEN}Active${NC}"
+        return 0
     fi
 
-    # Prompt for remote port
-    read -p "Enter Remote Port (e.g., 443): " REMOTE_PORT
-    if [[ -z "$REMOTE_PORT" ]]; then
-        print_error "Remote port cannot be empty."
-        return
+    # Check if there are any endpoints configured
+    if ! grep -q '^\[\[endpoints\]\]' /root/realm/config.toml; then
+        echo -e "${RED}Inactive${NC}"
+        echo -e "${YELLOW}No forwarding rules configured. Add rules before starting the service.${NC}"
+        return 0
     fi
 
-    # Prompt for protocol
-    echo "Select Forwarding Protocol:"
-    echo "1. TCP"
-    echo "2. UDP"
-    echo "3. Both"
-    read -p "Enter choice [1-3]: " protocol_choice
+    echo -e "${RED}Inactive${NC}"
+    echo "Attempting to fix Realm service..."
 
-    case "$protocol_choice" in
-        1)
-            PROTOCOL="tcp"
-            ;;
-        2)
-            PROTOCOL="udp"
-            ;;
-        3)
-            PROTOCOL="both"
-            ;;
-        *)
-            print_error "Invalid choice. Defaulting to both."
-            PROTOCOL="both"
-            ;;
-    esac
+    # Check config file
+    if [ ! -f "/root/realm/config.toml" ]; then
+        echo -e "${RED}Error: config.toml not found${NC}"
+        return 1
+    fi
 
-    # Construct listen and remote addresses
-    IFS=',' read -ra ADDR_ARRAY <<< "$LISTEN_ADDR"
-    for addr in "${ADDR_ARRAY[@]}"; do
-        echo "Adding forward: Listen=${addr}:${LISTEN_PORT} | Remote=${REMOTE_FORMATTED}:${REMOTE_PORT} | Protocol=${PROTOCOL} | IP Version=${IP_VERSION}"
-        ${SUDO} bash -c "cat >> ${CONFIG_FILE}" <<EOL
+    # Remove duplicate lines in config
+    awk '!seen[$0]++' /root/realm/config.toml > /root/realm/config.toml.tmp
+    mv /root/realm/config.toml.tmp /root/realm/config.toml
+    echo "Cleaned up duplicate lines in config.toml"
 
-[[endpoints]]
-listen = "${addr}:${LISTEN_PORT}"
-remote = "${REMOTE_FORMATTED}:${REMOTE_PORT}"
-protocol = "${PROTOCOL}"
-ip_version = "${IP_VERSION}"
-EOL
+    # Ensure [network] section exists and is correct
+    if ! grep -q '^\[network\]' /root/realm/config.toml; then
+        cat <<EOF >>/root/realm/config.toml
+[network]
+no_tcp = false
+use_udp = true
+ipv6_only = false
+EOF
+        echo "Added missing [network] section to config.toml"
+    fi
+
+    # Check realm executable
+    if [ ! -x "/root/realm/realm" ]; then
+        echo -e "${RED}Error: realm executable not found or not executable${NC}"
+        return 1
+    fi
+
+    # Attempt to restart the service
+    echo "Attempting to restart Realm service..."
+    systemctl restart realm
+    sleep 2
+
+    if systemctl is-active --quiet realm; then
+        echo -e "${GREEN}Realm service successfully restarted${NC}"
+    else
+        echo -e "${RED}Failed to restart Realm service${NC}"
+        echo "Checking logs for errors:"
+        journalctl -u realm.service -n 20 --no-pager
+        return 1
+    fi
+}
+
+# Function to fetch server information
+fetch_server_info() {
+    meta_info=$(curl -s https://speed.cloudflare.com/meta)
+
+    # 尝试使用 jq 解析
+    if $use_jq && [ -n "$meta_info" ]; then
+        asOrganization=$(echo "$meta_info" | jq -r '.asOrganization // "N/A"')
+        colo=$(echo "$meta_info" | jq -r '.colo // "N/A"')
+        country=$(echo "$meta_info" | jq -r '.country // "N/A"')
+    else
+        # 后备方案，无 jq 时使用 grep 提取
+        # 去除 -P 使用：使用普通 grep 来简化
+        # 假设 JSON 中字段顺序稳定。如果不稳定建议安装 jq
+        asOrganization=$(echo "$meta_info" | grep '"asOrganization":"' | sed 's/.*"asOrganization":"\([^"]*\)".*/\1/' || echo "N/A")
+        colo=$(echo "$meta_info" | grep '"colo":"' | sed 's/.*"colo":"\([^"]*\)".*/\1/' || echo "N/A")
+        country=$(echo "$meta_info" | grep '"country":"' | sed 's/.*"country":"\([^"]*\)".*/\1/' || echo "N/A")
+    fi
+
+    # Fetch IP information using ip.sb
+    ipv4=$(curl -s ipv4.ip.sb || echo "N/A")
+    ipv6=$(curl -s ipv6.ip.sb || echo "N/A")
+
+    # Check if IPv6 is available
+    has_ipv6=false
+    if [ "$ipv6" != "N/A" ] && [[ "$ipv6" =~ ":" ]]; then
+        has_ipv6=true
+    fi
+
+    # Fallback to combined API if individual requests fail
+    if [ "$ipv4" = "N/A" ] && [ "$ipv6" = "N/A" ]; then
+        combined_ip=$(curl -s ip.sb || echo "N/A")
+        if [[ $combined_ip =~ .*:.* ]]; then
+            ipv6=$combined_ip
+            has_ipv6=true
+        else
+            ipv4=$combined_ip
+        fi
+    fi
+}
+
+# Function to display the menu
+show_menu() {
+    fetch_server_info
+    clear
+    echo -e "${BOLD}=== Realm Relay Management ===${NC}"
+    echo "1. Add Realm Forward"
+    echo "2. View Realm Forwards"
+    echo "3. Delete Realm Forward"
+    echo "4. Manage Realm Service"
+    echo "5. Uninstall Realm"
+    echo "6. Exit"
+    echo "------------------------------"
+    echo -e "Realm Status: ${realm_status_color}${realm_status}${NC}"
+    echo -n "Realm Service: "
+    check_realm_service_status
+    echo "------------------------------"
+    echo "Server Information:"
+    echo "IPv4: $ipv4 | IPv6: $ipv6"
+    echo "COLO: $colo | AS Organization: $asOrganization | Country: $country"
+    echo "=================================="
+}
+
+# Function to find an available port
+find_available_port() {
+    local start_port=${1:-10000}
+    local end_port=${2:-65535}
+    local range=$((end_port - start_port + 1))
+    local max_attempts=100
+
+    RANDOM=$$$(date +%s)
+
+    for ((i=1; i<=max_attempts; i++)); do
+        local port=$((RANDOM % range + start_port))
+        if ! lsof -i :$port > /dev/null 2>&1; then
+            echo $port
+            return 0
+        fi
     done
 
-    print_success "New forward(s) added successfully."
-
-    # Restart Realm service to apply changes
-    print_info "Restarting Realm service to apply changes..."
-    ${SUDO} systemctl restart realm
-
-    print_success "Realm service restarted."
+    echo "No available ports found after $max_attempts attempts in the range $start_port-$end_port" >&2
+    return 1
 }
 
-# List all forwards
-list_forwards() {
-    echo -e "${BOLD}${CYAN}Current Forwards:${RESET}"
-    echo "----------------------------------------"
+# Function to create Realm service file (已在 deploy_realm 中创建，不重复调用)
+create_realm_service() {
+    cat <<EOF >/etc/systemd/system/realm.service
+[Unit]
+Description=Realm Service
+After=network-online.target
+Wants=network-online.target systemd-networkd-wait-online.service
 
-    if [[ ! -f "${CONFIG_FILE}" ]]; then
-        print_warning "Configuration file does not exist."
-        return
-    fi
+[Service]
+Type=simple
+User=root
+Restart=on-failure
+RestartSec=5s
+WorkingDirectory=/root/realm
+ExecStart=/root/realm/realm -c /root/realm/config.toml
 
-    local COUNT=0
-    local TEMP_LIST=$(grep -E '^\[\[endpoints\]\]$|^listen =|^remote =|^protocol =|^ip_version =' "${CONFIG_FILE}" 2>/dev/null)
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    echo -e "${GREEN}Realm service file created.${NC}"
+}
 
-    while IFS= read -r line; do
-        if [[ "$line" == "[[endpoints]]" ]]; then
-            ((COUNT++))
-            echo -e "${YELLOW}Forward #${COUNT}:${RESET}"
-        elif [[ "$line" =~ listen\ =\ \"(.+)\" ]]; then
-            echo -e "  ${GREEN}Listen:${RESET} ${BASH_REMATCH[1]}"
-        elif [[ "$line" =~ remote\ =\ \"(.+)\" ]]; then
-            echo -e "  ${GREEN}Remote:${RESET} ${BASH_REMATCH[1]}"
-        elif [[ "$line" =~ protocol\ =\ \"(.+)\" ]]; then
-            echo -e "  ${GREEN}Protocol:${RESET} ${BASH_REMATCH[1]}"
-        elif [[ "$line" =~ ip_version\ =\ \"(.+)\" ]]; then
-            echo -e "  ${GREEN}IP Version:${RESET} ${BASH_REMATCH[1]}"
-            echo "----------------------------------------"
-        fi
-    done <<< "${TEMP_LIST}"
+# Function to manage Realm service
+manage_realm_service() {
+    while true; do
+        clear
+        echo -e "${BOLD}Manage Realm Service${NC}"
+        echo "1. Start Realm Service"
+        echo "2. Stop Realm Service"
+        echo "3. Restart Realm Service"
+        echo "4. View Realm Service Status"
+        echo "5. Return to Main Menu"
+        read -rp "Select an option: " service_choice
+        case $service_choice in
+            1) systemctl start realm; echo "Realm service started." ;;
+            2) systemctl stop realm; echo "Realm service stopped." ;;
+            3) systemctl restart realm; echo "Realm service restarted." ;;
+            4) systemctl status realm ;;
+            5) return ;;
+            *) echo -e "${RED}Invalid option${NC}" ;;
+        esac
+        read -n1 -r -p "Press any key to continue..."
+    done
+}
 
-    if [[ ${COUNT} -eq 0 ]]; then
-        print_warning "No forwards found in the configuration."
+# Function to add a forwarding rule
+add_forward() {
+    echo -e "${BOLD}Add New Forwarding Rule${NC}"
+
+    fetch_server_info
+
+    # Select IP version
+    if [ "$has_ipv6" = true ]; then
+        echo "Choose IP version:"
+        echo "1. IPv4"
+        echo "2. IPv6"
+        echo "3. Both IPv4 and IPv6 (Default)"
+        read -rp "Choice [3]: " ip_version_choice
+        ip_version_choice=${ip_version_choice:-3}
+        case $ip_version_choice in
+            1) use_ipv4=true; use_ipv6=false; ipv6_only=false ;;
+            2) use_ipv4=false; use_ipv6=true; ipv6_only=true ;;
+            3) use_ipv4=true; use_ipv6=true; ipv6_only=false ;;
+            *) echo "Invalid choice. Defaulting to Both."; use_ipv4=true; use_ipv6=true; ipv6_only=false ;;
+        esac
     else
-        echo -e "${BOLD}Total Forwards: ${COUNT}${RESET}"
+        echo "IPv6 is not available on this server. Using IPv4 only."
+        use_ipv4=true; use_ipv6=false; ipv6_only=false
     fi
+
+    # Select transport protocol
+    echo "Choose Transport Protocol:"
+    echo "1. TCP"
+    echo "2. UDP"
+    echo "3. Both TCP and UDP (Default)"
+    read -rp "Choice [3]: " transport_choice
+    transport_choice=${transport_choice:-3}
+    case $transport_choice in
+        1) use_tcp=true; use_udp=false ;;
+        2) use_tcp=false; use_udp=true ;;
+        3) use_tcp=true; use_udp=true ;;
+        *) echo "Invalid choice. Defaulting to Both."; use_tcp=true; use_udp=true ;;
+    esac
+
+    # Get forwarding details
+    read -rp "Enter local listening port (leave blank for auto-selection): " local_port
+    if [ -z "$local_port" ]; then
+        local_port=$(find_available_port)
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Failed to find an available port. Please specify one manually.${NC}"
+            return 1
+        fi
+        echo -e "${GREEN}Automatically selected available port: $local_port${NC}"
+    fi
+    read -rp "Enter remote IP: " ip
+    read -rp "Enter remote port: " port
+    read -rp "Enter remark: " remark
+
+    # Validate inputs
+    if ! [[ "$local_port" =~ ^[0-9]+$ ]] || [ "$local_port" -lt 1 ] || [ "$local_port" -gt 65535 ]; then
+        echo -e "${RED}Invalid local port number.${NC}"
+        return 1
+    fi
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        echo -e "${RED}Invalid remote port number.${NC}"
+        return 1
+    fi
+    # 简单IP校验(IPv4/IPv6略简化)
+    if [[ ! "$ip" =~ ^[0-9a-fA-F:.]+$ ]]; then
+        echo -e "${RED}Invalid IP address format.${NC}"
+        return 1
+    fi
+
+    # Check if [network] section exists, if not add it
+    if ! grep -q '^\[network\]' /root/realm/config.toml; then
+        cat <<EOF >> /root/realm/config.toml
+[network]
+no_tcp = false
+use_udp = true
+ipv6_only = false
+EOF
+    fi
+
+    # Append new endpoint
+    cat <<EOF >> /root/realm/config.toml
+
+[[endpoints]]
+# Remark: $remark
+listen = "0.0.0.0:$local_port"
+remote = "$ip:$port"
+use_udp = $use_udp
+use_tcp = $use_tcp
+EOF
+
+    realm_status="Installed"
+    realm_status_color="$GREEN"
+
+    # Enable and restart service
+    systemctl enable realm
+    systemctl restart realm
+    echo -e "${GREEN}Forwarding rule added and Realm service restarted.${NC}"
 }
 
-# Delete a forward
+# Function to view all forwarding rules
+show_all_conf() {
+    echo -e "${BOLD}Current Forwarding Rules:${NC}"
+    IFS=$'\n' read -d '' -r -a lines < <(grep -n 'listen =' /root/realm/config.toml || true)
+    if [ ${#lines[@]} -eq 0 ]; then
+        echo "No forwarding rules found."
+        return
+    fi
+    local index=1
+    for line in "${lines[@]}"; do
+        local line_number=$(echo "$line" | cut -d ':' -f1)
+        local listen=$(sed -n "${line_number}p" /root/realm/config.toml | cut -d '"' -f2)
+        local remote=$(sed -n "$((line_number + 1))p" /root/realm/config.toml | cut -d '"' -f2)
+        local remark=$(sed -n "$((line_number - 1))p" /root/realm/config.toml | grep "^# Remark:" | cut -d ':' -f2 | xargs)
+        echo "${index}. Remark: ${remark:-None}"
+        echo "   Listen: ${listen}, Remote: ${remote}"
+        ((index++))
+    done
+}
+
+# Function to delete a forwarding rule
 delete_forward() {
-    list_forwards
-    if [[ $? -ne 0 ]]; then
+    echo -e "${BOLD}Delete Forwarding Rule${NC}"
+    IFS=$'\n' read -d '' -r -a lines < <(grep -n '^\[\[endpoints\]\]' /root/realm/config.toml || true)
+    if [ ${#lines[@]} -eq 0 ]; then
+        echo "No forwarding rules found."
         return
     fi
-
-    read -p "Enter the Forward Number to Delete: " INDEX
-
-    if ! [[ "$INDEX" =~ ^[0-9]+$ ]]; then
-        print_error "Invalid input. Please enter a valid number."
+    local index=1
+    declare -A rule_map
+    for line in "${lines[@]}"; do
+        local line_number=$(echo "$line" | cut -d ':' -f1)
+        local remark=$(sed -n "$((line_number + 1))p" /root/realm/config.toml | grep "^# Remark:" | cut -d ':' -f2 | xargs)
+        local listen=$(sed -n "$((line_number + 2))p" /root/realm/config.toml | cut -d '"' -f2)
+        local remote=$(sed -n "$((line_number + 3))p" /root/realm/config.toml | cut -d '"' -f2)
+        echo "${index}. Remark: ${remark:-None}"
+        echo "   Listen: ${listen}, Remote: ${remote}"
+        rule_map[$index]="$line_number"
+        ((index++))
+    done
+    read -rp "Enter the number to delete (Press Enter to return): " choice
+    [ -z "$choice" ] && { echo "Returning to main menu."; return; }
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -ge "$index" ]; then
+        echo "Invalid choice."
         return
     fi
-
-    # Extract the total number of endpoints
-    local TOTAL
-    TOTAL=$(grep -c '^\[\[endpoints\]\]$' "${CONFIG_FILE}" 2>/dev/null)
-
-    if (( INDEX < 1 || INDEX > TOTAL )); then
-        print_error "Invalid forward number. Use list command to see valid numbers."
-        return
+    local chosen_line=${rule_map[$choice]}
+    local next_line=$(awk "NR>$chosen_line && /^\[\[endpoints\]\]/{print NR; exit}" /root/realm/config.toml)
+    local end_line=${next_line:-$(wc -l < /root/realm/config.toml)}
+    end_line=$((end_line - 1))
+    sed -i "${chosen_line},${end_line}d" /root/realm/config.toml
+    sed -i '/^\s*$/d' /root/realm/config.toml
+    echo "Forwarding rule deleted."
+    # Manage service after deletion
+    if ! grep -q '^\[\[endpoints\]\]' /root/realm/config.toml; then
+        systemctl stop realm
+        systemctl disable realm
+        realm_status="Installed (No Forwards)"
+        realm_status_color="$GREEN"
+        echo -e "${RED}No forwarding rules left. Realm service has been stopped and disabled.${NC}"
+    else
+        systemctl restart realm
+        echo -e "${GREEN}Realm service restarted.${NC}"
     fi
-
-    # Use awk to delete the specified forward
-    print_info "Deleting forward number ${INDEX}..."
-
-    awk -v idx="$INDEX" '
-    BEGIN { count=0; }
-    /^\[\[endpoints\]\]$/ {
-        count++;
-        if (count == idx) {
-            skip=1;
-            next
-        }
-    }
-    {
-        if (skip && /^listen =/) {
-            skip=2
-            next
-        }
-        if (skip == 2 && (/^remote =/ || /^protocol =/ || /^ip_version =/)) {
-            next
-        }
-        if (skip == 2 && !(/^(remote|protocol|ip_version)/)) {
-            skip=0
-        }
-        print
-    }
-    ' "${CONFIG_FILE}" | ${SUDO} tee "${CONFIG_FILE}" > /dev/null
-
-    print_success "Deleted forward number ${INDEX}."
-
-    # Restart Realm service to apply changes
-    print_info "Restarting Realm service to apply changes..."
-    ${SUDO} systemctl restart realm
-
-    print_success "Realm service restarted."
 }
 
-# Show Help
-show_help() {
-    echo -e "${BOLD}${CYAN}Enhanced Realm Manager Script${RESET}"
-    echo "Usage: $0"
-    echo ""
-    echo "Provides an interactive menu to manage Realm forwards."
-    echo ""
-    echo "Commands:"
-    echo "  Run the script without arguments to display the menu."
-}
+# Check Realm installation at startup
+check_realm_installation
 
-# ================================
-#             Main
-# ================================
-
-# If script is called with arguments, show help
-if [[ $# -gt 0 ]]; then
-    show_help
-    exit 0
-fi
-
-# Show menu in a loop
+# Main Loop
 while true; do
     show_menu
-    read choice
-    case "$choice" in
-        1)
-            install_realm
-            ;;
-        2)
-            uninstall_realm
-            ;;
-        3)
-            add_forward
-            ;;
-        4)
-            list_forwards
-            ;;
-        5)
-            delete_forward
-            ;;
-        6)
-            print_info "Exiting Realm Manager. Goodbye!"
-            exit 0
-            ;;
-        *)
-            print_error "Invalid choice. Please select between 1-6."
-            ;;
+    read -rp "Select an option: " choice
+    case $choice in
+        1) add_forward ;;
+        2) show_all_conf ;;
+        3) delete_forward ;;
+        4) manage_realm_service ;;
+        5) uninstall_realm ;;
+        6) echo "Exiting script."; exit 0 ;;
+        *) echo -e "${RED}Invalid option: $choice${NC}" ;;
     esac
-    echo ""
+    read -n1 -r -p "Press any key to continue..."
 done
