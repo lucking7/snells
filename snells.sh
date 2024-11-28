@@ -1,7 +1,5 @@
 #!/bin/bash
 
-# SCP Foundation - Snell with Shadow-TLS Deployment Protocol Simplified
-
 # Define color codes
 red='\e[31m'
 green='\e[92m' 
@@ -98,8 +96,11 @@ find_unused_port() {
 
 # Function to check server IP (supports both IPv4 and IPv6)
 get_ip() {
-    ipv4=$(curl -s4 https://cloudflare.com/cdn-cgi/trace | grep -oP '(?<=ip=)[^,]*' || curl -s4 https://api.country.is | jq -r '.ip')
-    ipv6=$(curl -s6 https://cloudflare.com/cdn-cgi/trace | grep -oP '(?<=ip=)[^,]*' || curl -s6 https://api64.ipify.org)
+    trace_info_v4=$(curl -s4 https://cloudflare.com/cdn-cgi/trace)
+    trace_info_v6=$(curl -s6 https://cloudflare.com/cdn-cgi/trace)
+    ipv4=$(echo "$trace_info_v4" | grep -oP '(?<=ip=)[^\n]*')
+    ipv6=$(echo "$trace_info_v6" | grep -oP '(?<=ip=)[^\n]*')
+    colo=$(echo "$trace_info_v4" | grep -oP '(?<=colo=)[^\n]*')
 
     if [[ -n $ipv4 && -n $ipv6 ]]; then
         ip_type="both"
@@ -112,6 +113,12 @@ get_ip() {
     fi
 
     server_ip=${ipv4:-$ipv6}
+
+    if [[ -z $colo ]]; then
+        msg err "Unable to retrieve DC location." && exit 1
+    else
+        msg ok "DC Location: ${colo}"
+    fi
 }
 
 # Create systemd service file for Snell
@@ -232,14 +239,7 @@ config_shadow_tls() {
     read -rp "Enter password for Shadow-TLS (Leave it blank to generate a random one): " shadow_tls_password
     [[ -z ${shadow_tls_password} ]] && shadow_tls_password=$(generate_random_password) && echo "[INFO] Generated a random password for Shadow-TLS: $shadow_tls_password"
 
-    #msg ok "Shadow-TLS configuration established."
-    #echo -e "Proxy-Snells = snell, ${server_ip}, ${shadow_tls_port}, psk=${snell_psk}, version=4, shadow-tls-password=${shadow_tls_password}, shadow-tls-sni=${shadow_tls_tls_domain}, shadow-tls-version=3"
-    
-    if [[ -z ${snell_psk} ]]; then
-        echo -e "Proxy-STLS = ${server_ip}, ${shadow_tls_port}, shadow-tls-password=${shadow_tls_password}, shadow-tls-sni=${shadow_tls_tls_domain}, shadow-tls-version=3"
-    else
-        echo -e "Proxy-Snells = snell, ${server_ip}, ${shadow_tls_port}, psk=${snell_psk}, version=4, shadow-tls-password=${shadow_tls_password}, shadow-tls-sni=${shadow_tls_tls_domain}, shadow-tls-version=3"
-    fi
+    echo -e "${colo} = snell, ${server_ip}, ${shadow_tls_port}, psk=${snell_psk}, version=4, shadow-tls-password=${shadow_tls_password}, shadow-tls-sni=${shadow_tls_tls_domain}, shadow-tls-version=3"
     msg ok "Shadow-TLS configuration established."
 }
 
@@ -247,8 +247,7 @@ config_shadow_tls() {
 install() {
     echo "1. Install Snell and Shadow-TLS"
     echo "2. Install Snell only"
-    echo "3. Install Shadow-TLS only"
-    read -p "Select an option (1-3): " option
+    read -p "Select an option (1-2): " option
 
     case $option in
         1)
@@ -256,9 +255,6 @@ install() {
             ;;
         2)
             install_snell
-            ;;
-        3)
-            install_shadow_tls
             ;;
         *)
             msg err "Invalid option"
@@ -290,14 +286,24 @@ install_snell() {
     msg info "Downloading Snell..."
     mkdir -p "${snell_workspace}"
     cd "${snell_workspace}" || exit 1
+    
+    # Get latest Snell version from Surge manual
+    latest_version=$(curl -s https://manual.nssurge.com/others/snell.html | grep -oP 'snell-server-v\K[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+    if [ -z "$latest_version" ]; then
+        latest_version="4.1.1"  # Fallback version
+        msg warn "Failed to get latest version, using fallback version ${latest_version}"
+    fi
+    
     arch=$(uname -m)
     case $arch in
-    x86_64) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-amd64.zip" ;;
-    aarch64) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-aarch64.zip" ;;
-    armv7l) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-armv7l.zip" ;;
-    i386) snell_url="https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-i386.zip" ;;
+    x86_64) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-amd64.zip" ;;
+    aarch64) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-aarch64.zip" ;;
+    armv7l) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-armv7l.zip" ;;
+    i386) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-i386.zip" ;;
     *) msg err "Unsupported architecture: $arch" && exit 1 ;;
     esac
+
+    msg info "Downloading Snell version ${latest_version}..."
     wget -O snell-server.zip "${snell_url}"
     unzip -o snell-server.zip
     rm snell-server.zip
@@ -306,7 +312,7 @@ install_snell() {
     get_ip
     create_snell_systemd
     create_snell_conf
-    echo -e "Proxy-Snell = snell, ${server_ip}, $snell_port, psk=${snell_psk}, version=4"
+    echo -e "${colo} = snell, ${server_ip}, $snell_port, psk=${snell_psk}, version=4"
 }
 
 # Install Shadow-TLS only
@@ -340,8 +346,7 @@ install_shadow_tls() {
 uninstall() {
     echo "1. Uninstall Snell and Shadow-TLS"
     echo "2. Uninstall Snell only"
-    echo "3. Uninstall Shadow-TLS only"
-    read -p "Select an option (1-3): " option
+    read -p "Select an option (1-2): " option
 
     case $option in
         1)
@@ -349,9 +354,6 @@ uninstall() {
             ;;
         2)
             uninstall_snell
-            ;;
-        3)
-            uninstall_shadow_tls
             ;;
         *)
             msg err "Invalid option"
