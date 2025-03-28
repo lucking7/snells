@@ -96,8 +96,10 @@ find_unused_port() {
 
 # Function to check server IP (supports both IPv4 and IPv6)
 get_ip() {
-    trace_info_v4=$(curl -s4 https://cloudflare.com/cdn-cgi/trace)
-    trace_info_v6=$(curl -s6 https://cloudflare.com/cdn-cgi/trace)
+    # 为IPv4添加超时
+    trace_info_v4=$(curl -s4 --connect-timeout 5 https://cloudflare.com/cdn-cgi/trace)
+    # 为IPv6添加超时：--connect-timeout 5秒连接超时, --max-time 10秒总超时
+    trace_info_v6=$(curl -s6 --connect-timeout 5 --max-time 10 https://cloudflare.com/cdn-cgi/trace)
     ipv4=$(echo "$trace_info_v4" | grep -oP '(?<=ip=)[^\n]*')
     ipv6=$(echo "$trace_info_v6" | grep -oP '(?<=ip=)[^\n]*')
     colo=$(echo "$trace_info_v4" | grep -oP '(?<=colo=)[^\n]*')
@@ -106,6 +108,7 @@ get_ip() {
         ip_type="both"
     elif [[ -n $ipv4 ]]; then
         ip_type="ipv4"
+        msg info "IPv6 not available or detection timed out."
     elif [[ -n $ipv6 ]]; then
         ip_type="ipv6"
     else
@@ -115,7 +118,14 @@ get_ip() {
     server_ip=${ipv4:-$ipv6}
 
     if [[ -z $colo ]]; then
-        msg err "Unable to retrieve DC location." && exit 1
+        # 尝试从IPv6信息中获取colo
+        colo=$(echo "$trace_info_v6" | grep -oP '(?<=colo=)[^\n]*')
+        if [[ -z $colo ]]; then
+            msg warn "Unable to retrieve DC location, using default settings."
+            colo="unknown"
+        else
+            msg ok "DC Location: ${colo}"
+        fi
     else
         msg ok "DC Location: ${colo}"
     fi
