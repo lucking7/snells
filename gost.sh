@@ -30,69 +30,88 @@ show_loading() {
   echo -e "${GREEN}[OK]${PLAIN}"
 }
 
+# Service files directory
+SERVICE_DIR="/etc/systemd/system"
+CONFIG_DIR="/etc/gost"
+CONFIG_FILE="$CONFIG_DIR/config.yml"
+
 # Check and install necessary components
 check_and_install() {
-  local packages=("gost" "lsof" "curl" "grep" "yq" "jq")
-  local package_to_install
+  local packages=("gost" "lsof" "curl" "grep")
   for package in "${packages[@]}"; do
-    if ! command -v $package &>/dev/null; then
+    if ! command -v $package &>/dev/null && [ "$package" != "gost" ]; then
       echo -e "${YELLOW}Package ${BOLD}$package${PLAIN}${YELLOW} not found. Installing...${PLAIN}"
-      package_to_install=""
+      
+      # Detect package manager
+      if command -v apt-get &>/dev/null; then
+        PKG_MANAGER="apt-get"
+      elif command -v yum &>/dev/null; then
+        PKG_MANAGER="yum"
+      elif command -v dnf &>/dev/null; then
+        PKG_MANAGER="dnf"
+      else
+        PKG_MANAGER="apt-get"
+      fi
+      
       case $package in
       "gost")
         (bash <(curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh) --install) &
         ;;
-      "yq")
-        YQ_VERSION="latest"
-        YQ_BINARY="yq_linux_amd64"
-        YQ_URL=$(curl -s "https://api.github.com/repos/mikefarah/yq/releases/${YQ_VERSION}" | grep "browser_download_url.*${YQ_BINARY}" | cut -d '\"' -f 4 | head -n 1)
-        if [ -z "$YQ_URL" ]; then
-           echo -e "${RED}Could not find yq download URL. Trying apt...${PLAIN}"
-           package_to_install="yq"
-        else
-           echo -e "${YELLOW}Downloading yq from $YQ_URL...${PLAIN}"
-           (curl -L "$YQ_URL" -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq) &
-        fi
-        ;;
-      "jq")
-        package_to_install="jq"
-        ;;
       *)
-        package_to_install=$package
-        ;;
-      esac
-
-      if [ -n "$package_to_install" ]; then
-        if ! sudo apt-get update -y; then
+        if ! sudo $PKG_MANAGER update -y; then
           echo -e "${RED}Failed to update package list.${PLAIN}"
           continue
         fi
-        if ! sudo apt-get install $package_to_install -y; then
-          echo -e "${RED}Failed to install $package_to_install via apt. Please install it manually.${PLAIN}"
+        if ! sudo $PKG_MANAGER install $package -y; then
+          echo -e "${RED}Failed to install $package. Please install it manually.${PLAIN}"
           continue
         fi
-        show_loading $!
-      elif [[ "$package" == "yq" || "$package" == "gost" ]]; then
+        ;;
+      esac
       show_loading $!
-      fi
-
-      if command -v $package &>/dev/null; then
+      if command -v $package &>/dev/null || [ "$package" = "gost" ]; then
         echo -e "${GREEN}$package installed successfully.${PLAIN}"
       else
         echo -e "${RED}Failed to install $package. Please install it manually.${PLAIN}"
       fi
     fi
   done
+  
+  # Install gost if not already installed
+  if ! command -v gost &>/dev/null; then
+    echo -e "${YELLOW}Installing gost...${PLAIN}"
+    (bash <(curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh) --install) &
+    show_loading $!
+    if ! command -v gost &>/dev/null; then
+      echo -e "${RED}Failed to install gost. Please install it manually.${PLAIN}"
+    else
+      echo -e "${GREEN}gost installed successfully.${PLAIN}"
+    fi
+  fi
 
   # Ensure Gost config directory exists
-  sudo mkdir -p /etc/gost
+  sudo mkdir -p "$CONFIG_DIR"
   # Create empty config if it doesn't exist
-  if [ ! -f /etc/gost/config.yml ]; then
-    echo -e "${YELLOW}Creating initial GOST config file: /etc/gost/config.yml${PLAIN}"
-    sudo bash -c 'echo "services: []" > /etc/gost/config.yml'
-    # Optionally set permissions
-    # sudo chown <user>:<group> /etc/gost/config.yml
-    # sudo chmod 640 /etc/gost/config.yml
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo -e "${YELLOW}Creating initial GOST config file: $CONFIG_FILE${PLAIN}"
+    sudo bash -c "echo \"services:\" > \"$CONFIG_FILE\""
+  fi
+
+  # Check if the file format is correct
+  local first_line=$(head -n 1 "$CONFIG_FILE" 2>/dev/null)
+  if [ -z "$first_line" ] || [[ "$first_line" != "services:"* ]]; then
+    echo -e "${YELLOW}修复配置文件格式: $CONFIG_FILE${PLAIN}"
+    local temp_file=$(mktemp)
+    echo "services:" > "$temp_file"
+    if [ -s "$CONFIG_FILE" ]; then
+      if grep -q "^- name:" "$CONFIG_FILE"; then
+        cat "$CONFIG_FILE" | sed 's/^-/  -/' >> "$temp_file"
+      else
+        # File has some other content, preserve it
+        cat "$CONFIG_FILE" | grep -v "^services: \[\]" >> "$temp_file"
+      fi
+    fi
+    sudo mv "$temp_file" "$CONFIG_FILE"
   fi
 
   # Ensure the central gost service exists and is enabled
@@ -113,7 +132,7 @@ After=network.target network-online.target nss-lookup.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/gost -C /etc/gost/config.yml
+ExecStart=/usr/local/bin/gost -C $CONFIG_FILE
 Restart=always
 RestartSec=5
 LimitNOFILE=65535
@@ -140,46 +159,16 @@ EOF"
   fi
 }
 
-# Service files directory
-SERVICE_DIR="/etc/systemd/system"
-
-# Function to delete a service by number
-delete_service_by_number() {
-  local service_number=$1
-  local counter=1
-  for service_file in "$SERVICE_DIR"/gost-forward-*.service; do
-    if [ -e "$service_file" ]; then
-      if [ $counter -eq $service_number ]; then
-        service_name=$(basename "$service_file" .service)
-        echo -e -n "Are you sure you want to delete the service ${BOLD}$service_name${PLAIN}? (${GREEN}Y${PLAIN}/${RED}N${PLAIN}): "
-        read confirm
-        if [[ $confirm == [Yy]* ]]; then
-          systemctl stop "$service_name"
-          systemctl disable "$service_name"
-          rm "$service_file"
-          systemctl daemon-reload
-          echo -e "${GREEN}Deleted service: $service_name${PLAIN}"
-        else
-          echo -e "${YELLOW}Deletion cancelled.${PLAIN}"
-        fi
-        return
-      fi
-      ((counter++))
-    fi
-  done
-  echo -e "${RED}Service with the specified number not found.${PLAIN}"
-}
-
-# Function to find an available port
-find_free_port() {
-  local port
-  while true; do
-    port=$(shuf -i 10000-65000 -n 1)
-    if ! lsof -iTCP -sTCP:LISTEN | grep -q ":$port "; then
-      echo $port
-      return
-    fi
-  done
+# Reload the central GOST service
+reload_gost_service() {
+  echo -e "${YELLOW}Reloading GOST service...${PLAIN}"
+  if systemctl is-active --quiet gost; then
+    sudo systemctl restart gost
+    echo -e "${GREEN}GOST service restarted successfully.${PLAIN}"
+  else
+    sudo systemctl start gost
+    echo -e "${GREEN}GOST service started.${PLAIN}"
+  fi
 }
 
 # Function to validate IP address (basic check)
@@ -240,354 +229,605 @@ parse_ports() {
   echo "${parsed_ports[@]}" # Return space-separated list
 }
 
-# Function to create a forwarding service using config file
+# Function to find an available port
+find_free_port() {
+  local port
+  while true; do
+    port=$(shuf -i 10000-65000 -n 1)
+    if ! lsof -iTCP -sTCP:LISTEN | grep -q ":$port "; then
+      echo $port
+      return
+    fi
+  done
+}
+
+# Function to create a forwarding service using direct writing to config file
 create_forward_service() {
-  echo -e "${CYAN}=== Create new port forwarding rules (using /etc/gost/config.yml) ===${PLAIN}"
+  echo -e "${CYAN}=== 创建新的端口转发规则 ===${PLAIN}"
 
   # Get protocol type
-  echo -e "${CYAN}Select protocol type:${PLAIN}"
-  echo -e "${GREEN}1.${PLAIN} TCP ${YELLOW}(default)${PLAIN}"
+  echo -e "${CYAN}选择协议类型:${PLAIN}"
+  echo -e "${GREEN}1.${PLAIN} TCP"
   echo -e "${GREEN}2.${PLAIN} UDP"
-  read -p "Select [1-2] (default: 1): " protocol_choice
-  local protocol="tcp"
-  local listener_type="tcp"
-  local handler_type="tcp" # Simple forward handler
-  local dialer_type="tcp"  # Connect to target via TCP
-  if [ "$protocol_choice" == "2" ]; then
-      protocol="udp"
-      listener_type="udp"
-      handler_type="udp" # Simple forward handler
-      dialer_type="udp"  # Connect to target via UDP
-  fi
-  echo -e "${YELLOW}Selected protocol: ${BOLD}${protocol^^}${PLAIN}"
+  echo -e "${GREEN}3.${PLAIN} TCP+UDP ${YELLOW}(默认)${PLAIN}"
+  read -p "选择 [1-3] (默认: 3): " protocol_choice
+  
+  local protocol="tcp+udp"
+  case $protocol_choice in
+    1) protocol="tcp" ;;
+    2) protocol="udp" ;;
+    *) protocol="tcp+udp" ;; # Default to both
+  esac
+  
+  echo -e "${YELLOW}选择的协议: ${BOLD}${protocol^^}${PLAIN}"
 
   # Get port information
-  echo -e "${YELLOW}Enter local port(s). Examples: ${WHITE}8080${PLAIN}, ${WHITE}8080,8081${PLAIN}, ${WHITE}8080-8090${PLAIN}"
-  read -p "Local port(s): " local_ports_input
-  read -p "Target IP: " target_ip
-  read -p "Target port: " target_port_input
+  echo -e "${YELLOW}输入本地端口。例如: ${WHITE}8080${PLAIN}, ${WHITE}8080,8081${PLAIN}, ${WHITE}8080-8090${PLAIN}"
+  echo -e "${YELLOW}(留空自动分配随机端口)${PLAIN}"
+  read -p "本地端口: " local_ports_input
+  
+  # If empty, assign a random port
+  if [ -z "$local_ports_input" ]; then
+    local_port=$(find_free_port)
+    local_ports_input="$local_port"
+    echo -e "${YELLOW}已分配随机端口: ${BOLD}$local_port${PLAIN}"
+  fi
+  
+  read -p "目标IP: " target_ip
+  read -p "目标端口: " target_port_input
 
   # --- Input Validation ---
+  if [ -z "$target_ip" ]; then
+      echo -e "${RED}目标IP不能为空${PLAIN}"
+      return 1
+  fi
+  
   if ! validate_ip "$target_ip"; then
-      echo -e "${RED}Invalid target IP address format: $target_ip${PLAIN}"
+      echo -e "${RED}无效的目标IP地址: $target_ip${PLAIN}"
       return 1
   fi
+  
+  if [ -z "$target_port_input" ]; then
+      echo -e "${RED}目标端口不能为空${PLAIN}"
+      return 1
+  fi
+  
   if ! validate_port "$target_port_input"; then
-      echo -e "${RED}Invalid target port: $target_port_input. Must be between 1 and 65535.${PLAIN}"
+      echo -e "${RED}无效的目标端口: $target_port_input. 必须在1到65535之间.${PLAIN}"
       return 1
   fi
+  
   local parsed_local_ports
   parsed_local_ports=$(parse_ports "$local_ports_input")
   if [ $? -ne 0 ]; then
-      echo -e "${RED}Failed to parse local ports. Please check the format and values.${PLAIN}"
+      echo -e "${RED}解析本地端口失败。请检查格式和值。${PLAIN}"
       return 1
   fi
-   if [ -z "$parsed_local_ports" ]; then
-    echo -e "${RED}No valid local ports specified.${PLAIN}"
+  
+  if [ -z "$parsed_local_ports" ]; then
+    echo -e "${RED}没有指定有效的本地端口。${PLAIN}"
     return 1
   fi
   # --- End Validation ---
 
-  local target_address_config="$target_ip"
-  # GOST config doesn't need brackets for IPv6 node addresses
-  # if [[ $target_ip == *:* ]]; then target_address_config="$target_ip"; fi # No change needed
+  # Ensure config directory and file exist
+  sudo mkdir -p "$CONFIG_DIR"
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo -e "${YELLOW}创建基础配置文件: $CONFIG_FILE${PLAIN}"
+    sudo bash -c "echo \"services:\" > \"$CONFIG_FILE\""
+  fi
 
-  local config_file="/etc/gost/config.yml"
-  local changes_made=0
-  local backup_file="${config_file}.bak.$(date +%Y%m%d%H%M%S)"
-
-  echo -e "${YELLOW}Backing up current config to $backup_file...${PLAIN}"
-  sudo cp "$config_file" "$backup_file" || { echo -e "${RED}Failed to create backup. Aborting.${PLAIN}"; return 1; }
-
-  echo -e "${YELLOW}Adding services to $config_file...${PLAIN}"
-
-  for local_port in $parsed_local_ports; do
-      local safe_target_ip=${target_ip//[^a-zA-Z0-9.-]/_} # Sanitize for name
-      local service_name="${protocol}-fwd-${local_port}-to-${safe_target_ip}-${target_port_input}"
-      local listen_addr=":${local_port}" # Listen on all interfaces by default
-
-      echo -e "  ${CYAN}Processing: ${protocol^^} Local ${WHITE}$listen_addr${PLAIN} -> Target ${WHITE}$target_ip:$target_port_input${PLAIN} (Service: ${BOLD}$service_name${PLAIN})"
-
-      # Check if service with the same name OR same listener address/protocol already exists
-      if sudo yq e ".services[] | select(.name == \"$service_name\")" "$config_file" | grep -q "name: $service_name"; then
-          echo -e "  ${YELLOW}Skipping: Service name '$service_name' already exists.${PLAIN}"
-          continue
-      fi
-      # Check for listener conflict (same addr and listener type)
-      # Note: GOST might handle multiple services on the same UDP port, but good practice to check
-      if sudo yq e ".services[] | select(.addr == \"$listen_addr\" and .listener.type == \"$listener_type\")" "$config_file" | grep -q "addr: $listen_addr"; then
-          echo -e "  ${YELLOW}Warning: Another service might be listening on $protocol/$listen_addr. Skipping addition of '$service_name'. Check config manually.${PLAIN}"
-          continue
-      fi
-
-
-      # Create the service YAML block as a string
-      local service_yaml
-      # Use explicit listener and dialer types matching the protocol
-      service_yaml=$(cat <<EOF
-- name: $service_name
-  addr: "$listen_addr"
-  listener:
-    type: $listener_type
-    # metadata: # Add listener specific options if needed
-  handler:
-    type: $handler_type # Use basic handler matching protocol
-    retries: 0
-  forwarder:
-    nodes:
-    - name: target-${protocol}-${local_port}-${target_port_input} # Node name
-      addr: "$target_address_config:$target_port_input" # Target address
-      connector: # Explicit connector needed for forwarding
-         type: forward
-      dialer: # Explicit dialer type
-         type: $dialer_type
-EOF
-)
-      # Use yq to add the service block
-      if sudo yq eval ".services += [$(echo "$service_yaml" | yq eval -o=json - | sed 's/^- //')] | ... style=''" -i "$config_file"; then
-          echo -e "  ${GREEN}Successfully added service '$service_name' to $config_file${PLAIN}"
-          changes_made=1
+  # Check if the file is empty or doesn't start with services:
+  local first_line=$(head -n 1 "$CONFIG_FILE")
+  if [ -z "$first_line" ] || [[ "$first_line" != "services:"* ]]; then
+    echo -e "${YELLOW}修复配置文件格式: $CONFIG_FILE${PLAIN}"
+    # Create a temporary file with proper format
+    local temp_file=$(mktemp)
+    echo "services:" > "$temp_file"
+    # If there's existing content that doesn't start with services:, append it properly
+    if [ -s "$CONFIG_FILE" ]; then
+      if [[ "$first_line" == "- name:"* ]]; then
+        # File already has service entries but missing the services: header
+        cat "$CONFIG_FILE" | sed 's/^-/  -/' >> "$temp_file"
       else
-          echo -e "  ${RED}Error adding service '$service_name' using yq. Restoring backup.${PLAIN}"
-          sudo mv "$backup_file" "$config_file" # Attempt to restore backup
-          return 1 # Abort further additions on error
+        # File has some other content, preserve it with proper indentation
+        cat "$CONFIG_FILE" >> "$temp_file"
       fi
+    fi
+    sudo mv "$temp_file" "$CONFIG_FILE"
+  fi
+
+  # Backup the existing config
+  local backup_file="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+  echo -e "${YELLOW}备份当前配置到 $backup_file...${PLAIN}"
+  sudo cp "$CONFIG_FILE" "$backup_file" || { echo -e "${RED}创建备份失败。中止操作。${PLAIN}"; return 1; }
+
+  echo -e "${YELLOW}添加服务到 $CONFIG_FILE...${PLAIN}"
+
+  # Process each local port
+  local changes_made=0
+  for local_port in $parsed_local_ports; do
+    # Create unique service name for each port (shortened name for better display)
+    local short_target="${target_ip##*.}"
+    if [ -z "$short_target" ]; then
+      short_target="${target_ip}"
+    fi
+    
+    # Create separate entries for TCP and UDP if needed
+    if [ "$protocol" = "tcp" ] || [ "$protocol" = "tcp+udp" ]; then
+      local tcp_service_name="tcp-${local_port}-to-${short_target}-${target_port_input}"
+      echo -e "  ${CYAN}处理: TCP 本地 ${WHITE}:$local_port${PLAIN} -> 目标 ${WHITE}$target_ip:$target_port_input${PLAIN}"
+      
+      # Add TCP service with proper indentation
+      sudo bash -c "cat >> \"$CONFIG_FILE\" << EOF
+  - name: $tcp_service_name
+    addr: ':$local_port'
+    handler:
+      type: tcp
+    listener:
+      type: tcp
+    forwarder:
+      nodes:
+      - name: target-tcp-$local_port-$target_port_input
+        addr: '$target_ip:$target_port_input'
+        connector:
+          type: forward
+        dialer:
+          type: tcp
+EOF"
+      changes_made=1
+    fi
+    
+    if [ "$protocol" = "udp" ] || [ "$protocol" = "tcp+udp" ]; then
+      local udp_service_name="udp-${local_port}-to-${short_target}-${target_port_input}"
+      echo -e "  ${CYAN}处理: UDP 本地 ${WHITE}:$local_port${PLAIN} -> 目标 ${WHITE}$target_ip:$target_port_input${PLAIN}"
+      
+      # Add UDP service with proper indentation
+      sudo bash -c "cat >> \"$CONFIG_FILE\" << EOF
+  - name: $udp_service_name
+    addr: ':$local_port'
+    handler:
+      type: udp
+    listener:
+      type: udp
+    forwarder:
+      nodes:
+      - name: target-udp-$local_port-$target_port_input
+        addr: '$target_ip:$target_port_input'
+        connector:
+          type: forward
+        dialer:
+          type: udp
+EOF"
+      changes_made=1
+    fi
   done
 
   # Reload gost service if changes were made
   if [ $changes_made -eq 1 ]; then
     reload_gost_service
+    echo -e "${GREEN}转发规则已创建并应用${PLAIN}"
   else
-    echo -e "${YELLOW}No new services were added (possibly due to existing names/listeners).${PLAIN}"
+    echo -e "${YELLOW}没有添加新服务（可能是由于服务名称/监听器已存在）。${PLAIN}"
     # Remove unused backup if no changes made
     sudo rm "$backup_file"
   fi
-
-  echo -e "${GREEN}Forwarding rule creation process finished.${PLAIN}"
 }
 
-# Function to list existing forwarding services from config file
+# Function to list existing forwarding services with custom parsing
 list_forward_services() {
-  echo -e "${CYAN}=== Forwarding Rules from /etc/gost/config.yml ===${PLAIN}"
-  local config_file="/etc/gost/config.yml"
-  # ... (status check remains the same) ...
-  echo -e "Central GOST Service Status: ${central_service_status}"
-  echo "----------------------------------------------------------------------------------------------------" # Adjusted width
-
-  # Extract more info: name, addr, listener type (as protocol), target address
-  local services_jsonl
-  if ! services_jsonl=$(sudo yq e '.services[] | {"index": index, "name": .name, "addr": .addr, "protocol": (.listener.type // "tcp"), "target_addr": .forwarder.nodes[0].addr}' -o json "$config_file"); then
-      echo -e "${RED}Error reading or parsing $config_file with yq.${PLAIN}"
-      return 1
+  echo -e "${CYAN}=== 转发规则列表 ===${PLAIN}"
+  
+  # Check if central service is running
+  if systemctl is-active --quiet gost; then
+    central_service_status="${GREEN}运行中${PLAIN}"
+  else
+    central_service_status="${RED}已停止${PLAIN}"
   fi
+  
+  echo -e "中央GOST服务状态: ${central_service_status}"
+  echo "----------------------------------------------------------------------------------------------------"
 
-  if [ -z "$services_jsonl" ]; then
-      echo -e "${YELLOW}No forwarding services found in $config_file.${PLAIN}"
-      return 0
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo -e "${YELLOW}配置文件不存在: $CONFIG_FILE${PLAIN}"
+    return 0
   fi
-
-  # Print header - Added Protocol
-  printf "%-5s %-35s %-10s %-15s %-20s %-15s\\n" "No." "Service Name" "Protocol" "Local Addr" "Target Addr" "Target Port"
-  echo "----------------------------------------------------------------------------------------------------" # Adjusted width
-
-  local counter=1
-  while IFS= read -r line; do
-    local service_name=$(echo "$line" | jq -r '.name')
-    local local_addr=$(echo "$line" | jq -r '.addr')
-    local protocol=$(echo "$line" | jq -r '.protocol | ascii_upcase') # Show protocol (uppercase)
-    local target_full_addr=$(echo "$line" | jq -r '.target_addr')
-    local target_address
-    local target_port
-    # ... (target address/port parsing remains the same) ...
-    if [[ "$target_full_addr" == \[* ]]; then
-        target_address=$(echo "$target_full_addr" | sed -E 's/\\[(.*)\\]:([0-9]+)/\\1/')
-        target_port=$(echo "$target_full_addr" | sed -E 's/\\[(.*)\\]:([0-9]+)/\\2/')
-    else
-        target_address=$(echo "$target_full_addr" | cut -d: -f1)
-        target_port=$(echo "$target_full_addr" | cut -d: -f2)
+  
+  # Check if config file has proper format
+  local first_line=$(head -n 1 "$CONFIG_FILE")
+  if [ -z "$first_line" ] || [[ "$first_line" != "services:"* ]]; then
+    echo -e "${YELLOW}配置文件格式不正确，尝试修复...${PLAIN}"
+    local temp_file=$(mktemp)
+    echo "services:" > "$temp_file"
+    if [ -s "$CONFIG_FILE" ]; then
+      if grep -q "^- name:" "$CONFIG_FILE"; then
+        cat "$CONFIG_FILE" | sed 's/^-/  -/' >> "$temp_file"
+      else
+        cat "$CONFIG_FILE" >> "$temp_file"
+      fi
     fi
-
-    # Adjusted printf format
-    printf "%-5s %-35s %-10s %-15s %-20s %-15s\\n" \
-      "$counter" \
-      "$service_name" \
-      "$protocol" \
-      "$local_addr" \
-      "$target_address" \
-      "$target_port"
-
-    ((counter++))
-  done <<< "$services_jsonl"
-
-  echo "----------------------------------------------------------------------------------------------------" # Adjusted width
+    sudo mv "$temp_file" "$CONFIG_FILE"
+    echo -e "${GREEN}配置文件已修复${PLAIN}"
+  fi
+  
+  # Read the YAML file directly using grep and awk to extract services
+  local services=$(grep -E "^  - name:" "$CONFIG_FILE")
+  if [ -z "$services" ]; then
+    echo -e "${YELLOW}在 $CONFIG_FILE 中没有找到转发服务。${PLAIN}"
+    return 0
+  fi
+  
+  # Print header
+  printf "%-5s %-25s %-10s %-15s %-20s %-15s\\n" "编号" "服务名称" "协议" "本地地址" "目标地址" "目标端口"
+  echo "----------------------------------------------------------------------------------------------------"
+  
+  local counter=1
+  local current_service=""
+  local current_protocol=""
+  local current_addr=""
+  local current_target_addr=""
+  
+  # Parse the YAML file line by line
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^\ \ -\ name:\ (.*) ]]; then
+      # New service found
+      current_service="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^\ \ \ \ addr:\ \'?(.*?)\'? ]]; then
+      # Local address
+      current_addr="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ \ \ \ \ \ \ type:\ (tcp|udp) ]]; then
+      # Protocol (first match in the service is the handler type)
+      if [ -z "$current_protocol" ]; then
+        current_protocol="${BASH_REMATCH[1]}"
+      fi
+    elif [[ "$line" =~ \ \ \ \ \ \ \ \ addr:\ \'?(.*?)\'? ]]; then
+      # Target address
+      current_target_addr="${BASH_REMATCH[1]}"
+      
+      # Extract target IP and port
+      local target_ip
+      local target_port
+      
+      if [[ "$current_target_addr" == *":"* ]]; then
+        target_ip=$(echo "$current_target_addr" | cut -d':' -f1)
+        target_port=$(echo "$current_target_addr" | cut -d':' -f2)
+      else
+        target_ip="$current_target_addr"
+        target_port="未知"
+      fi
+      
+      # Shorten display of service name to avoid overflow
+      local display_name="$current_service"
+      if [ ${#display_name} -gt 25 ]; then
+        display_name="${display_name:0:22}..."
+      fi
+      
+      # If we have all the information, print the service details
+      if [ -n "$current_service" ] && [ -n "$current_protocol" ] && [ -n "$current_addr" ] && [ -n "$current_target_addr" ]; then
+        printf "%-5s %-25s %-10s %-15s %-20s %-15s\\n" \
+          "$counter" \
+          "$display_name" \
+          "${current_protocol^^}" \
+          "$current_addr" \
+          "$target_ip" \
+          "$target_port"
+        
+        # Reset for next service
+        current_service=""
+        current_protocol=""
+        current_addr=""
+        current_target_addr=""
+        
+        ((counter++))
+      fi
+    fi
+  done < "$CONFIG_FILE"
+  
+  echo "----------------------------------------------------------------------------------------------------"
   return $((counter - 1))
+}
+
+# Function to delete a service by number
+delete_service_by_number() {
+  local service_number=$1
+  
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo -e "${RED}配置文件不存在: $CONFIG_FILE${PLAIN}"
+    return 1
+  fi
+  
+  # List all services
+  local services=($(grep -n "^  - name:" "$CONFIG_FILE" | cut -d':' -f1))
+  local service_count=${#services[@]}
+  
+  if [ $service_count -eq 0 ]; then
+    echo -e "${RED}没有找到服务。${PLAIN}"
+    return 1
+  fi
+  
+  if [ $service_number -le 0 ] || [ $service_number -gt $service_count ]; then
+    echo -e "${RED}无效的服务编号: $service_number${PLAIN}"
+    return 1
+  fi
+  
+  # Get the service name
+  local service_line=${services[$((service_number-1))]}
+  local service_name=$(sed -n "${service_line}p" "$CONFIG_FILE" | awk '{print $3}')
+  
+  echo -e -n "确定要删除服务 ${BOLD}$service_name${PLAIN}? (${GREEN}Y${PLAIN}/${RED}N${PLAIN}): "
+  read confirm
+  
+  if [[ $confirm == [Yy]* ]]; then
+    # Find the start and end lines of the service
+    local end_line
+    
+    if [ $service_number -eq $service_count ]; then
+      # Last service, use end of file
+      end_line=$(wc -l < "$CONFIG_FILE")
+    else
+      # Not last service, use line before next service
+      end_line=$((${services[$service_number]}-1))
+    fi
+    
+    # Create backup
+    local backup_file="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+    echo -e "${YELLOW}备份当前配置到 $backup_file...${PLAIN}"
+    sudo cp "$CONFIG_FILE" "$backup_file" || { echo -e "${RED}创建备份失败。中止操作。${PLAIN}"; return 1; }
+    
+    # Create a temporary file with the service removed
+    local temp_file=$(mktemp)
+    
+    # Keep lines before service
+    if [ $service_line -gt 1 ]; then
+      sed -n "1,$((service_line-1))p" "$CONFIG_FILE" > "$temp_file"
+    fi
+    
+    # Keep lines after service
+    if [ $end_line -lt $(wc -l < "$CONFIG_FILE") ]; then
+      sed -n "$((end_line+1)),\$p" "$CONFIG_FILE" >> "$temp_file"
+    fi
+    
+    # Replace original file with temporary file
+    sudo mv "$temp_file" "$CONFIG_FILE"
+    
+    # Reload service
+    reload_gost_service
+    
+    echo -e "${GREEN}服务 $service_name 已成功删除${PLAIN}"
+  else
+    echo -e "${YELLOW}取消删除。${PLAIN}"
+  fi
+}
+
+# Function to edit an existing service
+edit_forward_service() {
+  local service_number=$1
+  
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo -e "${RED}配置文件不存在: $CONFIG_FILE${PLAIN}"
+    return 1
+  fi
+  
+  # List all services
+  local services=($(grep -n "^  - name:" "$CONFIG_FILE" | cut -d':' -f1))
+  local service_count=${#services[@]}
+  
+  if [ $service_count -eq 0 ]; then
+    echo -e "${RED}没有找到服务。${PLAIN}"
+    return 1
+  fi
+  
+  if [ $service_number -le 0 ] || [ $service_number -gt $service_count ]; then
+    echo -e "${RED}无效的服务编号: $service_number${PLAIN}"
+    return 1
+  fi
+  
+  # Get the service name
+  local service_line=${services[$((service_number-1))]}
+  local service_name=$(sed -n "${service_line}p" "$CONFIG_FILE" | awk '{print $3}')
+  
+  # Find information about the service
+  local start_line=$service_line
+  local end_line
+  
+  if [ $service_number -eq $service_count ]; then
+    # Last service, use end of file
+    end_line=$(wc -l < "$CONFIG_FILE")
+  else
+    # Not last service, use line before next service
+    end_line=$((${services[$service_number]}-1))
+  fi
+  
+  # Extract current values
+  local service_block=$(sed -n "${start_line},${end_line}p" "$CONFIG_FILE")
+  local current_addr=$(echo "$service_block" | grep "addr:" | head -n 1 | awk '{print $2}' | tr -d "':")
+  local current_protocol=$(echo "$service_block" | grep -A 1 "handler:" | grep "type:" | awk '{print $2}')
+  local current_target_addr=$(echo "$service_block" | grep -A 3 "nodes:" | grep "addr:" | awk '{print $2}' | tr -d "'")
+  
+  local current_target_ip
+  local current_target_port
+  
+  if [[ "$current_target_addr" == *":"* ]]; then
+    current_target_ip=$(echo "$current_target_addr" | cut -d':' -f1)
+    current_target_port=$(echo "$current_target_addr" | cut -d':' -f2)
+  else
+    current_target_ip="$current_target_addr"
+    current_target_port="未知"
+  fi
+  
+  echo -e "${CYAN}--- 编辑规则: $service_name ---${PLAIN}"
+  echo -e "  协议: ${current_protocol^^}"
+  echo -e "  本地地址: $current_addr"
+  echo -e "  当前目标IP: $current_target_ip"
+  echo -e "  当前目标端口: $current_target_port"
+  echo -e "---------------------------------------"
+  echo -e "${YELLOW}输入新值（留空保持当前值）:${PLAIN}"
+  
+  # Get new target IP
+  read -p "新目标IP [$current_target_ip]: " new_target_ip
+  if [ -z "$new_target_ip" ]; then
+    new_target_ip=$current_target_ip
+  elif ! validate_ip "$new_target_ip"; then
+    echo -e "${RED}无效的目标IP地址: $new_target_ip${PLAIN}"
+    return 1
+  fi
+  
+  # Get new target port
+  read -p "新目标端口 [$current_target_port]: " new_target_port
+  if [ -z "$new_target_port" ]; then
+    new_target_port=$current_target_port
+  elif ! validate_port "$new_target_port"; then
+    echo -e "${RED}无效的目标端口: $new_target_port. 必须在1到65535之间.${PLAIN}"
+    return 1
+  fi
+  
+  # Check if changes were actually made
+  if [ "$new_target_ip" == "$current_target_ip" ] && [ "$new_target_port" == "$current_target_port" ]; then
+    echo -e "${YELLOW}没有检测到变更。编辑取消。${PLAIN}"
+    return 0
+  fi
+  
+  # Prepare the new target address string
+  local new_target_full_addr="$new_target_ip:$new_target_port"
+  
+  echo -e -n "应用更改? (目标: ${BOLD}$new_target_full_addr${PLAIN}) (${GREEN}Y${PLAIN}/${RED}N${PLAIN}): "
+  read confirm
+  
+  if [[ $confirm == [Yy]* ]]; then
+    # Create backup
+    local backup_file="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+    echo -e "${YELLOW}备份当前配置到 $backup_file...${PLAIN}"
+    sudo cp "$CONFIG_FILE" "$backup_file" || { echo -e "${RED}创建备份失败。中止操作。${PLAIN}"; return 1; }
+    
+    # Create a temporary file
+    local temp_file=$(mktemp)
+    
+    # Keep lines before service
+    if [ $start_line -gt 1 ]; then
+      sed -n "1,$((start_line-1))p" "$CONFIG_FILE" > "$temp_file"
+    fi
+    
+    # Process the service block and update the target address
+    sed -n "${start_line},${end_line}p" "$CONFIG_FILE" | sed "s|addr: '$current_target_addr'|addr: '$new_target_full_addr'|g" >> "$temp_file"
+    
+    # Keep lines after service
+    if [ $end_line -lt $(wc -l < "$CONFIG_FILE") ]; then
+      sed -n "$((end_line+1)),\$p" "$CONFIG_FILE" >> "$temp_file"
+    fi
+    
+    # Replace original file with temporary file
+    sudo mv "$temp_file" "$CONFIG_FILE"
+    
+    # Reload service
+    reload_gost_service
+    
+    echo -e "${GREEN}服务 $service_name 已成功更新${PLAIN}"
+  else
+    echo -e "${YELLOW}取消编辑。${PLAIN}"
+  fi
 }
 
 # Function to manage existing forwarding services
 manage_forward_services() {
   while true; do
-    echo -e "\\n${CYAN}=== Manage Forwarding Rules (/etc/gost/config.yml) ===${PLAIN}"
-    echo -e "${GREEN}1.${PLAIN} List rules"
-    echo -e "${GREEN}2.${PLAIN} Add new rule" # Renamed for clarity
-    echo -e "${GREEN}3.${PLAIN} Edit rule (by number)"
-    echo -e "${GREEN}4.${PLAIN} Delete rule (by number)"
-    echo -e "${GREEN}5.${PLAIN} Return to main menu"
-    read -p "$(echo -e ${YELLOW}"Please select [1-5]: "${PLAIN})" choice
+    echo -e "\\n${CYAN}=== 管理转发规则 ===${PLAIN}"
+    echo -e "${GREEN}1.${PLAIN} 列出规则"
+    echo -e "${GREEN}2.${PLAIN} 添加新规则"
+    echo -e "${GREEN}3.${PLAIN} 编辑规则(按编号)"
+    echo -e "${GREEN}4.${PLAIN} 删除规则(按编号)"
+    echo -e "${GREEN}5.${PLAIN} 返回主菜单"
+    read -p "$(echo -e ${YELLOW}"请选择 [1-5]: "${PLAIN})" choice
 
     case $choice in
     1) list_forward_services ;;
     2) create_forward_service ;; # Direct call to add function
     3)
-      # Edit Rule - Placeholder for now
       list_forward_services
       local service_count=$?
       if [ $service_count -gt 0 ]; then
-        read -p "Enter the rule number to edit: " service_number_to_edit
-        edit_forward_service "$service_number_to_edit" # Call edit function
-      elif [ $service_count -eq 0 ]; then
-          sleep 1
+        read -p "输入要编辑的规则编号: " service_number_to_edit
+        edit_forward_service "$service_number_to_edit"
       else
-          sleep 1
+        echo -e "${YELLOW}没有可编辑的规则。${PLAIN}"
+        sleep 1
       fi
       ;;
     4)
-      # Delete Rule
       list_forward_services
       local service_count=$?
       if [ $service_count -gt 0 ]; then
-          read -p "Enter the rule number to delete: " service_number_to_delete
-          delete_service_by_number "$service_number_to_delete"
-      elif [ $service_count -eq 0 ]; then
-          sleep 1
+        read -p "输入要删除的规则编号: " service_number_to_delete
+        delete_service_by_number "$service_number_to_delete"
       else
-          sleep 1
+        echo -e "${YELLOW}没有可删除的规则。${PLAIN}"
+        sleep 1
       fi
       ;;
     5) return ;;
-    *) echo -e "${RED}Invalid selection. Please try again.${PLAIN}" ;;
+    *) echo -e "${RED}无效的选择。请重试。${PLAIN}" ;;
     esac
   done
 }
 
-# Function to edit an existing forwarding service rule
-edit_forward_service() {
-    local service_number=$1
-    local config_file="/etc/gost/config.yml"
-
-    # Validate input number
-    if ! [[ "$service_number" =~ ^[1-9][0-9]*$ ]]; then
-        echo -e "${RED}Invalid number entered.${PLAIN}"
-        return 1
-    fi
-
-    # Get the current service details using yq (index is 0-based)
-    local service_index=$(($service_number - 1))
-    local current_service_json
-    if ! current_service_json=$(sudo yq e ".services[$service_index]" -o json "$config_file"); then
-        echo -e "${RED}Service with number $service_number not found or error reading config.${PLAIN}"
-        return 1
-    fi
-
-    # Extract current values using jq
-    local service_name=$(echo "$current_service_json" | jq -r '.name')
-    local current_local_addr=$(echo "$current_service_json" | jq -r '.addr')
-    local current_protocol=$(echo "$current_service_json" | jq -r '.listener.type // "tcp"')
-    local current_target_full_addr=$(echo "$current_service_json" | jq -r '.forwarder.nodes[0].addr')
-    local current_target_ip
-    local current_target_port
-
-    # Parse current target address/port
-    if [[ "$current_target_full_addr" == \\[.* ]]; then
-        current_target_ip=$(echo "$current_target_full_addr" | sed -E 's/\\[(.*)\\]:([0-9]+)/\\1/')
-        current_target_port=$(echo "$current_target_full_addr" | sed -E 's/\\[(.*)\\]:([0-9]+)/\\2/')
-    else
-        current_target_ip=$(echo "$current_target_full_addr" | cut -d: -f1)
-        current_target_port=$(echo "$current_target_full_addr" | cut -d: -f2)
-    fi
-
-    echo -e "${CYAN}--- Editing Rule: $service_name ---${PLAIN}"
-    echo -e "  Protocol: ${current_protocol^^}"
-    echo -e "  Local Address: $current_local_addr"
-    echo -e "  Current Target IP: $current_target_ip"
-    echo -e "  Current Target Port: $current_target_port"
-    echo -e "---------------------------------------"
-    echo -e "${YELLOW}Enter new values (leave blank to keep current value):${PLAIN}"
-
-    # Get new target IP
-    read -p "New Target IP [$current_target_ip]: " new_target_ip
-    if [ -z "$new_target_ip" ]; then
-        new_target_ip=$current_target_ip
-    elif ! validate_ip "$new_target_ip"; then
-        echo -e "${RED}Invalid target IP address format: $new_target_ip${PLAIN}"
-        return 1
-    fi
-
-    # Get new target port
-    read -p "New Target Port [$current_target_port]: " new_target_port
-    if [ -z "$new_target_port" ]; then
-        new_target_port=$current_target_port
-    elif ! validate_port "$new_target_port"; then
-        echo -e "${RED}Invalid target port: $new_target_port. Must be 1-65535.${PLAIN}"
-        return 1
-    fi
-
-    # Check if changes were actually made
-    if [ "$new_target_ip" == "$current_target_ip" ] && [ "$new_target_port" == "$current_target_port" ]; then
-        echo -e "${YELLOW}No changes detected. Edit cancelled.${PLAIN}"
-        return 0
-    fi
-
-    # Prepare the new target address string
-    local new_target_address_config="$new_target_ip"
-    local new_target_full_addr="$new_target_ip:$new_target_port"
-
-    echo -e -n "Apply changes? (Target: ${BOLD}$new_target_full_addr${PLAIN}) (${GREEN}Y${PLAIN}/${RED}N${PLAIN}): "
-    read confirm
-    if [[ $confirm == [Yy]* ]]; then
-        local backup_file="${config_file}.bak.$(date +%Y%m%d%H%M%S)"
-        echo -e "${YELLOW}Backing up current config to $backup_file...${PLAIN}"
-        sudo cp "$config_file" "$backup_file" || { echo -e "${RED}Failed to create backup. Aborting.${PLAIN}"; return 1; }
-
-        echo -e "${YELLOW}Updating rule '$service_name' in $config_file...${PLAIN}"
-        # Use yq to update the specific node's address
-        if sudo yq eval "(.services[$service_index].forwarder.nodes[0].addr) = \"$new_target_full_addr\"" -i "$config_file"; then
-            echo -e "${GREEN}Successfully updated rule '$service_name'.${PLAIN}"
-            # Reload the central service
-            reload_gost_service
-        else
-            echo -e "${RED}Error updating rule '$service_name' using yq. Restoring backup.${PLAIN}"
-            sudo mv "$backup_file" "$config_file"
-            return 1
-        fi
-    else
-        echo -e "${YELLOW}Edit cancelled.${PLAIN}"
-    fi
-}
-
-# Main menu needs adjustment for the new manage menu options
-main_menu() {
+# Function to display service status and control
+service_control() {
   while true; do
-    clear
-    get_ip_info
-    echo -e "${BOLD}${BLUE}==================== Gost Port Forwarding Management ====================${PLAIN}"
-    echo -e "  ${CYAN}IPv4: ${WHITE}$IPV4 ${YELLOW}($COUNTRY_V4)${PLAIN}"
-    echo -e "  ${CYAN}IPv6: ${WHITE}$IPV6 ${YELLOW}($COUNTRY_V6)${PLAIN}"
-    echo -e "${BOLD}${BLUE}=========================================================================${PLAIN}"
-    echo -e "${GREEN}1.${PLAIN} Manage Forwarding Rules" # Simplified main menu
-    echo -e "${GREEN}2.${PLAIN} Exit"
-    echo -e "${BOLD}${BLUE}=========================================================================${PLAIN}"
-    read -p "$(echo -e ${YELLOW}"Please select [1-2]: "${PLAIN})" choice
+    echo -e "\\n${CYAN}=== GOST服务控制 ===${PLAIN}"
+    
+    # Check current status
+    if systemctl is-active --quiet gost; then
+      echo -e "GOST服务状态: ${GREEN}运行中${PLAIN}"
+    else
+      echo -e "GOST服务状态: ${RED}已停止${PLAIN}"
+    fi
+    
+    echo -e "${GREEN}1.${PLAIN} 启动服务"
+    echo -e "${GREEN}2.${PLAIN} 停止服务"
+    echo -e "${GREEN}3.${PLAIN} 重启服务"
+    echo -e "${GREEN}4.${PLAIN} 查看服务日志"
+    echo -e "${GREEN}5.${PLAIN} 返回主菜单"
+    read -p "$(echo -e ${YELLOW}"请选择 [1-5]: "${PLAIN})" choice
 
     case $choice in
-    1) manage_forward_services ;; # Go to the management submenu
-    2)
-      echo -e "${GREEN}Thank you for using. Goodbye!${PLAIN}"
-      exit 0
+    1)
+      echo -e "${YELLOW}启动GOST服务...${PLAIN}"
+      sudo systemctl start gost
+      if systemctl is-active --quiet gost; then
+        echo -e "${GREEN}GOST服务已成功启动${PLAIN}"
+      else
+        echo -e "${RED}启动GOST服务失败${PLAIN}"
+      fi
       ;;
-    *) echo -e "${RED}Invalid selection. Please try again.${PLAIN}" ;;
+    2)
+      echo -e "${YELLOW}停止GOST服务...${PLAIN}"
+      sudo systemctl stop gost
+      if ! systemctl is-active --quiet gost; then
+        echo -e "${GREEN}GOST服务已成功停止${PLAIN}"
+      else
+        echo -e "${RED}停止GOST服务失败${PLAIN}"
+      fi
+      ;;
+    3)
+      echo -e "${YELLOW}重启GOST服务...${PLAIN}"
+      sudo systemctl restart gost
+      if systemctl is-active --quiet gost; then
+        echo -e "${GREEN}GOST服务已成功重启${PLAIN}"
+      else
+        echo -e "${RED}重启GOST服务失败${PLAIN}"
+      fi
+      ;;
+    4)
+      echo -e "${CYAN}GOST服务日志 (按q退出):${PLAIN}"
+      sudo journalctl -u gost -f
+      ;;
+    5) return ;;
+    *) echo -e "${RED}无效的选择。请重试。${PLAIN}" ;;
     esac
-    # Removed the pause here, handled within manage menu loop if needed
-    # read -n1 -r -p "Press any key to return to the main menu..."
+    
+    # Skip the "press any key" if we viewed logs
+    if [ "$choice" != "4" ]; then
+      read -n1 -r -p "按任意键继续..."
+    fi
   done
 }
 
@@ -601,6 +841,257 @@ get_ip_info() {
   [ -z "$IPV6" ] && IPV6="N/A"
   [ -z "$COUNTRY_V4" ] && COUNTRY_V4="N/A"
   [ -z "$COUNTRY_V6" ] && COUNTRY_V6="N/A"
+}
+
+# 添加一个检测和列出旧式GOST服务的函数
+list_legacy_services() {
+  echo -e "${CYAN}=== 旧式GOST服务列表 (systemd服务) ===${PLAIN}"
+  echo "----------------------------------------------------------------------------------------------------"
+  
+  # 查找所有gost开头的systemd服务文件(除了主gost服务)
+  local counter=1
+  local found=0
+  printf "%-5s %-30s %-10s %-30s\\n" "编号" "服务名称" "状态" "命令行"
+  echo "----------------------------------------------------------------------------------------------------"
+  
+  for service_file in "$SERVICE_DIR"/gost-*.service; do
+    if [ -e "$service_file" ]; then
+      found=1
+      local service_name=$(basename "$service_file" .service)
+      local status=$(systemctl is-active "$service_name")
+      local cmd=$(grep "ExecStart=" "$service_file" | sed 's/ExecStart=//' | head -n 1)
+      
+      # 截断过长的命令行
+      if [ ${#cmd} -gt 30 ]; then
+        cmd="${cmd:0:27}..."
+      fi
+      
+      printf "%-5s %-30s %-10s %-30s\\n" \
+        "$counter" \
+        "$service_name" \
+        "$status" \
+        "$cmd"
+      
+      ((counter++))
+    fi
+  done
+  
+  if [ $found -eq 0 ]; then
+    echo -e "${YELLOW}没有发现旧式GOST服务。${PLAIN}"
+  fi
+  
+  echo "----------------------------------------------------------------------------------------------------"
+  return $((counter - 1))
+}
+
+# 删除旧式GOST服务
+delete_legacy_service() {
+  local service_number=$1
+  local counter=1
+  
+  for service_file in "$SERVICE_DIR"/gost-*.service; do
+    if [ -e "$service_file" ]; then
+      if [ $counter -eq $service_number ]; then
+        local service_name=$(basename "$service_file" .service)
+        
+        echo -e -n "确定要删除服务 ${BOLD}$service_name${PLAIN}? (${GREEN}Y${PLAIN}/${RED}N${PLAIN}): "
+        read confirm
+        
+        if [[ $confirm == [Yy]* ]]; then
+          # 停止并禁用服务
+          sudo systemctl stop "$service_name"
+          sudo systemctl disable "$service_name"
+          
+          # 删除服务文件
+          sudo rm "$service_file"
+          sudo systemctl daemon-reload
+          
+          echo -e "${GREEN}服务 $service_name 已成功删除${PLAIN}"
+        else
+          echo -e "${YELLOW}取消删除。${PLAIN}"
+        fi
+        
+        return
+      fi
+      
+      ((counter++))
+    fi
+  done
+  
+  echo -e "${RED}未找到指定编号的服务。${PLAIN}"
+}
+
+# 迁移旧式服务到配置文件
+migrate_legacy_service() {
+  local service_number=$1
+  local counter=1
+  
+  for service_file in "$SERVICE_DIR"/gost-*.service; do
+    if [ -e "$service_file" ]; then
+      if [ $counter -eq $service_number ]; then
+        local service_name=$(basename "$service_file" .service)
+        local cmd=$(grep "ExecStart=" "$service_file" | sed 's/ExecStart=//' | head -n 1)
+        
+        # 解析命令行获取参数
+        local protocol=""
+        local local_port=""
+        local target_addr=""
+        local target_port=""
+        
+        if [[ "$cmd" =~ -L=([^:]+)://([^/]+)/(.+) ]]; then
+          protocol="${BASH_REMATCH[1]}"
+          local_addr="${BASH_REMATCH[2]}"
+          target="${BASH_REMATCH[3]}"
+          
+          # 处理本地端口
+          if [[ "$local_addr" == *":"* ]]; then
+            local_port=$(echo "$local_addr" | cut -d: -f2)
+          fi
+          
+          # 处理目标地址和端口
+          if [[ "$target" == *":"* ]]; then
+            target_addr=$(echo "$target" | cut -d: -f1)
+            target_port=$(echo "$target" | cut -d: -f2)
+          fi
+        fi
+        
+        # 如果能成功解析命令行参数，添加到配置文件
+        if [ -n "$protocol" ] && [ -n "$local_port" ] && [ -n "$target_addr" ] && [ -n "$target_port" ]; then
+          echo -e "${YELLOW}正在迁移服务 ${BOLD}$service_name${PLAIN}${YELLOW} 到配置文件...${PLAIN}"
+          
+          # 使用解析出的参数创建新的配置项
+          local short_target="${target_addr##*.}"
+          if [ -z "$short_target" ]; then
+            short_target="${target_addr}"
+          fi
+          
+          # 检查配置文件格式
+          local first_line=$(head -n 1 "$CONFIG_FILE")
+          if [ -z "$first_line" ] || [[ "$first_line" != "services:"* ]]; then
+            echo -e "${YELLOW}修复配置文件格式: $CONFIG_FILE${PLAIN}"
+            local temp_file=$(mktemp)
+            echo "services:" > "$temp_file"
+            if [ -s "$CONFIG_FILE" ]; then
+              if grep -q "^- name:" "$CONFIG_FILE"; then
+                cat "$CONFIG_FILE" | sed 's/^-/  -/' >> "$temp_file"
+              else
+                cat "$CONFIG_FILE" >> "$temp_file"
+              fi
+            fi
+            sudo mv "$temp_file" "$CONFIG_FILE"
+          fi
+          
+          # 备份配置文件
+          local backup_file="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+          sudo cp "$CONFIG_FILE" "$backup_file" || { echo -e "${RED}创建备份失败。中止操作。${PLAIN}"; return 1; }
+          
+          # 添加服务到配置文件，使用正确的缩进
+          sudo bash -c "cat >> \"$CONFIG_FILE\" << EOF
+  - name: ${protocol}-${local_port}-to-${short_target}-${target_port}
+    addr: ':$local_port'
+    handler:
+      type: $protocol
+    listener:
+      type: $protocol
+    forwarder:
+      nodes:
+      - name: target-${protocol}-${local_port}-${target_port}
+        addr: '$target_addr:$target_port'
+        connector:
+          type: forward
+        dialer:
+          type: $protocol
+EOF"
+          
+          # 删除旧服务
+          sudo systemctl stop "$service_name"
+          sudo systemctl disable "$service_name"
+          sudo rm "$service_file"
+          sudo systemctl daemon-reload
+          
+          # 重载GOST服务
+          reload_gost_service
+          
+          echo -e "${GREEN}服务 $service_name 已成功迁移到配置文件${PLAIN}"
+        else
+          echo -e "${RED}无法解析服务命令行，迁移失败: $cmd${PLAIN}"
+        fi
+        
+        return
+      fi
+      
+      ((counter++))
+    fi
+  done
+  
+  echo -e "${RED}未找到指定编号的服务。${PLAIN}"
+}
+
+# 旧式服务管理菜单
+manage_legacy_services() {
+  while true; do
+    echo -e "\\n${CYAN}=== 管理旧式GOST服务 ===${PLAIN}"
+    echo -e "${GREEN}1.${PLAIN} 列出旧式服务"
+    echo -e "${GREEN}2.${PLAIN} 删除旧式服务"
+    echo -e "${GREEN}3.${PLAIN} 迁移到配置文件"
+    echo -e "${GREEN}4.${PLAIN} 返回主菜单"
+    read -p "$(echo -e ${YELLOW}"请选择 [1-4]: "${PLAIN})" choice
+
+    case $choice in
+    1) list_legacy_services ;;
+    2)
+      list_legacy_services
+      local service_count=$?
+      if [ $service_count -gt 0 ]; then
+        read -p "输入要删除的服务编号: " service_number_to_delete
+        delete_legacy_service "$service_number_to_delete"
+      else
+        sleep 1
+      fi
+      ;;
+    3)
+      list_legacy_services
+      local service_count=$?
+      if [ $service_count -gt 0 ]; then
+        read -p "输入要迁移的服务编号: " service_number_to_migrate
+        migrate_legacy_service "$service_number_to_migrate"
+      else
+        sleep 1
+      fi
+      ;;
+    4) return ;;
+    *) echo -e "${RED}无效的选择。请重试。${PLAIN}" ;;
+    esac
+  done
+}
+
+# Main menu
+main_menu() {
+  while true; do
+    clear
+    get_ip_info
+    echo -e "${BOLD}${BLUE}==================== Gost端口转发管理 ====================${PLAIN}"
+    echo -e "  ${CYAN}IPv4: ${WHITE}$IPV4 ${YELLOW}($COUNTRY_V4)${PLAIN}"
+    echo -e "  ${CYAN}IPv6: ${WHITE}$IPV6 ${YELLOW}($COUNTRY_V6)${PLAIN}"
+    echo -e "${BOLD}${BLUE}=========================================================================${PLAIN}"
+    echo -e "${GREEN}1.${PLAIN} 管理转发规则"
+    echo -e "${GREEN}2.${PLAIN} 管理GOST服务"
+    echo -e "${GREEN}3.${PLAIN} 管理旧式服务"
+    echo -e "${GREEN}4.${PLAIN} 退出"
+    echo -e "${BOLD}${BLUE}=========================================================================${PLAIN}"
+    read -p "$(echo -e ${YELLOW}"请选择 [1-4]: "${PLAIN})" choice
+
+    case $choice in
+    1) manage_forward_services ;;
+    2) service_control ;;
+    3) manage_legacy_services ;;
+    4)
+      echo -e "${GREEN}感谢使用。再见！${PLAIN}"
+      exit 0
+      ;;
+    *) echo -e "${RED}无效的选择。请重试。${PLAIN}" ;;
+    esac
+  done
 }
 
 # Check and install necessary components
