@@ -100,18 +100,8 @@ check_and_install() {
   # Check if the file format is correct
   local first_line=$(head -n 1 "$CONFIG_FILE" 2>/dev/null)
   if [ -z "$first_line" ] || [[ "$first_line" != "services:"* ]]; then
-    echo -e "${YELLOW}修复配置文件格式: $CONFIG_FILE${PLAIN}"
-    local temp_file=$(mktemp)
-    echo "services:" > "$temp_file"
-    if [ -s "$CONFIG_FILE" ]; then
-      if grep -q "^- name:" "$CONFIG_FILE"; then
-        cat "$CONFIG_FILE" | sed 's/^-/  -/' >> "$temp_file"
-      else
-        # File has some other content, preserve it
-        cat "$CONFIG_FILE" | grep -v "^services: \[\]" >> "$temp_file"
-      fi
-    fi
-    sudo mv "$temp_file" "$CONFIG_FILE"
+    echo -e "${RED}配置文件格式不正确: $CONFIG_FILE${PLAIN}"
+    echo -e "${YELLOW}请手动修复配置文件，确保第一行是 'services:'${PLAIN}"
   fi
 
   # Ensure the central gost service exists and is enabled
@@ -317,24 +307,12 @@ create_forward_service() {
     sudo bash -c "echo \"services:\" > \"$CONFIG_FILE\""
   fi
 
-  # Check if the file is empty or doesn't start with services:
+  # Check if the file has the correct format
   local first_line=$(head -n 1 "$CONFIG_FILE")
   if [ -z "$first_line" ] || [[ "$first_line" != "services:"* ]]; then
-    echo -e "${YELLOW}修复配置文件格式: $CONFIG_FILE${PLAIN}"
-    # Create a temporary file with proper format
-    local temp_file=$(mktemp)
-    echo "services:" > "$temp_file"
-    # If there's existing content that doesn't start with services:, append it properly
-    if [ -s "$CONFIG_FILE" ]; then
-      if [[ "$first_line" == "- name:"* ]]; then
-        # File already has service entries but missing the services: header
-        cat "$CONFIG_FILE" | sed 's/^-/  -/' >> "$temp_file"
-      else
-        # File has some other content, preserve it with proper indentation
-        cat "$CONFIG_FILE" >> "$temp_file"
-      fi
-    fi
-    sudo mv "$temp_file" "$CONFIG_FILE"
+    echo -e "${RED}配置文件格式不正确: $CONFIG_FILE${PLAIN}"
+    echo -e "${YELLOW}请手动修复配置文件，确保第一行是 'services:'${PLAIN}"
+    return 1
   fi
 
   # Backup the existing config
@@ -436,18 +414,9 @@ list_forward_services() {
   # Check if config file has proper format
   local first_line=$(head -n 1 "$CONFIG_FILE")
   if [ -z "$first_line" ] || [[ "$first_line" != "services:"* ]]; then
-    echo -e "${YELLOW}配置文件格式不正确，尝试修复...${PLAIN}"
-    local temp_file=$(mktemp)
-    echo "services:" > "$temp_file"
-    if [ -s "$CONFIG_FILE" ]; then
-      if grep -q "^- name:" "$CONFIG_FILE"; then
-        cat "$CONFIG_FILE" | sed 's/^-/  -/' >> "$temp_file"
-      else
-        cat "$CONFIG_FILE" >> "$temp_file"
-      fi
-    fi
-    sudo mv "$temp_file" "$CONFIG_FILE"
-    echo -e "${GREEN}配置文件已修复${PLAIN}"
+    echo -e "${RED}配置文件格式不正确: $CONFIG_FILE${PLAIN}"
+    echo -e "${YELLOW}请手动修复配置文件，确保第一行是 'services:'${PLAIN}"
+    return 1
   fi
   
   # Read the YAML file directly using grep and awk to extract services
@@ -968,17 +937,9 @@ migrate_legacy_service() {
           # 检查配置文件格式
           local first_line=$(head -n 1 "$CONFIG_FILE")
           if [ -z "$first_line" ] || [[ "$first_line" != "services:"* ]]; then
-            echo -e "${YELLOW}修复配置文件格式: $CONFIG_FILE${PLAIN}"
-            local temp_file=$(mktemp)
-            echo "services:" > "$temp_file"
-            if [ -s "$CONFIG_FILE" ]; then
-              if grep -q "^- name:" "$CONFIG_FILE"; then
-                cat "$CONFIG_FILE" | sed 's/^-/  -/' >> "$temp_file"
-              else
-                cat "$CONFIG_FILE" >> "$temp_file"
-              fi
-            fi
-            sudo mv "$temp_file" "$CONFIG_FILE"
+            echo -e "${RED}配置文件格式不正确: $CONFIG_FILE${PLAIN}"
+            echo -e "${YELLOW}请手动修复配置文件，确保第一行是 'services:'${PLAIN}"
+            return 1
           fi
           
           # 备份配置文件
