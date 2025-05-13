@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 脚本版本
-current_version="1.2.0"
+current_version="1.3.0"
 
 # Define color codes
 red='\e[31m'
@@ -198,32 +198,52 @@ create_snell_conf() {
         fi
     fi
 
-    # Configure IPv6 settings
-    if [[ $ip_type == "both" ]]; then
-        read -rp "Enable IPv6 support? (y/n): " enable_ipv6
-        if [[ $enable_ipv6 =~ ^[Yy]$ ]]; then
-            listen_addr="[::]:$snell_port"
-            ipv6_enabled="true"
-            
-            # 如果启用IPv6但用户使用了自定义DNS，提醒可能需要包含IPv6 DNS
-            if [[ -n $custom_dns ]] && ! [[ $custom_dns =~ ":" ]]; then
-                msg warn "您启用了IPv6但DNS中似乎没有包含IPv6地址，这可能会影响IPv6连接"
-                read -rp "是否添加IPv6 DNS？(y/n): " add_ipv6_dns
-                if [[ $add_ipv6_dns =~ ^[Yy]$ ]]; then
-                    dns_config="dns = $custom_dns, 2606:4700:4700::1111, 2001:4860:4860::8888"
-                    msg info "已添加Cloudflare和Google的IPv6 DNS"
+    # 询问是否仅监听本地地址
+    read -rp "是否仅监听本地地址？(y/n, 推荐使用Shadow-TLS时选择y): " local_only
+    if [[ $local_only =~ ^[Yy]$ ]]; then
+        if [[ $ip_type == "ipv6" ]]; then
+            listen_addr="[::1]:$snell_port"
+        else
+            listen_addr="127.0.0.1:$snell_port"
+        fi
+        msg info "配置Snell仅监听本地地址: $listen_addr"
+    else
+        # Configure IPv6 settings
+        if [[ $ip_type == "both" ]]; then
+            read -rp "Enable IPv6 support? (y/n): " enable_ipv6
+            if [[ $enable_ipv6 =~ ^[Yy]$ ]]; then
+                listen_addr="::0:$snell_port"
+                ipv6_enabled="true"
+                
+                # 如果启用IPv6但用户使用了自定义DNS，提醒可能需要包含IPv6 DNS
+                if [[ -n $custom_dns ]] && ! [[ $custom_dns =~ ":" ]]; then
+                    msg warn "您启用了IPv6但DNS中似乎没有包含IPv6地址，这可能会影响IPv6连接"
+                    read -rp "是否添加IPv6 DNS？(y/n): " add_ipv6_dns
+                    if [[ $add_ipv6_dns =~ ^[Yy]$ ]]; then
+                        dns_config="dns = $custom_dns, 2606:4700:4700::1111, 2001:4860:4860::8888"
+                        msg info "已添加Cloudflare和Google的IPv6 DNS"
+                    fi
                 fi
+            else
+                listen_addr="0.0.0.0:$snell_port"
+                ipv6_enabled="false"
             fi
+        elif [[ $ip_type == "ipv6" ]]; then
+            listen_addr="::0:$snell_port"
+            ipv6_enabled="true"
         else
             listen_addr="0.0.0.0:$snell_port"
             ipv6_enabled="false"
         fi
-    elif [[ $ip_type == "ipv6" ]]; then
-        listen_addr="[::]:$snell_port"
-        ipv6_enabled="true"
+    fi
+
+    # 询问是否启用TFO
+    read -rp "是否启用TFO(TCP Fast Open)? (y/n): " enable_tfo
+    if [[ $enable_tfo =~ ^[Yy]$ ]]; then
+        tfo_config="tfo = true"
+        msg info "已启用TCP Fast Open"
     else
-        listen_addr="0.0.0.0:$snell_port"
-        ipv6_enabled="false"
+        tfo_config="tfo = false"
     fi
 
     # Write the configuration file
@@ -231,7 +251,8 @@ create_snell_conf() {
 [snell-server]
 listen = ${listen_addr}
 psk = ${snell_psk}
-ipv6 = ${ipv6_enabled}
+ipv6 = ${ipv6_enabled:-true}
+${tfo_config}
 ${dns_config}
 EOF
 
@@ -249,18 +270,59 @@ create_shadow_tls_systemd() {
         echo "[INFO] 使用Snell端口作为ShadowTLS转发端口: $shadow_tls_f_port"
     fi
 
-    listen_addr=$([[ $ip_type == "ipv6" ]] && echo "[::]:${shadow_tls_port}" || echo "0.0.0.0:${shadow_tls_port}")
-    server_addr=$([[ $ip_type == "ipv6" ]] && echo "[::1]:${shadow_tls_f_port}" || echo "127.0.0.1:${shadow_tls_f_port}")
+    # 根据IPv6支持确定监听地址
+    if [[ $ip_type == "both" ]]; then
+        read -rp "是否启用IPv6监听? (y/n): " ipv6_listen
+        if [[ $ipv6_listen =~ ^[Yy]$ ]]; then
+            listen_addr="[::]:${shadow_tls_port}"
+        else
+            listen_addr="0.0.0.0:${shadow_tls_port}"
+        fi
+    elif [[ $ip_type == "ipv6" ]]; then
+        listen_addr="[::]:${shadow_tls_port}"
+    else
+        listen_addr="0.0.0.0:${shadow_tls_port}"
+    fi
+
+    # 设置转发地址
+    if [[ $ip_type == "ipv6" ]]; then
+        server_addr="[::1]:${shadow_tls_f_port}" 
+    else
+        server_addr="127.0.0.1:${shadow_tls_f_port}"
+    fi
+
+    # 询问是否启用wildcard-sni
+    read -rp "是否启用wildcard-sni? (y/n, 可使客户端自定义SNI): " enable_wildcard
+    if [[ $enable_wildcard =~ ^[Yy]$ ]]; then
+        wildcard_option="--wildcard-sni=authed"
+        msg info "已启用wildcard-sni，客户端可自定义SNI"
+    else
+        wildcard_option=""
+    fi
+
+    # 询问是否启用strict模式
+    read -rp "是否启用TLS strict模式? (y/n, 增强安全性): " enable_strict
+    if [[ $enable_strict =~ ^[Yy]$ ]]; then
+        strict_option="--strict"
+        msg info "已启用strict模式，增强TLS握手安全性"
+    else
+        strict_option=""
+    fi
 
     cat > $shadow_tls_service << EOF
 [Unit]
-Description=Shadow-TLS Proxy Service
-After=network.target
+Description=Shadow-TLS Server Service
+After=network-online.target
+Wants=network-online.target systemd-networkd-wait-online.service
 
 [Service]
+LimitNOFILE=32767
 Type=simple
-ExecStart=/usr/local/bin/shadow-tls --v3 --fastopen server --listen ${listen_addr} --server ${server_addr} --tls ${shadow_tls_tls_domain}:443 --password ${shadow_tls_password}
-SyslogIdentifier=shadow-tls
+User=root
+Restart=on-failure
+RestartSec=5s
+ExecStartPre=/bin/sh -c ulimit -n 51200
+ExecStart=/usr/local/bin/shadow-tls --fastopen --v3 ${strict_option} server ${wildcard_option} --listen ${listen_addr} --server ${server_addr} --tls ${shadow_tls_tls_domain}:443 --password ${shadow_tls_password} 
 
 [Install]
 WantedBy=multi-user.target
@@ -273,17 +335,56 @@ EOF
 
 # Configure Shadow-TLS  
 config_shadow_tls() { 
-    read -rp "为Shadow-TLS选择端口 (默认: 随机选择未使用端口): " shadow_tls_port
+    read -rp "为Shadow-TLS选择端口 (默认: 443): " shadow_tls_port
     if [[ -z ${shadow_tls_port} ]]; then
-        shadow_tls_port=$(find_unused_port)
-        echo "[INFO] 为Shadow-TLS随机选择端口: $shadow_tls_port"
+        shadow_tls_port="443"
+        echo "[INFO] 使用默认端口443作为Shadow-TLS端口"
     fi
-    read -rp "输入Shadow-TLS的TLS域名 (默认: gateway.icloud.com): " shadow_tls_tls_domain  
-    [[ -z ${shadow_tls_tls_domain} ]] && shadow_tls_tls_domain="gateway.icloud.com"
+    
+    echo -e "${yellow}推荐的TLS域名列表 (支持TLS 1.3):${reset}"
+    echo -e "1) gateway.icloud.com (苹果服务)"
+    echo -e "2) p11.douyinpic.com (抖音相关，推荐用于免流)"
+    echo -e "3) mp.weixin.qq.com (微信相关)"
+    echo -e "4) sns-img-qc.xhscdn.com (小红书相关)"
+    echo -e "5) p9-dy.byteimg.com (字节相关)"
+    echo -e "6) weather-data.apple.com (苹果天气服务)"
+    echo -e "7) 自定义"
+    read -rp "请选择TLS域名 [1-7]: " domain_choice
+    
+    case $domain_choice in
+        1) shadow_tls_tls_domain="gateway.icloud.com" ;;
+        2) shadow_tls_tls_domain="p11.douyinpic.com" ;;
+        3) shadow_tls_tls_domain="mp.weixin.qq.com" ;;
+        4) shadow_tls_tls_domain="sns-img-qc.xhscdn.com" ;;
+        5) shadow_tls_tls_domain="p9-dy.byteimg.com" ;;
+        6) shadow_tls_tls_domain="weather-data.apple.com" ;;
+        7) 
+            read -rp "请输入自定义TLS域名: " shadow_tls_tls_domain
+            [[ -z ${shadow_tls_tls_domain} ]] && shadow_tls_tls_domain="gateway.icloud.com"
+            ;;
+        *) shadow_tls_tls_domain="gateway.icloud.com" ;;
+    esac
+    
     read -rp "输入Shadow-TLS的密码 (留空则随机生成): " shadow_tls_password
     [[ -z ${shadow_tls_password} ]] && shadow_tls_password=$(generate_random_password) && echo "[INFO] 为Shadow-TLS生成随机密码: $shadow_tls_password"
 
-    echo -e "${colo} = snell, ${server_ip}, ${shadow_tls_port}, psk=${snell_psk}, version=4, shadow-tls-password=${shadow_tls_password}, shadow-tls-sni=${shadow_tls_tls_domain}, shadow-tls-version=3"
+    # 为客户端配置确定Snell PSK
+    local client_snell_psk="${snell_psk}" # 优先使用当前脚本运行中设置的PSK
+    if [[ -z "${client_snell_psk}" && -f "${snell_workspace}/snell-server.conf" ]]; then
+        # 如果当前没有PSK且配置文件存在，则从中读取
+        client_snell_psk=$(grep -oP 'psk = \K.*' "${snell_workspace}/snell-server.conf")
+    fi
+
+    # 为客户端配置确定TFO设置
+    local client_tfo_value="true" # 默认值，如果无法从配置文件读取
+    if [[ -f "${snell_workspace}/snell-server.conf" ]]; then
+        local current_tfo_setting=$(grep -oP 'tfo = \K(true|false)' "${snell_workspace}/snell-server.conf")
+        if [[ -n "$current_tfo_setting" ]]; then
+            client_tfo_value="$current_tfo_setting"
+        fi
+    fi
+
+    echo -e "${colo} = snell, ${server_ip}, ${shadow_tls_port}, psk=${client_snell_psk}, version=4, reuse=true, tfo=${client_tfo_value}, shadow-tls-password=${shadow_tls_password}, shadow-tls-sni=${shadow_tls_tls_domain}, shadow-tls-version=3"
     msg ok "Shadow-TLS 配置已完成."
 }
 
@@ -678,10 +779,12 @@ display_config() {
     local snell_listen=$(echo "$snell_config" | grep -oP 'listen = \K.*')
     local snell_psk=$(echo "$snell_config" | grep -oP 'psk = \K.*')
     local snell_ipv6=$(echo "$snell_config" | grep -oP 'ipv6 = \K.*')
+    local snell_tfo=$(echo "$snell_config" | grep -oP 'tfo = \K.*' || echo "false")
     
     echo -e "${green}监听地址:${reset} $snell_listen"
     echo -e "${green}PSK密钥:${reset} $snell_psk"
     echo -e "${green}IPv6支持:${reset} $snell_ipv6"
+    echo -e "${green}TCP Fast Open:${reset} $snell_tfo"
     
     # 显示ShadowTLS配置（如果存在）
     if systemctl is-active --quiet shadow-tls; then
@@ -699,6 +802,20 @@ display_config() {
         echo -e "${green}服务器地址:${reset} $shadow_server"
         echo -e "${green}TLS域名:${reset} $shadow_tls"
         echo -e "${green}密码:${reset} $shadow_password"
+        
+        # 检查是否启用了wildcard-sni
+        if echo "$shadow_tls_config" | grep -q "wildcard-sni"; then
+            echo -e "${green}通配符SNI:${reset} 已启用 (客户端可自定义SNI)"
+        else
+            echo -e "${green}通配符SNI:${reset} 未启用"
+        fi
+        
+        # 检查是否启用了strict模式
+        if echo "$shadow_tls_config" | grep -q "\--strict"; then
+            echo -e "${green}Strict模式:${reset} 已启用"
+        else
+            echo -e "${green}Strict模式:${reset} 未启用"
+        fi
     fi
     
     # 显示客户端配置
@@ -718,11 +835,11 @@ display_config() {
         local shadow_port=$(echo "$shadow_listen" | grep -oP ':\K\d+$')
         echo -e "${cyan}Surge配置:${reset}"
         echo -e "[Proxy]"
-        echo -e "Snell = snell, ${server_ip}, ${shadow_port}, psk=${snell_psk}, version=4, shadow-tls-password=${shadow_password}, shadow-tls-sni=${shadow_tls%%:*}, shadow-tls-version=3"
+        echo -e "Snell = snell, ${server_ip}, ${shadow_port}, psk=${snell_psk}, version=4, reuse=true, tfo=${snell_tfo}, shadow-tls-password=${shadow_password}, shadow-tls-sni=${shadow_tls%%:*}, shadow-tls-version=3"
     else
         echo -e "${cyan}Surge配置:${reset}"
         echo -e "[Proxy]"
-        echo -e "Snell = snell, ${server_ip}, ${port}, psk=${snell_psk}, version=4"
+        echo -e "Snell = snell, ${server_ip}, ${port}, psk=${snell_psk}, version=4, reuse=true, tfo=${snell_tfo}"
     fi
     
     echo ""

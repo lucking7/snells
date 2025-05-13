@@ -92,27 +92,26 @@ validate_input() {
 
 # Check and install necessary components
 check_and_install() {
-  local packages=("gost" "lsof" "curl" "grep" "systemd" "jq")
-  for package in "${packages[@]}"; do
-    if ! command -v $package &>/dev/null && [ "$package" != "gost" ]; then
-      echo -e "${YELLOW}Package ${BOLD}$package${PLAIN}${YELLOW} not found. Installing...${PLAIN}"
+  # 只在gost未安装时进行检查
+  if ! command -v gost &>/dev/null; then
+    echo -e "${YELLOW}gost not found. Checking and installing dependencies...${PLAIN}"
+    
+    local packages=("lsof" "curl" "grep" "systemd" "jq")
+    for package in "${packages[@]}"; do
+      if ! command -v $package &>/dev/null; then
+        echo -e "${YELLOW}Package ${BOLD}$package${PLAIN}${YELLOW} not found. Installing...${PLAIN}"
 
-      # Detect package manager
-      if command -v apt-get &>/dev/null; then
-        PKG_MANAGER="apt-get"
-      elif command -v yum &>/dev/null; then
-        PKG_MANAGER="yum"
-      elif command -v dnf &>/dev/null; then
-        PKG_MANAGER="dnf"
-      else
-        PKG_MANAGER="apt-get"
-      fi
+        # Detect package manager
+        if command -v apt-get &>/dev/null; then
+          PKG_MANAGER="apt-get"
+        elif command -v yum &>/dev/null; then
+          PKG_MANAGER="yum"
+        elif command -v dnf &>/dev/null; then
+          PKG_MANAGER="dnf"
+        else
+          PKG_MANAGER="apt-get"
+        fi
 
-      case $package in
-      "gost")
-        (bash <(curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh) --install) &
-        ;;
-      *)
         if ! sudo $PKG_MANAGER update -y; then
           echo -e "${RED}Failed to update package list. Please check your network connection or system status.${PLAIN}"
           continue
@@ -121,22 +120,19 @@ check_and_install() {
           echo -e "${RED}Failed to install $package. Please install it manually.${PLAIN}"
           continue
         fi
-        ;;
-      esac
-      show_loading $!
-      if command -v $package &>/dev/null || [ "$package" = "gost" ]; then
-        echo -e "${GREEN}$package installed successfully.${PLAIN}"
-      else
-        echo -e "${RED}Failed to install $package. Please install it manually.${PLAIN}"
-        if [ "$package" = "jq" ]; then
-          echo -e "${YELLOW}jq is recommended for JSON configuration management but not required.${PLAIN}"
+        
+        if command -v $package &>/dev/null; then
+          echo -e "${GREEN}$package installed successfully.${PLAIN}"
+        else
+          echo -e "${RED}Failed to install $package. Please install it manually.${PLAIN}"
+          if [ "$package" = "jq" ]; then
+            echo -e "${YELLOW}jq is recommended for JSON configuration management but not required.${PLAIN}"
+          fi
         fi
       fi
-    fi
-  done
+    done
 
-  # Install gost if not already installed
-  if ! command -v gost &>/dev/null; then
+    # Install gost
     echo -e "${YELLOW}Installing gost...${PLAIN}"
     (bash <(curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh) --install) &
     show_loading $!
@@ -1429,8 +1425,10 @@ main_menu() {
   done
 }
 
-# Check and install necessary components
-check_and_install
+# 检查gost是否安装，只在必要时进行依赖检查
+if ! command -v gost &>/dev/null; then
+  check_and_install
+fi
 
 # Execute main menu
 main_menu
