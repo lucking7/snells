@@ -17,6 +17,10 @@ CONFIG_PATH="/root/.realm/config.toml"
 REALM_DIR="/root/realm"
 REALM_CONFIG_DIR="/root/.realm"
 
+# 全局变量，用于标记 fetch_server_info 是否已在当前脚本执行中运行过
+fetched_server_info_once=false
+country=""
+
 # 检查依赖函数
 require_command() {
     if ! command -v "$1" &> /dev/null; then
@@ -38,13 +42,80 @@ if command -v jq &> /dev/null; then
     use_jq=true
 fi
 
+# 获取服务器信息
+fetch_server_info() {
+    # 如果已经获取过，并且 country 变量有值，则跳过，除非强制重新获取
+    # (这里简单处理，每次调用都获取，但在 deploy_realm 中会避免不必要的重复获取)
+    # fetched_server_info_once 标志的更复杂用法可以后续添加，如果确实需要严格控制调用次数
+
+    meta_info=$(curl -s https://speed.cloudflare.com/meta)
+
+    # 使用 jq 解析 (如果可用)
+    if $use_jq && [ -n "$meta_info" ]; then
+        asOrganization=$(echo "$meta_info" | jq -r '.asOrganization // "N/A"')
+        colo=$(echo "$meta_info" | jq -r '.colo // "N/A"')
+        country=$(echo "$meta_info" | jq -r '.country // "N/A"') # 更新全局 country 变量
+    else
+        # 使用 grep 提取
+        asOrganization=$(echo "$meta_info" | grep -oP '(?<="asOrganization":")[^"]*' || echo "N/A")
+        colo=$(echo "$meta_info" | grep -oP '(?<="colo":")[^"]*' || echo "N/A")
+        country=$(echo "$meta_info" | grep -oP '(?<="country":")[^"]*' || echo "N/A") # 更新全局 country 变量
+        
+        if [ "$country" = "N/A" ] && command -v grep &>/dev/null && command -v sed &>/dev/null; then
+             asOrganization=$(echo "$meta_info" | grep '"asOrganization":"' | sed 's/.*"asOrganization":"\([^"]*\)".*/\1/' || echo "N/A")
+             colo=$(echo "$meta_info" | grep '"colo":"' | sed 's/.*"colo":"\([^"]*\)".*/\1/' || echo "N/A")
+             country=$(echo "$meta_info" | grep '"country":"' | sed 's/.*"country":"\([^"]*\)".*/\1/' || echo "N/A") # 更新全局 country 变量
+        fi
+    fi
+    
+    [ -z "$asOrganization" ] && asOrganization="N/A"
+    [ -z "$colo" ] && colo="N/A"
+    [ -z "$country" ] && country="N/A"
+
+    ipv4=$(curl -s ipv4.ip.sb || echo "N/A")
+    ipv6=$(curl -s ipv6.ip.sb || echo "N/A")
+
+    has_ipv6=false
+    if [ "$ipv6" != "N/A" ] && [[ "$ipv6" =~ ":" ]]; then
+        has_ipv6=true
+    fi
+
+    if { [ "$ipv4" = "N/A" ] || ! [[ "$ipv4" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; } && \
+       { [ "$ipv6" = "N/A" ] || ! [[ "$ipv6" =~ ":" ]]; }; then
+        combined_ip=$(curl -s ip.sb || echo "N/A")
+        if [[ $combined_ip =~ .*:.* ]]; then 
+            ipv6=$combined_ip
+            has_ipv6=true
+            ipv4="N/A"
+        elif [[ $combined_ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            ipv4=$combined_ip
+        fi
+    fi
+    fetched_server_info_once=true # 标记已获取
+}
+
 # 部署 Realm
 deploy_realm() {
+    if ! $fetched_server_info_once || [ -z "$country" ]; then
+        echo -e "${YELLOW}Fetching server information for deployment...${NC}"
+        fetch_server_info # 确保在部署时获取国家信息
+    fi
+
+    local github_api_host="https://api.github.com"
+    local github_host="https://github.com"
+    local gh_proxy="https://ghproxy.link"
+
+    if [ "$country" == "CN" ]; then
+        echo -e "${YELLOW}Detected IP in CN, using GitHub proxy: $gh_proxy ${NC}"
+        github_api_host="${gh_proxy}/${github_api_host}" 
+        github_host="${gh_proxy}/${github_host}"
+    fi
+
     mkdir -p "$REALM_DIR" && cd "$REALM_DIR" || { echo -e "${RED}Failed to access $REALM_DIR directory.${NC}"; exit 1; }
     
     # 从GitHub API获取最新版本
     local api_response
-    api_response=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest)
+    api_response=$(curl -s "${github_api_host}/repos/zhboner/realm/releases/latest")
 
     if $use_jq && command -v jq &> /dev/null; then
         _version=$(echo "$api_response" | jq -r '.tag_name // ""')
@@ -55,38 +126,39 @@ deploy_realm() {
     if [ -z "$_version" ]; then
         echo -e "${RED}Failed to get version number. Please check if you can connect to GitHub API.${NC}"
         echo -e "${YELLOW}Falling back to a default known version v2.6.2 for download.${NC}"
-        _version="v2.6.2" # 回退版本
+        _version="v2.6.2" 
     else
         echo -e "${GREEN}Latest version: ${_version}${NC}"
     fi
     
-    # 检测系统架构和操作系统
     arch=$(uname -m)
     os_type=$(uname -s | tr '[:upper:]' '[:lower:]')
     
-    # 根据架构选择下载URL
-    download_url=""
+    local base_download_url="${github_host}/zhboner/realm/releases/download/${_version}"
+    local download_file_name=""
+
     case "$arch-$os_type" in
         x86_64-linux)
-            download_url="https://github.com/zhboner/realm/releases/download/${_version}/realm-x86_64-unknown-linux-gnu.tar.gz"
+            download_file_name="realm-x86_64-unknown-linux-gnu.tar.gz"
             ;;
         aarch64-linux)
-            download_url="https://github.com/zhboner/realm/releases/download/${_version}/realm-aarch64-unknown-linux-gnu.tar.gz"
+            download_file_name="realm-aarch64-unknown-linux-gnu.tar.gz"
             ;;
         armv7l-linux | arm-linux)
-            download_url="https://github.com/zhboner/realm/releases/download/${_version}/realm-arm-unknown-linux-gnueabi.tar.gz"
+            download_file_name="realm-arm-unknown-linux-gnueabi.tar.gz"
             ;;
         *)
             echo -e "${RED}Unsupported architecture or OS: $arch-$os_type. Attempting x86_64-linux-gnu as a default.${NC}"
-            download_url="https://github.com/zhboner/realm/releases/download/${_version}/realm-x86_64-unknown-linux-gnu.tar.gz"
+            download_file_name="realm-x86_64-unknown-linux-gnu.tar.gz"
             ;;
     esac
     
+    local download_url="${base_download_url}/${download_file_name}"
+
     echo -e "${YELLOW}Downloading Realm from: $download_url ${NC}"
     wget -qO realm.tar.gz "$download_url"
     if [ ! -f realm.tar.gz ] || [ ! -s realm.tar.gz ]; then
         echo -e "${RED}Download realm.tar.gz failed. Please check network or URL: $download_url ${NC}"
-        # 失败时清理
         rm -f realm.tar.gz
         cd .. && rm -rf "$REALM_DIR"
         exit 1
@@ -94,10 +166,8 @@ deploy_realm() {
     tar -xzf realm.tar.gz && chmod +x realm
     rm -f realm.tar.gz
 
-    # 创建配置目录
     mkdir -p "$REALM_CONFIG_DIR"
     
-    # 创建服务文件
     cat <<EOF >/etc/systemd/system/realm.service
 [Unit]
 Description=Realm Service
@@ -117,13 +187,10 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     
-    # 初始化配置文件（如果不存在）
     if [ ! -f "$CONFIG_PATH" ]; then
         cat <<EONET >"$CONFIG_PATH"
 # 全局网络设置
 [network]
-# no_tcp = true 表示全局禁用TCP，除非端点明确启用
-# use_udp = true 表示全局启用UDP，除非端点明确禁用
 no_tcp = false 
 use_udp = true
 ipv6_only = false 
@@ -232,58 +299,6 @@ EOF
         return 1
     fi
     return 0
-}
-
-# 获取服务器信息
-fetch_server_info() {
-    meta_info=$(curl -s https://speed.cloudflare.com/meta)
-
-    # 使用 jq 解析 (如果可用)
-    if $use_jq && [ -n "$meta_info" ]; then
-        asOrganization=$(echo "$meta_info" | jq -r '.asOrganization // "N/A"')
-        colo=$(echo "$meta_info" | jq -r '.colo // "N/A"')
-        country=$(echo "$meta_info" | jq -r '.country // "N/A"')
-    else
-        # 使用 grep 提取
-        asOrganization=$(echo "$meta_info" | grep -oP '(?<="asOrganization":")[^"]*' || echo "N/A")
-        colo=$(echo "$meta_info" | grep -oP '(?<="colo":")[^"]*' || echo "N/A")
-        country=$(echo "$meta_info" | grep -oP '(?<="country":")[^"]*' || echo "N/A")
-        
-        # 如果grep -P不可用，回退到普通grep+sed
-        if [ "$asOrganization" = "N/A" ] && command -v grep &>/dev/null && command -v sed &>/dev/null; then
-             asOrganization=$(echo "$meta_info" | grep '"asOrganization":"' | sed 's/.*"asOrganization":"\([^"]*\)".*/\1/' || echo "N/A")
-             colo=$(echo "$meta_info" | grep '"colo":"' | sed 's/.*"colo":"\([^"]*\)".*/\1/' || echo "N/A")
-             country=$(echo "$meta_info" | grep '"country":"' | sed 's/.*"country":"\([^"]*\)".*/\1/' || echo "N/A")
-        fi
-    fi
-    
-    # 处理空值
-    [ -z "$asOrganization" ] && asOrganization="N/A"
-    [ -z "$colo" ] && colo="N/A"
-    [ -z "$country" ] && country="N/A"
-
-    # 获取IP信息
-    ipv4=$(curl -s ipv4.ip.sb || echo "N/A")
-    ipv6=$(curl -s ipv6.ip.sb || echo "N/A")
-
-    # 检查IPv6是否可用
-    has_ipv6=false
-    if [ "$ipv6" != "N/A" ] && [[ "$ipv6" =~ ":" ]]; then
-        has_ipv6=true
-    fi
-
-    # 如果单独请求失败，尝试组合API
-    if { [ "$ipv4" = "N/A" ] || ! [[ "$ipv4" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; } && \
-       { [ "$ipv6" = "N/A" ] || ! [[ "$ipv6" =~ ":" ]]; }; then
-        combined_ip=$(curl -s ip.sb || echo "N/A")
-        if [[ $combined_ip =~ .*:.* ]]; then 
-            ipv6=$combined_ip
-            has_ipv6=true
-            ipv4="N/A"
-        elif [[ $combined_ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            ipv4=$combined_ip
-        fi
-    fi
 }
 
 # 显示菜单
