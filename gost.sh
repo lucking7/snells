@@ -18,18 +18,18 @@ BOLD='\033[1m'
 UNDERLINE='\033[4m'
 PLAIN='\033[0m'
 
+# Service files directory - Standard systemd path
+SERVICE_DIR="/etc/systemd/system"
+
+# 默认配置目录和文件（将在setup_config_dir中被修改）
+CONFIG_DIR="./gost_config"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+
 # Symbols for messages
 SUCCESS_SYMBOL="[✔]"
 ERROR_SYMBOL="[✘]"
 INFO_SYMBOL="[ℹ]"
 WARN_SYMBOL="[!]"
-
-# Service files directory - Standard systemd path
-SERVICE_DIR="/etc/systemd/system"
-
-# Config directory and file (user-level, for easier management without sudo for config edits)
-CONFIG_DIR="./gost_config"
-CONFIG_FILE="$CONFIG_DIR/config.json"
 
 # Function to check and install essential dependencies and gost
 check_and_install_dependencies_and_gost() {
@@ -123,7 +123,32 @@ show_loading() {
   printf "${GREEN}%s%b${PLAIN}\n" "[OK]"
 }
 
+# 检查和创建配置目录
+setup_config_dir() {
+  # 尝试标准位置，优先级: /etc/gost/ > $HOME/gost/ > ./gost_config
+  if [ -d "/etc/gost" ] || (sudo mkdir -p /etc/gost && sudo chmod 755 /etc/gost 2>/dev/null); then
+    CONFIG_DIR="/etc/gost"
+    printf "${GREEN} ${SUCCESS_SYMBOL}使用标准配置目录: ${CONFIG_DIR}${PLAIN}\n"
+  elif [ -d "$HOME/gost" ] || mkdir -p "$HOME/gost" 2>/dev/null; then
+    CONFIG_DIR="$HOME/gost"
+    printf "${YELLOW} ${WARN_SYMBOL}无法创建/etc/gost目录，使用用户主目录: ${CONFIG_DIR}${PLAIN}\n"
+  else
+    CONFIG_DIR="./gost_config"
+    mkdir -p "$CONFIG_DIR" 2>/dev/null
+    printf "${YELLOW} ${WARN_SYMBOL}无法使用标准目录，使用当前目录: ${CONFIG_DIR}${PLAIN}\n"
+  fi
+  CONFIG_FILE="$CONFIG_DIR/config.json"
+  
+  # 如果是非标准目录，提示用户
+  if [[ "$CONFIG_DIR" != "/etc/gost" ]]; then
+    printf "${YELLOW} ${WARN_SYMBOL}警告: 不使用标准配置目录可能导致与系统服务集成问题${PLAIN}\n"
+    printf "${YELLOW} ${WARN_SYMBOL}建议使用管理员权限运行此脚本，或手动创建/etc/gost目录${PLAIN}\n"
+  fi
+}
+
+# 在检查依赖后调用配置目录设置函数
 check_and_install_dependencies_and_gost
+setup_config_dir
 
 validate_input() {
   local input=$1
@@ -170,6 +195,7 @@ ensure_config_dir() {
     printf "${GREEN} ${SUCCESS_SYMBOL}Created config directory: %s${PLAIN}\n" "$CONFIG_DIR"
   fi
   if [ ! -f "$CONFIG_FILE" ]; then
+    # 默认使用JSON格式，符合GOST的标准
     cat <<EOF >"$CONFIG_FILE"
 {
   "services": []
@@ -244,9 +270,28 @@ apply_config() {
     return 1
   fi
 
-  if ! jq empty "$CONFIG_FILE" >/dev/null 2>&1; then
+  # 检测配置文件格式 - 支持JSON和YAML
+  local file_ext="${CONFIG_FILE##*.}"
+  if [ "$file_ext" = "json" ]; then
+    if ! jq empty "$CONFIG_FILE" >/dev/null 2>&1; then
       printf "${RED} ${ERROR_SYMBOL}Invalid JSON format in %s. Please fix it manually.${PLAIN}\n" "$CONFIG_FILE"
       return 1
+    fi
+  elif [ "$file_ext" = "yml" ] || [ "$file_ext" = "yaml" ]; then
+    if ! command -v yq &>/dev/null; then
+      printf "${YELLOW} ${WARN_SYMBOL}YAML配置文件检查需要yq工具，跳过格式验证.${PLAIN}\n"
+    else
+      if ! yq eval . "$CONFIG_FILE" >/dev/null 2>&1; then 
+        printf "${RED} ${ERROR_SYMBOL}Invalid YAML format in %s. Please fix it manually.${PLAIN}\n" "$CONFIG_FILE"
+        return 1
+      fi
+    fi
+  else
+    printf "${YELLOW} ${WARN_SYMBOL}Unknown config file format: %s. Assuming JSON.${PLAIN}\n" "$file_ext"
+    if ! jq empty "$CONFIG_FILE" >/dev/null 2>&1; then
+      printf "${RED} ${ERROR_SYMBOL}Invalid JSON format in %s. Please fix it manually.${PLAIN}\n" "$CONFIG_FILE"
+      return 1
+    fi
   fi
   
   printf "${YELLOW} ${WARN_SYMBOL}WARNING: The gost service will run as User=nobody, Group=nogroup.${PLAIN}\n"
@@ -277,14 +322,22 @@ apply_config() {
     return 1
   fi
 
-  SERVICE_FILE_CONTENT=$(cat <<EOF
+  # 根据配置文件格式调整启动参数
+  local config_param=""
+  if [ "$file_ext" = "json" ] || [ "$file_ext" = "yml" ] || [ "$file_ext" = "yaml" ]; then
+    config_param="-C \"$abs_config_file\""
+  else  
+    config_param="-C \"$abs_config_file\""
+  fi
+
+SERVICE_FILE_CONTENT=$(cat <<EOF
 [Unit]
 Description=GOST Proxy Service
 After=network.target
 Wants=network.target
 
 [Service]
-ExecStart=/usr/local/bin/gost -C "$abs_config_file"
+ExecStart=/usr/local/bin/gost $config_param
 Restart=always
 RestartSec=5
 User=nobody
@@ -717,11 +770,36 @@ get_ip_info() {
 
 parse_config_file() {
   if [ ! -f "$CONFIG_FILE" ]; then return 1; fi
-  jq -r '.services[] | select(.forwarder != null) | 
-    .name + "|" + 
-    .addr + "|" + 
-    (.forwarder.nodes[0].addr // "") + "|" + 
-    (.handler.type // "")' "$CONFIG_FILE" 2>/dev/null
+  
+  # 检测文件格式
+  local file_ext="${CONFIG_FILE##*.}"
+  if [ "$file_ext" = "json" ]; then
+    # JSON格式解析
+    jq -r '.services[] | select(.forwarder != null) | 
+      .name + "|" + 
+      .addr + "|" + 
+      (.forwarder.nodes[0].addr // "") + "|" + 
+      (.handler.type // "")' "$CONFIG_FILE" 2>/dev/null
+  elif [ "$file_ext" = "yml" ] || [ "$file_ext" = "yaml" ]; then
+    # YAML格式解析 (如果安装了yq)
+    if command -v yq &>/dev/null; then
+      yq -r '.services[] | select(.forwarder != null) | 
+        .name + "|" + 
+        .addr + "|" + 
+        (.forwarder.nodes[0].addr // "") + "|" + 
+        (.handler.type // "")' "$CONFIG_FILE" 2>/dev/null
+    else
+      printf "${RED} ${ERROR_SYMBOL}无法解析YAML格式，缺少yq工具${PLAIN}\n"
+      return 1
+    fi
+  else
+    # 假设是JSON格式
+    jq -r '.services[] | select(.forwarder != null) | 
+      .name + "|" + 
+      .addr + "|" + 
+      (.forwarder.nodes[0].addr // "") + "|" + 
+      (.handler.type // "")' "$CONFIG_FILE" 2>/dev/null
+  fi
 }
 
 delete_config_forward() {
