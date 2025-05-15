@@ -1,24 +1,16 @@
-# Snells Scripts Collection
-
-This repository contains a collection of shell scripts for managing Snell, Gost, and Realm services.
-
-## Execution Commands
-
-To run the scripts directly, use the following commands:
-
-### Snell
+### snell
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/ilychi/snells/main/snells.sh)
 ```
 
-### Gost
+### gost
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/ilychi/snells/main/gost.sh)
 ```
 
-### Realm
+### realm
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/ilychi/snells/main/realm.sh)
