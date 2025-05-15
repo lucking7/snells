@@ -19,10 +19,10 @@ UNDERLINE='\033[4m'
 PLAIN='\033[0m'
 
 # Service files directory
-SERVICE_DIR="/etc/systemd/system"
+SERVICE_DIR="./gost_config/services"
 
 # Config directory and file
-CONFIG_DIR="/etc/gost"
+CONFIG_DIR="./gost_config"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 
 # Simplified loading animation
@@ -268,10 +268,10 @@ add_forward_to_config() {
       # 先检查文件是否为空或只有基本结构
       if grep -q '"services": \[\]' "$CONFIG_FILE"; then
         # 如果services数组为空
-        sed -i 's/"services": \[\]/"services": \['"$service"'\]/g' "$CONFIG_FILE"
+        sed -i "s/\"services\": \[\]/\"services\": \[$service\]/g" "$CONFIG_FILE"
       else
         # 如果services数组已经有内容
-        sed -i '/"services": \[/a \    '"$service"',' "$CONFIG_FILE"
+        sed -i "/\"services\": \[/a \    $service," "$CONFIG_FILE"
       fi
     fi
   fi
@@ -648,14 +648,14 @@ create_port_range_forward() {
     # 简单文本处理
     if grep -q '"services": \[\]' "$CONFIG_FILE"; then
       # services数组为空
-      sed -i 's/"services": \[\]/"services": \['"$services_json"'\]/g' "$CONFIG_FILE"
+      sed -i "s/\"services\": \[\]/\"services\": \[$services_json\]/g" "$CONFIG_FILE"
     else
       # services数组已有内容
       if [ "$proto" = "tcp-udp" ]; then
-        sed -i '/"services": \[/a \    '"$tcp_service"',' "$CONFIG_FILE"
-        sed -i '/"services": \[/a \    '"$udp_service"',' "$CONFIG_FILE"
+        sed -i "/\"services\": \[/a \    $tcp_service," "$CONFIG_FILE"
+        sed -i "/\"services\": \[/a \    $udp_service," "$CONFIG_FILE"
       else
-        sed -i '/"services": \[/a \    '"$service"',' "$CONFIG_FILE"
+        sed -i "/\"services\": \[/a \    $service," "$CONFIG_FILE"
       fi
     fi
   fi
@@ -1113,56 +1113,17 @@ delete_config_forward() {
   # 创建临时文件
   local temp_file=$(mktemp)
 
-    # 简单文本处理方式
-    local start_line=$(grep -n "\"name\"[[:space:]]*:[[:space:]]*\"$target_name\"" "$CONFIG_FILE" | cut -d: -f1)
-  if [ -z "$start_line" ]; then
-      # 检查TCP/UDP对的情况
-      if [[ "$target_name" == *-tcp ]]; then
-        local base_name=$(echo "$target_name" | sed 's/-tcp$//')
-        local alter_name="$base_name-udp"
-        # 也删除对应的UDP条目
-        local udp_line=$(grep -n "\"name\"[[:space:]]*:[[:space:]]*\"$alter_name\"" "$CONFIG_FILE" | cut -d: -f1)
-        
-        if [ ! -z "$udp_line" ]; then
-          echo -e "${YELLOW}Also removing matching UDP service: $alter_name${PLAIN}"
-          # 这里需要处理文本文件裁剪的复杂场景，简单起见建议安装jq
-          echo -e "${RED}Complex operation without jq tool. Please install jq for better results.${PLAIN}"
-        fi
-      elif [[ "$target_name" == *-udp ]]; then
-        local base_name=$(echo "$target_name" | sed 's/-udp$//')
-        local alter_name="$base_name-tcp"
-        # 也删除对应的TCP条目
-        local tcp_line=$(grep -n "\"name\"[[:space:]]*:[[:space:]]*\"$alter_name\"" "$CONFIG_FILE" | cut -d: -f1)
-        
-        if [ ! -z "$tcp_line" ]; then
-          echo -e "${YELLOW}Also removing matching TCP service: $alter_name${PLAIN}"
-          # 这里需要处理文本文件裁剪的复杂场景，简单起见建议安装jq
-          echo -e "${RED}Complex operation without jq tool. Please install jq for better results.${PLAIN}"
-        fi
-      fi
-      
-      echo -e "${RED}Entry not found in config file. Consider installing jq for better results.${PLAIN}"
-      rm -f "$temp_file"
-    return 1
-  fi
-
-    # 找到服务对象的开始和结束，这需要处理嵌套的JSON
-    # 这是简化的处理，可能不适用于所有JSON格式
-    # 强烈建议使用jq工具
-    echo -e "${YELLOW}Warning: Limited functionality without jq tool. Consider installing jq.${PLAIN}"
-    echo -e "${YELLOW}Attempting basic pattern-based removal...${PLAIN}"
-    
     # 简单替换方式：将配置文件转换为单行，然后通过正则替换
     tr -d '\n' < "$CONFIG_FILE" | 
     sed 's/  */ /g' |
-    sed 's/\({[^{}]*"name"[^{}]*"'"$target_name"'"[^{}]*}\),\?//g' > "$temp_file"
+    sed "s/\({[^{}]*\"name\"[^{}]*\"$target_name\"[^{}]*}\),\?//g" > "$temp_file"
     
     # 重新格式化JSON（如果没有jq，至少尝试保持基本格式）
     if command -v python3 &>/dev/null; then
       python3 -m json.tool "$temp_file" > "$CONFIG_FILE"
     else
       # 尝试简单分割以维持基本可读性
-      cat "$temp_file" | sed 's/\([{}[],]\)/\1\n/g' > "$CONFIG_FILE"
+      cat "$temp_file" | sed "s/\([{}[],]\)/\1\n/g" > "$CONFIG_FILE"
     fi
     
     echo -e "${YELLOW}Basic removal attempted. Recommend verifying the config file.${PLAIN}"
