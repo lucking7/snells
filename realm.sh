@@ -103,32 +103,59 @@ deploy_realm() {
 
     local github_api_host="https://api.github.com"
     local github_host="https://github.com"
-    local gh_proxy="https://ghproxy.link"
+    local gh_proxy="https://ghproxy.link" # 您提供的代理
+    local use_proxy=false
 
     if [ "$country" == "CN" ]; then
-        echo -e "${YELLOW}Detected IP in CN, using GitHub proxy: $gh_proxy ${NC}"
+        echo -e "${YELLOW}Detected IP in CN, attempting to use GitHub proxy: $gh_proxy ${NC}"
         github_api_host="${gh_proxy}/${github_api_host}" 
         github_host="${gh_proxy}/${github_host}"
+        use_proxy=true
     fi
 
     mkdir -p "$REALM_DIR" && cd "$REALM_DIR" || { echo -e "${RED}Failed to access $REALM_DIR directory.${NC}"; exit 1; }
     
-    # 从GitHub API获取最新版本
-    local api_response
-    api_response=$(curl -s "${github_api_host}/repos/zhboner/realm/releases/latest")
+    local _version=""
+    local fallback_version="v2.7.0" # 指定一个较新的已知稳定版本作为硬编码备用
 
-    if $use_jq && command -v jq &> /dev/null; then
-        _version=$(echo "$api_response" | jq -r '.tag_name // ""')
+    # 尝试从GitHub API获取最新版本
+    echo -e "${YELLOW}Attempting to fetch the latest version information from ${github_api_host}...${NC}"
+    local api_response
+    api_response=$(curl -s --connect-timeout 10 "${github_api_host}/repos/zhboner/realm/releases/latest")
+    local curl_exit_status=$?
+
+    if [ $curl_exit_status -ne 0 ]; then
+        echo -e "${RED}curl command failed to fetch version info (exit status: $curl_exit_status).${NC}"
+        api_response="" # 清空响应，确保后续判断版本获取失败
+    fi
+
+    local jq_exit_status=0
+    if [ -n "$api_response" ]; then # 仅当 curl 成功且有响应时才尝试解析
+        if $use_jq && command -v jq &> /dev/null; then
+            _version=$(echo "$api_response" | jq -r '.tag_name // ""')
+            jq_exit_status=$? # 获取 jq 的退出状态
+            if [ $jq_exit_status -ne 0 ]; then
+                echo -e "${RED}jq failed to parse API response (exit status: $jq_exit_status). Response was: ${api_response}${NC}" 
+                _version="" # 解析失败，清空版本
+            fi
+        else
+            _version=$(echo "$api_response" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        fi
     else
-        _version=$(echo "$api_response" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        echo -e "${YELLOW}No API response received or curl failed, cannot determine latest version.${NC}"
+        _version="" # 确保版本为空
     fi
     
-    if [ -z "$_version" ]; then
-        echo -e "${RED}Failed to get version number. Please check if you can connect to GitHub API.${NC}"
-        echo -e "${YELLOW}Falling back to a default known version v2.6.2 for download.${NC}"
-        _version="v2.6.2" 
+    # 版本获取失败时的回退逻辑
+    if [ -z "$_version" ] || ([ "$use_proxy" = true ] && [ $jq_exit_status -ne 0 ]); then # 如果版本为空，或者使用了代理且jq解析失败
+        if [ "$use_proxy" = true ]; then
+             echo -e "${RED}Failed to get version using proxy. Using fallback version for CN users: ${fallback_version}${NC}"
+        else
+             echo -e "${RED}Failed to get version number. Using fallback version: ${fallback_version}${NC}"
+        fi
+        _version="$fallback_version"
     else
-        echo -e "${GREEN}Latest version: ${_version}${NC}"
+        echo -e "${GREEN}Latest version determined: ${_version}${NC}"
     fi
     
     arch=$(uname -m)
