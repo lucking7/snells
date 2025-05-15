@@ -7,16 +7,16 @@
 # 注意: 该脚本默认使用配置文件方式管理所有转发
 
 # Color definitions
-RED='\\033[0;31m'
-GREEN='\\033[0;32m'
-YELLOW='\\033[1;33m'
-BLUE='\\033[1;34m'
-PURPLE='\\033[1;35m'
-CYAN='\\033[1;36m'
-WHITE='\\033[1;37m'
-BOLD='\\033[1m'
-UNDERLINE='\\033[4m'
-PLAIN='\\033[0m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[1;34m'
+PURPLE='\033[1;35m'
+CYAN='\033[1;36m'
+WHITE='\033[1;37m'
+BOLD='\033[1m'
+UNDERLINE='\033[4m'
+PLAIN='\033[0m'
 
 # Symbols for messages
 SUCCESS_SYMBOL="[✔]"
@@ -33,7 +33,7 @@ CONFIG_FILE="$CONFIG_DIR/config.json"
 
 # Function to check and install essential dependencies and gost
 check_and_install_dependencies_and_gost() {
-  printf "%b %sPerforming initial setup and dependency check...%b\\n" "$BLUE" "$INFO_SYMBOL" "$PLAIN"
+  printf "${BLUE} ${INFO_SYMBOL}Performing initial setup and dependency check...${PLAIN}\n"
   
   local essential_pkgs=("lsof" "jq" "realpath") # realpath is needed for absolute config path
   local utility_pkgs=("curl" "grep") 
@@ -47,14 +47,14 @@ check_and_install_dependencies_and_gost() {
   elif command -v dnf &>/dev/null; then
     pkg_manager_detected="dnf"
   else
-    printf "%b %sNo supported package manager (apt-get, yum, dnf) found. Please install dependencies manually.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+    printf "${RED} ${ERROR_SYMBOL}No supported package manager (apt-get, yum, dnf) found. Please install dependencies manually.${PLAIN}\n"
     for pkg in "${essential_pkgs[@]}"; do
         if ! command -v $pkg &>/dev/null; then
-            printf "%b %sCRITICAL: Essential package '$pkg' is missing. Script cannot continue.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+            printf "${RED} ${ERROR_SYMBOL}CRITICAL: Essential package '$pkg' is missing. Script cannot continue.${PLAIN}\n"
             exit 1
         fi
     done
-    printf "%b %sAssuming essential dependencies are present as no package manager was found for installation.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"
+    printf "${YELLOW} ${WARN_SYMBOL}Assuming essential dependencies are present as no package manager was found for installation.${PLAIN}\n"
   fi
 
   if [ -n "$pkg_manager_detected" ]; then
@@ -65,45 +65,45 @@ check_and_install_dependencies_and_gost() {
     done
 
     if [ ${#pkgs_to_install[@]} -gt 0 ]; then
-      printf "%b %sThe following packages are missing or not found: %s.%b\\n" "$YELLOW" "$INFO_SYMBOL" "${pkgs_to_install[*]}" "$PLAIN"
-      printf "%b %sAttempting to install them using %s (requires sudo)...%b\\n" "$YELLOW" "$INFO_SYMBOL" "$pkg_manager_detected" "$PLAIN"
+      printf "${YELLOW} ${INFO_SYMBOL}The following packages are missing or not found: %s.${PLAIN}\n" "${pkgs_to_install[*]}"
+      printf "${YELLOW} ${INFO_SYMBOL}Attempting to install them using %s (requires sudo)...${PLAIN}\n" "$pkg_manager_detected"
       if [ "$pkg_manager_detected" == "apt-get" ]; then
-        sudo apt-get update -y || printf "%b %sFailed to update package lists.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+        sudo apt-get update -y || printf "${RED} ${ERROR_SYMBOL}Failed to update package lists.${PLAIN}\n"
       fi
       if sudo $pkg_manager_detected install -y "${pkgs_to_install[@]}"; then
-        printf "%b %sSuccessfully attempted installation of: %s.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "${pkgs_to_install[*]}" "$PLAIN"
+        printf "${GREEN} ${SUCCESS_SYMBOL}Successfully attempted installation of: %s.${PLAIN}\n" "${pkgs_to_install[*]}"
       else
-        printf "%b %sFailed to install some packages. Please check errors and install them manually.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+        printf "${RED} ${ERROR_SYMBOL}Failed to install some packages. Please check errors and install them manually.${PLAIN}\n"
       fi
     fi
   fi
 
   for pkg in "${essential_pkgs[@]}"; do
     if ! command -v $pkg &>/dev/null; then
-      printf "%b %sCRITICAL: Essential package '$pkg' is still missing after installation attempt.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
-      printf "%b %sPlease install '$pkg' manually and re-run the script. Exiting.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+      printf "${RED} ${ERROR_SYMBOL}CRITICAL: Essential package '$pkg' is still missing after installation attempt.${PLAIN}\n"
+      printf "${RED} ${ERROR_SYMBOL}Please install '$pkg' manually and re-run the script. Exiting.${PLAIN}\n"
       exit 1
     fi
   done
-  printf "%b %sEssential dependencies (lsof, jq, realpath) are installed.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
+  printf "${GREEN} ${SUCCESS_SYMBOL}Essential dependencies (lsof, jq, realpath) are installed.${PLAIN}\n"
 
   if ! command -v gost &>/dev/null; then
-    printf "%b %sgost not found. Attempting to install gost...%b\\n" "$YELLOW" "$INFO_SYMBOL" "$PLAIN"
+    printf "${YELLOW} ${INFO_SYMBOL}gost not found. Attempting to install gost...${PLAIN}\n"
     if command -v curl &>/dev/null; then
       (bash <(curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh) --install) &
       show_loading $! 
       if command -v gost &>/dev/null; then
-        printf "%b %sgost installed successfully.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
+        printf "${GREEN} ${SUCCESS_SYMBOL}gost installed successfully.${PLAIN}\n"
       else
-        printf "%b %sFailed to install gost. Please install it manually from https://github.com/go-gost/gost %b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+        printf "${RED} ${ERROR_SYMBOL}Failed to install gost. Please install it manually from https://github.com/go-gost/gost ${PLAIN}\n"
       fi
     else
-      printf "%b %scurl is not installed. Cannot download gost install script. Please install curl and gost manually.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+      printf "${RED} ${ERROR_SYMBOL}curl is not installed. Cannot download gost install script. Please install curl and gost manually.${PLAIN}\n"
     fi
   else
-    printf "%b %sgost is already installed.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
+    printf "${GREEN} ${SUCCESS_SYMBOL}gost is already installed.${PLAIN}\n"
   fi
-  printf "%b %sInitial setup and dependency check complete.%b\\n" "$BLUE" "$INFO_SYMBOL" "$PLAIN"
+  printf "${BLUE} ${INFO_SYMBOL}Initial setup and dependency check complete.${PLAIN}\n"
 }
 
 show_loading() {
@@ -120,7 +120,7 @@ show_loading() {
     printf "\\b\\b\\b\\b\\b"
   done
   printf "\\b\\b\\b\\b\\b"
-  printf "%b%s%b\\n" "$GREEN" "[OK]" "$PLAIN"
+  printf "${GREEN}%s%b${PLAIN}\n" "[OK]"
 }
 
 check_and_install_dependencies_and_gost
@@ -132,7 +132,7 @@ validate_input() {
   case $input_type in
   "port")
     if ! [[ "$input" =~ ^[0-9]+$ ]] || [ "$input" -lt 1 ] || [ "$input" -gt 65535 ]; then
-      printf "%b %sInvalid port number. Must be between 1-65535.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+      printf "${RED} ${ERROR_SYMBOL}Invalid port number. Must be between 1-65535.${PLAIN}\n"
       return 1
     fi
     ;;
@@ -141,7 +141,7 @@ validate_input() {
       IFS='.' read -r -a octets <<<"$input"
       for octet in "${octets[@]}"; do
         if [ "$octet" -gt 255 ]; then
-          printf "%b %sInvalid IPv4 address. Each octet must be <= 255.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+          printf "${RED} ${ERROR_SYMBOL}Invalid IPv4 address. Each octet must be <= 255.${PLAIN}\n"
           return 1
         fi
       done
@@ -150,14 +150,14 @@ validate_input() {
     if [[ "$input" =~ ^[0-9a-fA-F:]+$ ]]; then # Simplified IPv6 check
       return 0
     fi
-    printf "%b %sInvalid IP address format.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+    printf "${RED} ${ERROR_SYMBOL}Invalid IP address format.${PLAIN}\n"
     return 1
     ;;
   "hostname")
     if [[ "$input" =~ ^[a-zA-Z0-9]([-a-zA-Z0-9\\.]{0,61}[a-zA-Z0-9])?$ ]]; then
       return 0
     fi
-    printf "%b %sInvalid hostname format.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+    printf "${RED} ${ERROR_SYMBOL}Invalid hostname format.${PLAIN}\n"
     return 1
     ;;
   esac
@@ -167,7 +167,7 @@ validate_input() {
 ensure_config_dir() {
   if [ ! -d "$CONFIG_DIR" ]; then
     mkdir -p "$CONFIG_DIR"
-    printf "%b %sCreated config directory: %s%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$CONFIG_DIR" "$PLAIN"
+    printf "${GREEN} ${SUCCESS_SYMBOL}Created config directory: %s${PLAIN}\n" "$CONFIG_DIR"
   fi
   if [ ! -f "$CONFIG_FILE" ]; then
     cat <<EOF >"$CONFIG_FILE"
@@ -175,7 +175,7 @@ ensure_config_dir() {
   "services": []
 }
 EOF
-    printf "%b %sCreated base config file: %s%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$CONFIG_FILE" "$PLAIN"
+    printf "${GREEN} ${SUCCESS_SYMBOL}Created base config file: %s${PLAIN}\n" "$CONFIG_FILE"
   fi
 }
 
@@ -207,7 +207,7 @@ add_forward_to_config() {
     if [ $? -eq 0 ]; then
       mv "$temp_file" "$CONFIG_FILE"
     else
-      printf "%b %sError adding services to config file using jq.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+      printf "${RED} ${ERROR_SYMBOL}Error adding services to config file using jq.${PLAIN}\n"
       rm -f "$temp_file"
       return 1
     fi
@@ -223,37 +223,37 @@ add_forward_to_config() {
     if [ $? -eq 0 ]; then
       mv "$temp_file" "$CONFIG_FILE"
     else
-      printf "%b %sError adding service to config file using jq.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+      printf "${RED} ${ERROR_SYMBOL}Error adding service to config file using jq.${PLAIN}\n"
       rm -f "$temp_file"
       return 1
     fi
   fi
-  printf "%b %sAdded forwarding to config file.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
+  printf "${GREEN} ${SUCCESS_SYMBOL}Added forwarding to config file.${PLAIN}\n"
 }
 
 apply_config() {
   if [ ! -f "$CONFIG_FILE" ]; then
-    printf "%b %sConfig file not found at: %s%b\\n" "$RED" "$ERROR_SYMBOL" "$CONFIG_FILE" "$PLAIN"
+    printf "${RED} ${ERROR_SYMBOL}Config file not found at: %s${PLAIN}\n" "$CONFIG_FILE"
     ensure_config_dir
-    printf "%b %sBase config file created. Please add forwarding entries and try again.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"
+    printf "${YELLOW} ${WARN_SYMBOL}Base config file created. Please add forwarding entries and try again.${PLAIN}\n"
     return 1
   fi
 
   if ! command -v gost &>/dev/null; then
-    printf "%b %sgost command not found. Please install it first.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+    printf "${RED} ${ERROR_SYMBOL}gost command not found. Please install it first.${PLAIN}\n"
     return 1
   fi
 
   if ! jq empty "$CONFIG_FILE" >/dev/null 2>&1; then
-      printf "%b %sInvalid JSON format in %s. Please fix it manually.%b\\n" "$RED" "$ERROR_SYMBOL" "$CONFIG_FILE" "$PLAIN"
+      printf "${RED} ${ERROR_SYMBOL}Invalid JSON format in %s. Please fix it manually.${PLAIN}\n" "$CONFIG_FILE"
       return 1
   fi
   
-  printf "%b %sWARNING: The gost service will run as User=nobody, Group=nogroup.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"
-  printf "%b %sPlease ensure the config file '$CONFIG_FILE' (absolute path: $(realpath "$CONFIG_FILE")) is readable by this user/group.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"
-  printf "%b %sYou might need to adjust permissions (e.g., sudo chmod 644 $(realpath "$CONFIG_FILE")).%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"
+  printf "${YELLOW} ${WARN_SYMBOL}WARNING: The gost service will run as User=nobody, Group=nogroup.${PLAIN}\n"
+  printf "${YELLOW} ${WARN_SYMBOL}Please ensure the config file '$CONFIG_FILE' (absolute path: $(realpath "$CONFIG_FILE")) is readable by this user/group.${PLAIN}\n"
+  printf "${YELLOW} ${WARN_SYMBOL}You might need to adjust permissions (e.g., sudo chmod 644 $(realpath "$CONFIG_FILE")).${PLAIN}\n"
 
-  printf "%b %sStopping existing gost service (if any)...%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
+  printf "${CYAN} ${INFO_SYMBOL}Stopping existing gost service (if any)...${PLAIN}\n"
   if systemctl is-active --quiet gost; then
     sudo systemctl stop gost
   fi
@@ -261,7 +261,7 @@ apply_config() {
     if [ -f "$old_service_file" ]; then
       service_name=$(basename "$old_service_file" .service)
       if [ "$service_name" != "gost" ]; then 
-        printf "%b %sStopping and disabling old service %s...%b\\n" "$YELLOW" "$INFO_SYMBOL" "$service_name" "$PLAIN"
+        printf "${YELLOW} ${INFO_SYMBOL}Stopping and disabling old service %s...${PLAIN}\n" "$service_name"
         sudo systemctl stop "$service_name" &>/dev/null
         sudo systemctl disable "$service_name" &>/dev/null
         sudo rm -f "$old_service_file"
@@ -269,11 +269,11 @@ apply_config() {
     fi
   done
 
-  printf "%b %sCreating and configuring gost systemd service...%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
+  printf "${CYAN} ${INFO_SYMBOL}Creating and configuring gost systemd service...${PLAIN}\n"
   
   local abs_config_file
   if ! abs_config_file=$(realpath "$CONFIG_FILE"); then
-    printf "%b %sFailed to get absolute path for %s. Make sure 'realpath' is installed.%b\\n" "$RED" "$ERROR_SYMBOL" "$CONFIG_FILE" "$PLAIN"
+    printf "${RED} ${ERROR_SYMBOL}Failed to get absolute path for %s. Make sure 'realpath' is installed.${PLAIN}\n" "$CONFIG_FILE"
     return 1
   fi
 
@@ -297,42 +297,42 @@ EOF
 
   echo "$SERVICE_FILE_CONTENT" | sudo tee "$SERVICE_DIR/gost.service" > /dev/null
   if [ $? -ne 0 ]; then
-    printf "%b %sFailed to write gost.service file. Check sudo permissions or if '%s' is writable.%b\\n" "$RED" "$ERROR_SYMBOL" "$SERVICE_DIR" "$PLAIN"
+    printf "${RED} ${ERROR_SYMBOL}Failed to write gost.service file. Check sudo permissions or if '%s' is writable.${PLAIN}\n" "$SERVICE_DIR"
     return 1
   fi
 
   sudo systemctl daemon-reload
   sudo systemctl enable gost
 
-  printf "%b %sStarting gost service...%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
+  printf "${CYAN} ${INFO_SYMBOL}Starting gost service...${PLAIN}\n"
   if ! sudo systemctl start gost; then
-    printf "%b %sFailed to start gost service. Checking for errors...%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+    printf "${RED} ${ERROR_SYMBOL}Failed to start gost service. Checking for errors...${PLAIN}\n"
     sudo journalctl -u gost --no-pager -n 20
     return 1
   fi
 
   if sudo systemctl is-active --quiet gost; then
-    printf "%b %sGost service is running successfully!%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
-    printf "%b %sConfigured forwarding services from %s:%b\\n" "$CYAN" "$INFO_SYMBOL" "$CONFIG_FILE" "$PLAIN"
+    printf "${GREEN} ${SUCCESS_SYMBOL}Gost service is running successfully!${PLAIN}\n"
+    printf "${CYAN} ${INFO_SYMBOL}Configured forwarding services from %s:${PLAIN}\n" "$CONFIG_FILE"
     local counter=1
     while IFS="|" read -r name listen_addr target_addr proto; do
       if [ ! -z "$name" ]; then
         local local_port=$(echo "$listen_addr" | grep -o ':[0-9]\+\(-[0-9]\+\)*' | sed 's/://')
         target_ip=$(echo "$target_addr" | grep -o '[^:]*' | head -1)
         target_port=$(echo "$target_addr" | grep -o ':[0-9]\+\(-[0-9]\+\)*' | sed 's/://')
-        printf "  %b%s.%b Port %s (%s) -> %s:%s [%s]\\n" "$GREEN" "$counter" "$PLAIN" "$local_port" "$proto" "$target_ip" "$target_port" "$name"
+        printf "  ${GREEN}%s.%s${PLAIN} Port %s (%s) -> %s:%s [%s]\n" "$counter" "$PLAIN" "$local_port" "$proto" "$target_ip" "$target_port" "$name"
         ((counter++))
       fi
     done < <(parse_config_file)
     if [ $counter -eq 1 ]; then
-      printf "%b %sNo forwarding entries found in config file.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"
+      printf "${YELLOW} ${WARN_SYMBOL}No forwarding entries found in config file.${PLAIN}\n"
     fi
   else
-    printf "%b %sFailed to start gost service. Service status is inactive.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+    printf "${RED} ${ERROR_SYMBOL}Failed to start gost service. Service status is inactive.${PLAIN}\n"
     sudo journalctl -u gost --no-pager -n 20
     return 1
   fi
-  printf "%b %sSuccessfully applied configuration from: %s%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$CONFIG_FILE" "$PLAIN"
+  printf "${GREEN} ${SUCCESS_SYMBOL}Successfully applied configuration from: %s${PLAIN}\n" "$CONFIG_FILE"
   return 0
 }
 
@@ -348,7 +348,7 @@ find_free_port() {
 }
 
 create_forward_service() {
-  printf "%b%s=== Create a new port forwarding ===%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
+  printf "${CYAN}${INFO_SYMBOL}=== Create a new port forwarding ===${PLAIN}\n"
   read -p "Local port (default: random available port): " local_port
   if [ -n "$local_port" ]; then
     if ! validate_input "$local_port" "port"; then
@@ -357,12 +357,12 @@ create_forward_service() {
     fi
   else
     local_port=$(find_free_port)
-    printf "%b %sSelected available local port: %b%s%b%b\\n" "$YELLOW" "$INFO_SYMBOL" "$BOLD" "$local_port" "$PLAIN" "$YELLOW" # Ensure PLAIN is reset
+    printf "${YELLOW} ${INFO_SYMBOL}Selected available local port: ${BOLD}%s${PLAIN}${YELLOW}\n" "$local_port" # Ensure PLAIN is reset
   fi
 
   read -p "Target IP or hostname: " target_ip
   if [ -z "$target_ip" ]; then
-    printf "%b %sTarget IP or hostname cannot be empty.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+    printf "${RED} ${ERROR_SYMBOL}Target IP or hostname cannot be empty.${PLAIN}\n"
     read -n1 -r -p "Press any key to try again..."
     return
   fi
@@ -377,10 +377,10 @@ create_forward_service() {
     target_ip="[$target_ip]"
   fi
 
-  printf "%b%sSelect protocol:%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
-  printf "%b1.%b TCP\\n" "$GREEN" "$PLAIN"
-  printf "%b2.%b UDP\\n" "$GREEN" "$PLAIN"
-  printf "%b3.%b Both TCP & UDP %b(default)%b\\n" "$GREEN" "$PLAIN" "$YELLOW" "$PLAIN"
+  printf "${CYAN}${INFO_SYMBOL}Select protocol:${PLAIN}\n"
+  printf "${GREEN}1.${PLAIN} TCP\n"
+  printf "${GREEN}2.${PLAIN} UDP\n"
+  printf "${GREEN}3.${PLAIN} Both TCP & UDP ${YELLOW}(default)${PLAIN}\n"
   read -p "Select [1-3] (default: 3): " protocol_type
 
   case $protocol_type in
@@ -399,9 +399,9 @@ create_forward_service() {
 }
 
 create_port_range_forward() {
-  printf "%b%s=== Create Port Range Forwarding ===%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
-  printf "%b1.%b Many-to-One (Multiple local ports to one target port)\\n" "$GREEN" "$PLAIN"
-  printf "%b2.%b Many-to-Many (Each local port maps to corresponding target port)\\n" "$GREEN" "$PLAIN"
+  printf "${CYAN}${INFO_SYMBOL}=== Create Port Range Forwarding ===${PLAIN}\n"
+  printf "${GREEN}1.${PLAIN} Many-to-One (Multiple local ports to one target port)\n"
+  printf "${GREEN}2.${PLAIN} Many-to-Many (Each local port maps to corresponding target port)\n"
   read -p "Select forwarding type [1-2]: " range_type
 
   read -p "Local port range start: " local_start
@@ -410,20 +410,20 @@ create_port_range_forward() {
   if ! validate_input "$local_end" "port"; then read -n1 -r -p "Press any key..." ; return; fi
 
   if [ "$local_start" -gt "$local_end" ]; then
-    printf "%b %sStart port cannot be greater than end port.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+    printf "${RED} ${ERROR_SYMBOL}Start port cannot be greater than end port.${PLAIN}\n"
     read -n1 -r -p "Press any key to try again..."
     return
   fi
 
   read -p "Target IP or hostname: " target_ip
-  if [ -z "$target_ip" ]; then printf "%b %sTarget IP or hostname cannot be empty.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"; read -n1 -r -p "Press any key..." ; return; fi
+  if [ -z "$target_ip" ]; then printf "${RED} ${ERROR_SYMBOL}Target IP or hostname cannot be empty.${PLAIN}"; read -n1 -r -p "Press any key..." ; return; fi
 
   if [[ $target_ip == *:* ]] && [[ $target_ip != \\[*\] ]]; then target_ip="[$target_ip]"; fi
 
-  printf "%b%sSelect protocol:%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
-  printf "%b1.%b TCP\\n" "$GREEN" "$PLAIN"
-  printf "%b2.%b UDP\\n" "$GREEN" "$PLAIN"
-  printf "%b3.%b Both TCP & UDP %b(default)%b\\n" "$GREEN" "$PLAIN" "$YELLOW" "$PLAIN"
+  printf "${CYAN}${INFO_SYMBOL}Select protocol:${PLAIN}\n"
+  printf "${GREEN}1.${PLAIN} TCP\n"
+  printf "${GREEN}2.${PLAIN} UDP\n"
+  printf "${GREEN}3.${PLAIN} Both TCP & UDP ${YELLOW}(default)${PLAIN}\n"
   read -p "Select [1-3] (default: 3): " protocol_type
   case $protocol_type in 1) proto="tcp";; 2) proto="udp";; *) proto="tcp-udp";; esac
 
@@ -457,16 +457,16 @@ create_port_range_forward() {
   if [ $? -eq 0 ]; then
     mv "$temp_file" "$CONFIG_FILE"
   else
-    printf "%b %sError adding service to config file using jq.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+    printf "${RED} ${ERROR_SYMBOL}Error adding service to config file using jq.${PLAIN}\n"
     rm -f "$temp_file"
     return 1
   fi
   rm -f "$temp_file"
   
-  printf "%b %sPort range forwarding added to config file.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
-  printf "%b  %s- Name: %s%b\\n" "$CYAN" "$INFO_SYMBOL" "$service_name" "$PLAIN"
-  printf "%b  %s- Ports: %s-%s%b\\n" "$CYAN" "$INFO_SYMBOL" "$local_start" "$local_end" "$PLAIN"
-  printf "%b  %s- Protocol: %s%b\\n" "$CYAN" "$INFO_SYMBOL" "$proto" "$PLAIN"
+  printf "${GREEN} ${SUCCESS_SYMBOL}Port range forwarding added to config file.${PLAIN}\n"
+  printf "  ${CYAN}${INFO_SYMBOL}- Name: %s${PLAIN}\n" "$service_name"
+  printf "  ${CYAN}${INFO_SYMBOL}- Ports: %s-%s${PLAIN}\n" "$local_start" "$local_end"
+  printf "  ${CYAN}${INFO_SYMBOL}- Protocol: %s${PLAIN}\n" "$proto"
   
   read -p "Apply config file now? (Y/n): " apply_now
   if [[ $apply_now != "n" && $apply_now != "N" ]]; then
@@ -475,13 +475,13 @@ create_port_range_forward() {
 }
 
 list_forward_services() {
-  printf "%b%s=== Forwarding Services List ===%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
+  printf "${CYAN}${INFO_SYMBOL}=== Forwarding Services List ===${PLAIN}\n"
   local counter=1
   local config_found=0
 
-  printf "%bConfig File Forwarding Services:%b\\n" "$BLUE" "$PLAIN"
-  printf "%-5s %-35s %-20s %-20s %-15s %-10s\\n" "No." "Service Name" "Local Port/Range" "Target Address" "Target Port" "Type"
-  printf "%s\\n" "-----------------------------------------------------------------------------------------------------"
+  printf "${BLUE}Config File Forwarding Services:${PLAIN}\n"
+  printf "%-5s %-35s %-20s %-20s %-15s %-10s\n" "No." "Service Name" "Local Port/Range" "Target Address" "Target Port" "Type"
+  printf "%s\n" "-----------------------------------------------------------------------------------------------------"
 
   if [ -f "$CONFIG_FILE" ]; then
     local gost_status=$(systemctl is-active gost 2>/dev/null)
@@ -494,39 +494,39 @@ list_forward_services() {
         target_ip=$(echo "$target_addr" | grep -o '[^:]*' | head -1)
         target_port=$(echo "$target_addr" | grep -o ':[0-9]\+\(-[0-9]\+\)*' | sed 's/://')
 
-        printf "%-5s %-35s %-20s %-20s %-15s %-10s\\n" \
+        printf "%-5s %-35s %-20s %-20s %-15s %-10s\n" \
           "$counter" "$name" "$local_port" "$target_ip" "$target_port" "$proto"
         ((counter++))
       fi
     done < <(parse_config_file)
 
     if [ $config_found -eq 0 ]; then
-      printf "%b %sNo forwarding services found in config file.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"
+      printf "${YELLOW} ${WARN_SYMBOL}No forwarding services found in config file.${PLAIN}\n"
     else
-      printf "\\n%bService Status:%b %s\\n" "$BLUE" "$PLAIN" "$gost_status"
+      printf "\n${BLUE}Service Status:${PLAIN} %s\n" "$gost_status"
     fi
   else
-    printf "%b %sConfig file not found at: %s%b\\n" "$YELLOW" "$WARN_SYMBOL" "$CONFIG_FILE" "$PLAIN"
+    printf "${YELLOW} ${WARN_SYMBOL}Config file not found at: %s${PLAIN}\n" "$CONFIG_FILE"
   fi
 
   if [ $config_found -eq 0 ] && [ ! -f "$CONFIG_FILE" ]; then # Only show if config file also not found
-     printf "%b %sNo forwarding services found.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"
+     printf "${YELLOW} ${WARN_SYMBOL}No forwarding services found.${PLAIN}\n"
   fi
 }
 
 manage_forward_services() {
   while true; do
-    printf "\\n%b%s=== Manage Forwarding Services ===%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
-    printf "%b1.%b List all services\\n" "$GREEN" "$PLAIN"
-    printf "%b2.%b Delete forwarding service\\n" "$GREEN" "$PLAIN"
-    printf "%b3.%b Modify forwarding service\\n" "$GREEN" "$PLAIN"
-    printf "%b4.%b Add new forwarding service\\n" "$GREEN" "$PLAIN"
-    printf "%b5.%b Start service (apply config)\\n" "$GREEN" "$PLAIN"
-    printf "%b6.%b Stop service\\n" "$GREEN" "$PLAIN"
-    printf "%b7.%b Restart service\\n" "$GREEN" "$PLAIN"
-    printf "%b8.%b Check service status\\n" "$GREEN" "$PLAIN"
-    printf "%b9.%b Return to main menu\\n" "$GREEN" "$PLAIN"
-    read -p "$(printf "%bPlease select [1-9]: %b" "$YELLOW" "$PLAIN")" choice
+    printf "\n${CYAN}${INFO_SYMBOL}=== Manage Forwarding Services ===${PLAIN}\n"
+    printf "${GREEN}1.${PLAIN} List all services\n"
+    printf "${GREEN}2.${PLAIN} Delete forwarding service\n"
+    printf "${GREEN}3.${PLAIN} Modify forwarding service\n"
+    printf "${GREEN}4.${PLAIN} Add new forwarding service\n"
+    printf "${GREEN}5.${PLAIN} Start service (apply config)\n"
+    printf "${GREEN}6.${PLAIN} Stop service\n"
+    printf "${GREEN}7.${PLAIN} Restart service\n"
+    printf "${GREEN}8.${PLAIN} Check service status\n"
+    printf "${GREEN}9.${PLAIN} Return to main menu\n"
+    read -p "$(printf "${YELLOW}Please select [1-9]: ${PLAIN}")" choice
 
     case $choice in
     1) list_forward_services ;;
@@ -541,58 +541,48 @@ manage_forward_services() {
       edit_config_forward "$service_number"
       ;;
     4)
-      printf "%b%sSelect forwarding type:%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
-      printf "%b1.%b Single port forwarding\\n" "$GREEN" "$PLAIN"
-      printf "%b2.%b Port range forwarding\\n" "$GREEN" "$PLAIN"
+      printf "${CYAN}${INFO_SYMBOL}Select forwarding type:${PLAIN}\n"
+      printf "${GREEN}1.${PLAIN} Single port forwarding\n"
+      printf "${GREEN}2.${PLAIN} Port range forwarding\n"
       read -p "Select [1-2]: " forwarding_type
       case $forwarding_type in
       1) create_forward_service ;; 
       2) create_port_range_forward ;; 
-      *) printf "%b %sInvalid selection.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN" ;; 
+      *) printf "${RED} ${ERROR_SYMBOL}Invalid selection.${PLAIN}\n" ;; 
       esac
       ;;
     5)
-      printf "%b %sStarting GOST service (applying config)...%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
+      printf "${CYAN}${INFO_SYMBOL}Starting GOST service (applying config)...${PLAIN}\n"
       apply_config
       ;;
     6)
-      printf "%b %sStopping GOST service...%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
+      printf "${CYAN}${INFO_SYMBOL}Stopping GOST service...${PLAIN}\n"
       if systemctl is-active --quiet gost; then
         sudo systemctl stop gost
-        printf "%b %sGOST service stopped.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
+        printf "${GREEN} ${SUCCESS_SYMBOL}GOST service stopped.${PLAIN}\n"
       else
-        printf "%b %sGOST service is not running.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"
+        printf "${YELLOW} ${WARN_SYMBOL}GOST service is not running.${PLAIN}\n"
       fi
       ;;
     7)
-      printf "%b %sRestarting GOST service...%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
+      printf "${CYAN}${INFO_SYMBOL}Restarting GOST service...${PLAIN}\n"
       if systemctl is-active --quiet gost; then
         sudo systemctl restart gost
-        printf "%b %sGOST service restarted.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
+        printf "${GREEN} ${SUCCESS_SYMBOL}GOST service restarted.${PLAIN}\n"
       else
         sudo systemctl start gost # Attempt to start if not active
         if systemctl is-active --quiet gost; then
-            printf "%b %sGOST service started.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
+            printf "${GREEN} ${SUCCESS_SYMBOL}GOST service started.${PLAIN}\n"
         else
-            printf "%b %sFailed to start GOST service.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+            printf "${RED} ${ERROR_SYMBOL}Failed to start GOST service.${PLAIN}\n"
         fi
       fi
       ;;
     8)
-      local status=$(systemctl is-active gost)
-      if [ "$status" = "active" ]; then
-        printf "%b %sGOST service is running.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
-        printf "%b%sGOST Process Information:%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
-        ps aux | grep "/usr/local/bin/gost -C" | grep -v grep
-        printf "%b%sGOST Service Logs (last 10 lines):%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
-        sudo journalctl -u gost --no-pager -n 10
-      else
-        printf "%b %sGOST service is not running (status: %s).%b\\n" "$RED" "$ERROR_SYMBOL" "$status" "$PLAIN"
-        printf "%b %sCheck service logs with: %bjournalctl -u gost%b%b\\n" "$CYAN" "$INFO_SYMBOL" "$YELLOW" "$PLAIN" "$CYAN" # Fixed color reset
-      fi
+      check_gost_status
       ;;
     9) return ;;
-    *) printf "%b %sInvalid selection. Please try again.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN" ;; 
+    *) printf "${RED} ${ERROR_SYMBOL}Invalid selection. Please try again.${PLAIN}\n" ;; 
     esac
     read -n1 -r -p "Press any key to continue..."
   done
@@ -600,16 +590,16 @@ manage_forward_services() {
 
 config_file_management() {
   while true; do
-    printf "\\n%b%s=== Configuration File Management ===%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
-    printf "%b1.%b Initialize/reset config file\\n" "$GREEN" "$PLAIN"
-    printf "%b2.%b Apply current config file\\n" "$GREEN" "$PLAIN"
-    printf "%b3.%b View config file\\n" "$GREEN" "$PLAIN"
-    printf "%b4.%b Edit config file\\n" "$GREEN" "$PLAIN"
-    printf "%b5.%b Backup config file\\n" "$GREEN" "$PLAIN"
-    printf "%b6.%b Restore config from backup\\n" "$GREEN" "$PLAIN"
-    printf "%b7.%b Format config file (requires jq)\\n" "$GREEN" "$PLAIN"
-    printf "%b8.%b Return to main menu\\n" "$GREEN" "$PLAIN"
-    read -p "$(printf "%bPlease select [1-8]: %b" "$YELLOW" "$PLAIN")" choice
+    printf "\n${CYAN}${INFO_SYMBOL}=== Configuration File Management ===${PLAIN}\n"
+    printf "${GREEN}1.${PLAIN} Initialize/reset config file\n"
+    printf "${GREEN}2.${PLAIN} Apply current config file\n"
+    printf "${GREEN}3.${PLAIN} View config file\n"
+    printf "${GREEN}4.${PLAIN} Edit config file\n"
+    printf "${GREEN}5.${PLAIN} Backup config file\n"
+    printf "${GREEN}6.${PLAIN} Restore config from backup\n"
+    printf "${GREEN}7.${PLAIN} Format config file (requires jq)\n"
+    printf "${GREEN}8.${PLAIN} Return to main menu\n"
+    read -p "$(printf "${YELLOW}Please select [1-8]: ${PLAIN}")" choice
 
     case $choice in
     1)
@@ -617,23 +607,23 @@ config_file_management() {
       if [[ $confirm == [Yy]* ]]; then
         rm -f "$CONFIG_FILE"
         ensure_config_dir
-        printf "%b %sConfig file reset to empty template.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
+        printf "${GREEN} ${SUCCESS_SYMBOL}Config file reset to empty template.${PLAIN}\n"
       else
-        printf "%b %sOperation cancelled.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"
+        printf "${YELLOW} ${WARN_SYMBOL}Operation cancelled.${PLAIN}\n"
       fi
       ;;
     2)
       if [ ! -f "$CONFIG_FILE" ]; then
-        printf "%b %sConfig file not found. Please initialize it first.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+        printf "${RED} ${ERROR_SYMBOL}Config file not found. Please initialize it first.${PLAIN}\n"
       else
         apply_config
       fi
       ;;
     3)
       if [ ! -f "$CONFIG_FILE" ]; then
-        printf "%b %sConfig file not found. Please initialize it first.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+        printf "${RED} ${ERROR_SYMBOL}Config file not found. Please initialize it first.${PLAIN}\n"
       else
-        printf "%b%sConfig file content:%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
+        printf "${CYAN}${INFO_SYMBOL}Config file content:${PLAIN}\n"
         jq . "$CONFIG_FILE" | cat -n # jq is mandatory now
       fi
       ;;
@@ -642,13 +632,13 @@ config_file_management() {
       local editor=""
       for e in nano vim vi; do if command -v $e &>/dev/null; then editor=$e; break; fi; done
       if [ -z "$editor" ]; then
-        printf "%b %sNo suitable editor found (nano, vim, vi). Please install one.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+        printf "${RED} ${ERROR_SYMBOL}No suitable editor found (nano, vim, vi). Please install one.${PLAIN}\n"
       else
         $editor "$CONFIG_FILE"
         if jq empty "$CONFIG_FILE" > /dev/null 2>&1; then
-          printf "%b %sConfig file format is valid.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
+          printf "${GREEN} ${SUCCESS_SYMBOL}Config file format is valid.${PLAIN}\n"
         else
-          printf "%b %sWARNING: Config file format is invalid! This may cause issues when applying the config.%b\\n" "$RED" "$WARN_SYMBOL" "$PLAIN"
+          printf "${YELLOW} ${WARN_SYMBOL}WARNING: Config file format is invalid! This may cause issues when applying the config.${PLAIN}\n"
         fi
         read -p "Do you want to apply the edited config now? (y/N): " apply_now
         if [[ $apply_now == [Yy]* ]]; then apply_config; fi
@@ -656,23 +646,23 @@ config_file_management() {
       ;;
     5)
       if [ ! -f "$CONFIG_FILE" ]; then
-        printf "%b %sConfig file not found. Nothing to backup.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+        printf "${RED} ${ERROR_SYMBOL}Config file not found. Nothing to backup.${PLAIN}\n"
       else
         local backup_file="$CONFIG_DIR/config-$(date +%Y%m%d-%H%M%S).json.bak"
         cp "$CONFIG_FILE" "$backup_file"
-        printf "%b %sConfig file backed up to: %s%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$backup_file" "$PLAIN"
+        printf "${GREEN} ${SUCCESS_SYMBOL}Config file backed up to: %s${PLAIN}\n" "$backup_file"
       fi
       ;;
     6)
       local backups=($CONFIG_DIR/config-*.json.bak)
       if [ ${#backups[@]} -eq 0 ] || [ ! -f "${backups[0]}" ]; then # Check if array is empty or first element is not a file
-        printf "%b %sNo backup files found in %s%b\\n" "$RED" "$ERROR_SYMBOL" "$CONFIG_DIR" "$PLAIN"
+        printf "${RED} ${ERROR_SYMBOL}No backup files found in %s${PLAIN}\n" "$CONFIG_DIR"
       else
-        printf "%b%sAvailable backup files:%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
+        printf "${CYAN}${INFO_SYMBOL}Available backup files:${PLAIN}\n"
         local i=1
         for backup in "${backups[@]}"; do
           if [ -f "$backup" ]; then
-            printf "%b%s.%b %s (%s)\\n" "$GREEN" "$i" "$PLAIN" "$(basename "$backup")" "$(date -r "$backup" '+%Y-%m-%d %H:%M:%S')"
+            printf "${GREEN}%s.%s %s (%s)${PLAIN}\n" "$i" "$PLAIN" "$(basename "$backup")" "$(date -r "$backup" '+%Y-%m-%d %H:%M:%S')"
             ((i++))
           fi
         done
@@ -682,33 +672,33 @@ config_file_management() {
           read -p "Restore from $selected? This will overwrite your current config. (y/N): " confirm
           if [[ $confirm == [Yy]* ]]; then
             cp "$selected" "$CONFIG_FILE"
-            printf "%b %sConfig restored from: %s%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$selected" "$PLAIN"
+            printf "${GREEN} ${SUCCESS_SYMBOL}Config restored from: %s${PLAIN}\n" "$selected"
             read -p "Apply the restored config now? (Y/n): " apply_now
             if [[ $apply_now != [Nn]* ]]; then apply_config; fi
           else
-            printf "%b %sRestore cancelled.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"
+            printf "${YELLOW} ${WARN_SYMBOL}Restore cancelled.${PLAIN}\n"
           fi
         else
-          printf "%b %sInvalid selection.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+          printf "${RED} ${ERROR_SYMBOL}Invalid selection.${PLAIN}\n"
         fi
       fi
       ;;
     7)
       if [ ! -f "$CONFIG_FILE" ]; then
-        printf "%b %sConfig file not found. Please initialize it first.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+        printf "${RED} ${ERROR_SYMBOL}Config file not found. Please initialize it first.${PLAIN}\n"
       else
         local temp_file=$(mktemp)
         if jq . "$CONFIG_FILE" > "$temp_file" 2>/dev/null; then
           mv "$temp_file" "$CONFIG_FILE"
-          printf "%b %sConfig file formatted successfully.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
+          printf "${GREEN} ${SUCCESS_SYMBOL}Config file formatted successfully.${PLAIN}\n"
         else
           rm -f "$temp_file"
-          printf "%b %sFailed to format config file. JSON format may be invalid.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+          printf "${RED} ${ERROR_SYMBOL}Failed to format config file. JSON format may be invalid.${PLAIN}\n"
         fi
       fi
       ;;
     8) return ;;
-    *) printf "%b %sInvalid selection. Please try again.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN" ;; 
+    *) printf "${RED} ${ERROR_SYMBOL}Invalid selection. Please try again.${PLAIN}\n" ;; 
     esac
     read -n1 -r -p "Press any key to continue..."
   done
@@ -737,23 +727,23 @@ parse_config_file() {
 delete_config_forward() {
   local entry_number=$1
   if [ -z "$entry_number" ] || ! [[ "$entry_number" =~ ^[0-9]+$ ]]; then
-    printf "%b %sInvalid service number.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"; return 1;
+    printf "${RED} ${ERROR_SYMBOL}Invalid service number.${PLAIN}\n"; return 1;
   fi
   if [ ! -f "$CONFIG_FILE" ]; then
-    printf "%b %sConfig file not found.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"; return 1;
+    printf "${RED} ${ERROR_SYMBOL}Config file not found.${PLAIN}\n"; return 1;
   fi
 
   local entries=()
   while IFS="|" read -r name _ _ _; do if [ ! -z "$name" ]; then entries+=("$name"); fi; done < <(parse_config_file)
 
   if [ $entry_number -lt 1 ] || [ $entry_number -gt ${#entries[@]} ]; then
-    printf "%b %sInvalid entry number.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"; return 1;
+    printf "${RED} ${ERROR_SYMBOL}Invalid entry number.${PLAIN}\n"; return 1;
   fi
 
   local target_name=${entries[$entry_number - 1]}
   read -p "Are you sure you want to delete the forwarding entry ${BOLD}${target_name}${PLAIN}? (${GREEN}Y${PLAIN}/${RED}N${PLAIN}): " confirm
   if [[ $confirm != [Yy]* ]]; then
-    printf "%b %sDeletion cancelled.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"; return 0;
+    printf "${YELLOW} ${WARN_SYMBOL}Deletion cancelled.${PLAIN}\n"; return 0;
   fi
 
   local temp_file=$(mktemp)
@@ -768,11 +758,11 @@ delete_config_forward() {
   if [ $? -eq 0 ]; then
     mv "$temp_file" "$CONFIG_FILE"
   else
-    printf "%b %sError updating config file using jq.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"
+    printf "${RED} ${ERROR_SYMBOL}Error updating config file using jq.${PLAIN}\n"
     rm -f "$temp_file"; return 1;
   fi
   rm -f "$temp_file"
-  printf "%b %sEntry deleted successfully.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
+  printf "${GREEN} ${SUCCESS_SYMBOL}Entry deleted successfully.${PLAIN}\n"
   read -p "Apply config file now? (Y/n): " apply_now
   if [[ $apply_now != "n" && $apply_now != "N" ]]; then apply_config; fi
   return 0
@@ -780,15 +770,15 @@ delete_config_forward() {
 
 edit_config_forward() {
   local entry_number=$1
-  if [ -z "$entry_number" ] || ! [[ "$entry_number" =~ ^[0-9]+$ ]]; then printf "%b %sInvalid service number.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"; return 1; fi
-  if [ ! -f "$CONFIG_FILE" ]; then printf "%b %sConfig file not found.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"; return 1; fi
+  if [ -z "$entry_number" ] || ! [[ "$entry_number" =~ ^[0-9]+$ ]]; then printf "${RED} ${ERROR_SYMBOL}Invalid service number.${PLAIN}\n"; return 1; fi
+  if [ ! -f "$CONFIG_FILE" ]; then printf "${RED} ${ERROR_SYMBOL}Config file not found.${PLAIN}\n"; return 1; fi
 
   local entries=() entry_details=()
   while IFS="|" read -r name listen_addr target_addr proto; do
     if [ ! -z "$name" ]; then entries+=("$name"); entry_details+=("$name|$listen_addr|$target_addr|$proto"); fi
   done < <(parse_config_file)
 
-  if [ $entry_number -lt 1 ] || [ $entry_number -gt ${#entries[@]} ]; then printf "%b %sInvalid entry number.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"; return 1; fi
+  if [ $entry_number -lt 1 ] || [ $entry_number -gt ${#entries[@]} ]; then printf "${RED} ${ERROR_SYMBOL}Invalid entry number.${PLAIN}\n"; return 1; fi
 
   IFS="|" read -r name listen_addr target_addr proto <<<"${entry_details[$entry_number - 1]}"
   local is_part_of_pair=0 base_name related_service
@@ -796,10 +786,10 @@ edit_config_forward() {
     is_part_of_pair=1
     base_name=$(echo "$name" | sed 's/-tcp$\\|-udp$//')
     if [[ "$name" == *-tcp ]]; then related_service="$base_name-udp"; else related_service="$base_name-tcp"; fi
-    printf "%b %sThis service is paired with %s. Both will be updated.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$related_service" "$PLAIN"
+    printf "${YELLOW} ${WARN_SYMBOL}This service is paired with %s. Both will be updated.${PLAIN}\n" "$related_service"
   fi
 
-  printf "%b%sEditing forwarding entry: %b%s%b%b\\n" "$CYAN" "$INFO_SYMBOL" "$BOLD" "$name" "$PLAIN" "$CYAN"
+  printf "${CYAN}${INFO_SYMBOL}Editing forwarding entry: ${BOLD}%s${PLAIN}${CYAN}\n" "$name"
   local current_local_port=$(echo "$listen_addr" | grep -o ':[0-9]\+\(-[0-9]\+\)*' | sed 's/://')
   local current_target_ip=$(echo "$target_addr" | grep -o '[^:]*' | head -1)
   local current_target_port=$(echo "$target_addr" | grep -o ':[0-9]\+\(-[0-9]\+\)*' | sed 's/://')
@@ -812,15 +802,15 @@ edit_config_forward() {
 
   if [[ $new_target_ip == *:* ]] && [[ $new_target_ip != \\[*\] ]]; then new_target_ip="[$new_target_ip]"; fi
   local new_proto=$proto
-  if [ $is_part_of_pair -eq 1 ]; then printf "%b %sCannot change protocol for paired service. Delete and recreate to change protocol.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"; fi
+  if [ $is_part_of_pair -eq 1 ]; then printf "${YELLOW} ${WARN_SYMBOL}Cannot change protocol for paired service. Delete and recreate to change protocol.${PLAIN}\n"; fi
 
-  printf "\\n%b%sNew settings:%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
-  printf "%bLocal port:%b %s\\n" "$GREEN" "$PLAIN" "$new_local_port"
-  printf "%bTarget:%b %s:%s\\n" "$GREEN" "$PLAIN" "$new_target_ip" "$new_target_port"
-  printf "%bProtocol:%b %s\\n" "$GREEN" "$PLAIN" "$new_proto"
+  printf "\n${CYAN}${INFO_SYMBOL}New settings:${PLAIN}\n"
+  printf "${GREEN}Local port:${PLAIN} %s\n" "$new_local_port"
+  printf "${GREEN}Target:${PLAIN} %s:%s\n" "$new_target_ip" "$new_target_port"
+  printf "${GREEN}Protocol:${PLAIN} %s\n" "$new_proto"
 
   read -p "Apply these changes? (Y/n): " confirm
-  if [[ $confirm == "n" || $confirm == "N" ]]; then printf "%b %sEdit cancelled.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"; return 0; fi
+  if [[ $confirm == "n" || $confirm == "N" ]]; then printf "${YELLOW} ${WARN_SYMBOL}Edit cancelled.${PLAIN}\n"; return 0; fi
 
   local temp_file=$(mktemp)
   if [ $is_part_of_pair -eq 1 ]; then
@@ -841,40 +831,40 @@ edit_config_forward() {
   if [ $? -eq 0 ]; then
     mv "$temp_file" "$CONFIG_FILE"
   else
-    printf "%b %sError updating config file using jq.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN"; rm -f "$temp_file"; return 1;
+    printf "${RED} ${ERROR_SYMBOL}Error updating config file using jq.${PLAIN}\n"; rm -f "$temp_file"; return 1;
   fi
   rm -f "$temp_file"
-  printf "%b %sEntry updated successfully.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"
+  printf "${GREEN} ${SUCCESS_SYMBOL}Entry updated successfully.${PLAIN}\n"
   read -p "Apply config file now? (Y/n): " apply_now
   if [[ $apply_now != "n" && $apply_now != "N" ]]; then apply_config; fi
   return 0
 }
 
 cleanup_old_services() {
-  printf "%b%s=== Cleaning up old systemd services ===%b\\n" "$CYAN" "$INFO_SYMBOL" "$PLAIN"
+  printf "${CYAN}${INFO_SYMBOL}=== Cleaning up old systemd services ===${PLAIN}\n"
   local found=0; local count=0
-  printf "%b%sFound GOST related systemd services:%b\\n" "$BLUE" "$INFO_SYMBOL" "$PLAIN"
+  printf "${BLUE}${INFO_SYMBOL}Found GOST related systemd services:${PLAIN}\n"
   for service_file in "$SERVICE_DIR"/gost-*.service; do
     if [ -e "$service_file" ]; then
       found=1; count=$((count + 1))
       service_name=$(basename "$service_file" .service)
       status=$(systemctl is-active "$service_name")
-      printf "  %b%s.%b %s (Status: %s)\\n" "$GREEN" "$count" "$PLAIN" "$service_name" "$status"
+      printf "  ${GREEN}%s.%s${PLAIN} %s (Status: %s)\n" "$count" "$PLAIN" "$service_name" "$status"
     fi
   done
-  if [ $found -eq 0 ]; then printf "%b %sNo old GOST systemd services found.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"; return; fi
+  if [ $found -eq 0 ]; then printf "${YELLOW} ${WARN_SYMBOL}No old GOST systemd services found.${PLAIN}\n"; return; fi
   
-  printf "%b %sWarning: This will disable and remove all individual GOST systemd services (except gost.service).%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"
-  printf "%b %sAll port forwarding should be managed through the config file and the main gost.service.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"
+  printf "${YELLOW} ${WARN_SYMBOL}Warning: This will disable and remove all individual GOST systemd services (except gost.service).${PLAIN}\n"
+  printf "${YELLOW} ${WARN_SYMBOL}All port forwarding should be managed through the config file and the main gost.service.${PLAIN}\n"
   read -p "Are you sure you want to continue? (y/N): " confirm
-  if [[ $confirm != [Yy]* ]]; then printf "%b %sOperation cancelled.%b\\n" "$YELLOW" "$WARN_SYMBOL" "$PLAIN"; return; fi
+  if [[ $confirm != [Yy]* ]]; then printf "${YELLOW} ${WARN_SYMBOL}Operation cancelled.${PLAIN}\n"; return; fi
   
   count=0 # Reset count for removed services
   for service_file in "$SERVICE_DIR"/gost-*.service; do
     if [ -e "$service_file" ]; then
       service_name=$(basename "$service_file" .service)
       if [ "$service_name" != "gost" ]; then # Do not remove the main gost.service itself
-        printf "%b %sStopping, disabling and removing %s...%b\\n" "$CYAN" "$INFO_SYMBOL" "$service_name" "$PLAIN"
+        printf "${CYAN} ${INFO_SYMBOL}Stopping, disabling and removing %s...${PLAIN}\n" "$service_name"
         sudo systemctl stop "$service_name" &>/dev/null
         sudo systemctl disable "$service_name" &>/dev/null
         sudo rm -f "$service_file"
@@ -883,27 +873,42 @@ cleanup_old_services() {
     fi
   done
   sudo systemctl daemon-reload
-  printf "%b %sSuccessfully removed %s old GOST systemd services.%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$count" "$PLAIN"
+  printf "${GREEN} ${SUCCESS_SYMBOL}Successfully removed %s old GOST systemd services.${PLAIN}\n" "$count"
   read -p "Apply main config file now (restart gost.service)? (Y/n): " apply_now
   if [[ $apply_now != "n" && $apply_now != "N" ]]; then apply_config; fi
+}
+
+check_gost_status() {
+  local status=$(systemctl is-active gost 2>/dev/null || echo "not found")
+  if [ "$status" = "active" ]; then
+    printf "${GREEN} ${SUCCESS_SYMBOL}GOST service is running.${PLAIN}\n"
+    printf "${CYAN}${INFO_SYMBOL}GOST Process Information:${PLAIN}\n"
+    ps aux | grep -v grep | grep gost || true
+    printf "${CYAN}${INFO_SYMBOL}GOST Service Logs (last 10 lines):${PLAIN}\n"
+    journalctl -u gost -n 10 --no-pager || true
+  else
+    printf "${RED} ${ERROR_SYMBOL}GOST service is not running (status: ${status}).${PLAIN}\n"
+    printf "${CYAN} ${INFO_SYMBOL}Check service logs with: ${YELLOW}journalctl -u gost${PLAIN}\n" 
+  fi
+  read -n1 -r -p "Press any key to continue..."
 }
 
 main_menu() {
   while true; do
     clear
     get_ip_info
-    printf "%b%s==================== Gost Port Forwarding Management ====================%b\\n" "$BOLD" "$BLUE" "$PLAIN"
-    printf "  %bIPv4: %b%s %b(%s)%b\\n" "$CYAN" "$WHITE" "$IPV4" "$YELLOW" "$COUNTRY_V4" "$PLAIN"
-    printf "  %bIPv6: %b%s %b(%s)%b\\n" "$CYAN" "$WHITE" "$IPV6" "$YELLOW" "$COUNTRY_V6" "$PLAIN"
-    printf "%b%s=========================================================================%b\\n" "$BOLD" "$BLUE" "$PLAIN"
-    printf "%b1.%b Create Single Port Forwarding\\n" "$GREEN" "$PLAIN"
-    printf "%b2.%b Create Port Range Forwarding\\n" "$GREEN" "$PLAIN"
-    printf "%b3.%b Manage Forwarding Services\\n" "$GREEN" "$PLAIN"
-    printf "%b4.%b Configuration File Management\\n" "$GREEN" "$PLAIN"
-    printf "%b5.%b Clean Up Old Systemd Services\\n" "$GREEN" "$PLAIN"
-    printf "%b6.%b Exit\\n" "$GREEN" "$PLAIN"
-    printf "%b%s=========================================================================%b\\n" "$BOLD" "$BLUE" "$PLAIN"
-    read -p "$(printf "%bPlease select [1-6]: %b" "$YELLOW" "$PLAIN")" choice
+    printf "${BOLD}${BLUE}==================== Gost Port Forwarding Management ====================${PLAIN}\n"
+    printf "  ${CYAN}IPv4: ${WHITE}%s ${YELLOW}(%s)${PLAIN}\n" "$IPV4" "$COUNTRY_V4"
+    printf "  ${CYAN}IPv6: ${WHITE}%s ${YELLOW}(%s)${PLAIN}\n" "$IPV6" "$COUNTRY_V6"
+    printf "${BOLD}${BLUE}=========================================================================${PLAIN}\n"
+    printf "${GREEN}1.${PLAIN} Create Single Port Forwarding\n"
+    printf "${GREEN}2.${PLAIN} Create Port Range Forwarding\n"
+    printf "${GREEN}3.${PLAIN} Manage Forwarding Services\n"
+    printf "${GREEN}4.${PLAIN} Configuration File Management\n"
+    printf "${GREEN}5.${PLAIN} Clean Up Old Systemd Services\n"
+    printf "${GREEN}6.${PLAIN} Exit\n"
+    printf "${BOLD}${BLUE}=========================================================================${PLAIN}\n"
+    read -p "$(printf "${YELLOW}Please select [1-6]: ${PLAIN}")" choice
 
     case $choice in
     1) create_forward_service ;; 
@@ -911,8 +916,8 @@ main_menu() {
     3) manage_forward_services ;; 
     4) config_file_management ;; 
     5) cleanup_old_services ;; 
-    6) printf "%b%sThank you for using. Goodbye!%b\\n" "$GREEN" "$SUCCESS_SYMBOL" "$PLAIN"; exit 0 ;; 
-    *) printf "%b %sInvalid selection. Please try again.%b\\n" "$RED" "$ERROR_SYMBOL" "$PLAIN" ;; 
+    6) printf "${GREEN}${SUCCESS_SYMBOL}Thank you for using. Goodbye!${PLAIN}\n"; exit 0 ;; 
+    *) printf "${RED} ${ERROR_SYMBOL}Invalid selection. Please try again.${PLAIN}\n" ;; 
     esac
     read -n1 -r -p "Press any key to return to the main menu..."
   done
