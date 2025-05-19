@@ -26,9 +26,9 @@ CONFIG_DIR="./gost_config"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 
 # Symbols for messages
-SUCCESS_SYMBOL="[✔]"
-ERROR_SYMBOL="[✘]"
-INFO_SYMBOL="[ℹ]"
+SUCCESS_SYMBOL="[+]"
+ERROR_SYMBOL="[x]"
+INFO_SYMBOL="[i]"
 WARN_SYMBOL="[!]"
 
 # Function to check and install essential dependencies and gost
@@ -36,7 +36,7 @@ check_and_install_dependencies_and_gost() {
   printf "${BLUE} ${INFO_SYMBOL}Performing initial setup and dependency check...${PLAIN}\n"
   
   local essential_pkgs=("lsof" "jq" "realpath") # realpath is needed for absolute config path
-  local utility_pkgs=("curl" "grep") 
+  local utility_pkgs=("curl" "grep" "shuf") # 添加shuf作为可选工具检查
   local pkgs_to_install=()
   local pkg_manager_detected=""
 
@@ -190,18 +190,34 @@ validate_input() {
 }
 
 ensure_config_dir() {
+  # 目录创建已由 setup_config_dir 处理，或对于非sudo路径由mkdir -p处理
   if [ ! -d "$CONFIG_DIR" ]; then
-    mkdir -p "$CONFIG_DIR"
+    # 此处的mkdir -p主要用于 $HOME/gost 或 ./gost_config 的情况
+    # 因为 /etc/gost 应该在 setup_config_dir 中用 sudo 创建了
+    mkdir -p "$CONFIG_DIR" 2>/dev/null
     printf "${GREEN} ${SUCCESS_SYMBOL}Created config directory: %s${PLAIN}\n" "$CONFIG_DIR"
   fi
+
   if [ ! -f "$CONFIG_FILE" ]; then
-    # 默认使用JSON格式，符合GOST的标准
-    cat <<EOF >"$CONFIG_FILE"
-{
-  "services": []
-}
-EOF
-    printf "${GREEN} ${SUCCESS_SYMBOL}Created base config file: %s${PLAIN}\n" "$CONFIG_FILE"
+    json_content='{ \n  "services": [] \n}'
+    # 根据CONFIG_DIR是否在/etc/下判断是否需要sudo
+    if [[ "$CONFIG_DIR" == "/etc/"* ]]; then
+      echo -e "$json_content" | sudo tee "$CONFIG_FILE" > /dev/null
+      sudo chmod 644 "$CONFIG_FILE" # 确保nobody用户可读
+      printf "${GREEN} ${SUCCESS_SYMBOL}Created base config file (with sudo): %s${PLAIN}\n" "$CONFIG_FILE"
+    else
+      echo -e "$json_content" > "$CONFIG_FILE"
+      chmod 644 "$CONFIG_FILE" # 确保nobody用户可读 (如果gost以其他用户运行，也可能有帮助)
+      printf "${GREEN} ${SUCCESS_SYMBOL}Created base config file: %s${PLAIN}\n" "$CONFIG_FILE"
+    fi
+  else
+    # 如果文件已存在，也确保权限正确，以防手动更改或旧脚本创建的文件权限不当
+    if [[ "$CONFIG_DIR" == "/etc/"* ]]; then
+      # 检查是否可被nobody读取，这里简化为直接设置，因为检查复杂
+      sudo chmod 644 "$CONFIG_FILE" 
+    else
+      chmod 644 "$CONFIG_FILE"
+    fi
   fi
 }
 
@@ -373,7 +389,7 @@ EOF
         local local_port=$(echo "$listen_addr" | grep -o ':[0-9]\+\(-[0-9]\+\)*' | sed 's/://')
         target_ip=$(echo "$target_addr" | grep -o '[^:]*' | head -1)
         target_port=$(echo "$target_addr" | grep -o ':[0-9]\+\(-[0-9]\+\)*' | sed 's/://')
-        printf "  ${GREEN}%s.%s${PLAIN} Port %s (%s) -> %s:%s [%s]\n" "$counter" "$PLAIN" "$local_port" "$proto" "$target_ip" "$target_port" "$name"
+        printf "  ${GREEN}%s.${PLAIN} Port %s (%s) -> %s:%s [%s]${PLAIN}\n" "$counter" "$local_port" "$proto" "$target_ip" "$target_port" "$name"
         ((counter++))
       fi
     done < <(parse_config_file)
@@ -390,14 +406,29 @@ EOF
 }
 
 find_free_port() {
-  local port
-  while true; do
-    port=$(shuf -i 10000-65000 -n 1) # Requires shuf from coreutils
-    if ! lsof -iTCP:"$port" -sTCP:LISTEN -P -n > /dev/null 2>&1; then
-      echo $port
-      return
-    fi
-  done
+  local port min_port=10000 max_port=65000
+  
+  # 检查是否有shuf命令
+  if command -v shuf &>/dev/null; then
+    # 使用shuf生成随机端口
+    while true; do
+      port=$(shuf -i $min_port-$max_port -n 1)
+      if ! lsof -iTCP:"$port" -sTCP:LISTEN -P -n > /dev/null 2>&1; then
+        echo $port
+        return
+      fi
+    done
+  else
+    # 备用方法：使用$RANDOM
+    while true; do
+      # $RANDOM生成0-32767的随机数，所以需要调整范围
+      port=$(( $min_port + $RANDOM % ($max_port - $min_port + 1) ))
+      if ! lsof -iTCP:"$port" -sTCP:LISTEN -P -n > /dev/null 2>&1; then
+        echo $port
+        return
+      fi
+    done
+  fi
 }
 
 create_forward_service() {
@@ -715,7 +746,7 @@ config_file_management() {
         local i=1
         for backup in "${backups[@]}"; do
           if [ -f "$backup" ]; then
-            printf "${GREEN}%s.%s %s (%s)${PLAIN}\n" "$i" "$PLAIN" "$(basename "$backup")" "$(date -r "$backup" '+%Y-%m-%d %H:%M:%S')"
+            printf "${GREEN}%s.${PLAIN} %s (%s)${PLAIN}\n" "$i" "$(basename "$backup")" "$(date -r "$backup" '+%Y-%m-%d %H:%M:%S')"
             ((i++))
           fi
         done
@@ -826,7 +857,9 @@ delete_config_forward() {
 
   local temp_file=$(mktemp)
   if [[ "$target_name" == *-tcp ]] || [[ "$target_name" == *-udp ]]; then
-    local base_name=$(echo "$target_name" | sed 's/-tcp$\\|-udp$//')
+    # 使用参数替换而不是sed来修正base_name提取
+    local base_name=${target_name%-tcp}
+    base_name=${base_name%-udp}
     jq --arg name_tcp "${base_name}-tcp" --arg name_udp "${base_name}-udp" \
       '.services = [.services[] | select(.name != $name_tcp and .name != $name_udp)]' "$CONFIG_FILE" > "$temp_file"
   else
@@ -862,7 +895,9 @@ edit_config_forward() {
   local is_part_of_pair=0 base_name related_service
   if [[ "$name" == *-tcp ]] || [[ "$name" == *-udp ]]; then
     is_part_of_pair=1
-    base_name=$(echo "$name" | sed 's/-tcp$\\|-udp$//')
+    # 使用参数替换而不是sed处理base_name
+    base_name=${name%-tcp}
+    base_name=${base_name%-udp}
     if [[ "$name" == *-tcp ]]; then related_service="$base_name-udp"; else related_service="$base_name-tcp"; fi
     printf "${YELLOW} ${WARN_SYMBOL}This service is paired with %s. Both will be updated.${PLAIN}\n" "$related_service"
   fi
@@ -927,7 +962,7 @@ cleanup_old_services() {
       found=1; count=$((count + 1))
       service_name=$(basename "$service_file" .service)
       status=$(systemctl is-active "$service_name")
-      printf "  ${GREEN}%s.%s${PLAIN} %s (Status: %s)\n" "$count" "$PLAIN" "$service_name" "$status"
+      printf "  ${GREEN}%s.${PLAIN} %s (Status: %s)${PLAIN}\n" "$count" "$service_name" "$status"
     fi
   done
   if [ $found -eq 0 ]; then printf "${YELLOW} ${WARN_SYMBOL}No old GOST systemd services found.${PLAIN}\n"; return; fi
