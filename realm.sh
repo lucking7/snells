@@ -162,14 +162,28 @@ uninstall_realm() {
 
 # 检查 Realm 安装状态
 check_realm_installation() {
+    echo -e "${YELLOW}Checking Realm installation status...${NC}"
     if [ -f "${REALM_DIR}/realm" ]; then
         realm_status="Installed"
         realm_status_color="$GREEN"
+        echo -e "${GREEN}Realm is already installed.${NC}"
     else
         realm_status="Not Installed"
         realm_status_color="$RED"
         echo -e "${RED}Realm is not installed. Installing now...${NC}"
+        # 临时禁用严格模式，以防安装失败时退出脚本
+        set +e
         deploy_realm
+        local install_result=$?
+        set -e
+        if [ $install_result -eq 0 ]; then
+            echo -e "${GREEN}Realm installation completed successfully.${NC}"
+        else
+            echo -e "${RED}Realm installation failed. Some features may not work properly.${NC}"
+            echo -e "${YELLOW}You can try option 1 from the menu to manually install Realm later.${NC}"
+            realm_status="Installation Failed"
+            realm_status_color="$RED"
+        fi
     fi
 }
 
@@ -291,12 +305,13 @@ show_menu() {
     fetch_server_info
     clear
     echo -e "${BOLD}=== Realm Relay Management ===${NC}"
-    echo "1. Add Realm Forward"
-    echo "2. View Realm Forwards"
-    echo "3. Delete Realm Forward"
-    echo "4. Manage Realm Service"
-    echo "5. Uninstall Realm"
-    echo "6. Exit"
+    echo "1. Install/Reinstall Realm"
+    echo "2. Add Realm Forward"
+    echo "3. View Realm Forwards"
+    echo "4. Delete Realm Forward"
+    echo "5. Manage Realm Service"
+    echo "6. Uninstall Realm"
+    echo "7. Exit"
     echo "------------------------------"
     echo -e "Realm Status: ${realm_status_color}${realm_status}${NC}"
     echo -n "Realm Service: "
@@ -356,6 +371,12 @@ manage_realm_service() {
 # 添加转发规则
 add_forward() {
     echo -e "${BOLD}Add New Forwarding Rule${NC}"
+
+    # 检查Realm是否已安装
+    if [ ! -f "${REALM_DIR}/realm" ]; then
+        echo -e "${RED}Realm is not installed. Please install Realm first (option 1).${NC}"
+        return 1
+    fi
 
     fetch_server_info
 
@@ -623,14 +644,30 @@ check_realm_installation
 # 主循环
 while true; do
     show_menu
-    read -rp "Select an option (1-6): " choice
+    read -rp "Select an option (1-7): " choice
     case $choice in
-        1) add_forward ;;
-        2) show_all_conf ;;
-        3) delete_forward ;;
-        4) manage_realm_service ;;
-        5) uninstall_realm ;;
-        6) echo "Exiting script."; exit 0 ;;
+        1) 
+            echo -e "${YELLOW}Installing/Reinstalling Realm...${NC}"
+            set +e
+            deploy_realm
+            local install_result=$?
+            set -e
+            if [ $install_result -eq 0 ]; then
+                echo -e "${GREEN}Realm installation completed successfully.${NC}"
+                realm_status="Installed"
+                realm_status_color="$GREEN"
+            else
+                echo -e "${RED}Realm installation failed.${NC}"
+                realm_status="Installation Failed"
+                realm_status_color="$RED"
+            fi
+            ;;
+        2) add_forward ;;
+        3) show_all_conf ;;
+        4) delete_forward ;;
+        5) manage_realm_service ;;
+        6) uninstall_realm ;;
+        7) echo "Exiting script."; exit 0 ;;
         *) echo -e "${RED}Invalid option: $choice${NC}" ;;
     esac
     read -n1 -r -p "Press any key to continue..."
