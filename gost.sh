@@ -194,7 +194,11 @@ ensure_config_dir() {
   if [ ! -d "$CONFIG_DIR" ]; then
     # 此处的mkdir -p主要用于 $HOME/gost 或 ./gost_config 的情况
     # 因为 /etc/gost 应该在 setup_config_dir 中用 sudo 创建了
-    mkdir -p "$CONFIG_DIR" 2>/dev/null
+    if [[ "$CONFIG_DIR" == "/etc/"* ]]; then
+      sudo mkdir -p "$CONFIG_DIR" 2>/dev/null
+    else
+      mkdir -p "$CONFIG_DIR" 2>/dev/null
+    fi
     printf "${GREEN} ${SUCCESS_SYMBOL}Created config directory: %s${PLAIN}\n" "$CONFIG_DIR"
   fi
 
@@ -203,7 +207,9 @@ ensure_config_dir() {
     # 根据CONFIG_DIR是否在/etc/下判断是否需要sudo
     if [[ "$CONFIG_DIR" == "/etc/"* ]]; then
       echo -e "$json_content" | sudo tee "$CONFIG_FILE" > /dev/null
-      sudo chmod 644 "$CONFIG_FILE" # 确保nobody用户可读
+      sudo chown root:root "$CONFIG_FILE"  # 设置正确的所有者
+      sudo chmod 644 "$CONFIG_FILE"       # 确保world-readable
+      sudo chmod 755 "$CONFIG_DIR"        # 确保目录可访问
       printf "${GREEN} ${SUCCESS_SYMBOL}Created base config file (with sudo): %s${PLAIN}\n" "$CONFIG_FILE"
     else
       echo -e "$json_content" > "$CONFIG_FILE"
@@ -213,10 +219,28 @@ ensure_config_dir() {
   else
     # 如果文件已存在，也确保权限正确，以防手动更改或旧脚本创建的文件权限不当
     if [[ "$CONFIG_DIR" == "/etc/"* ]]; then
-      # 检查是否可被nobody读取，这里简化为直接设置，因为检查复杂
-      sudo chmod 644 "$CONFIG_FILE" 
+      # 确保正确的所有者和权限
+      sudo chown root:root "$CONFIG_FILE"
+      sudo chmod 644 "$CONFIG_FILE"
+      sudo chmod 755 "$CONFIG_DIR"
+      printf "${YELLOW} ${WARN_SYMBOL}Fixed permissions for existing config file${PLAIN}\n"
     else
       chmod 644 "$CONFIG_FILE"
+    fi
+  fi
+  
+  # 验证nobody用户是否可以读取配置文件
+  if [[ "$CONFIG_DIR" == "/etc/"* ]]; then
+    if ! sudo -u nobody test -r "$CONFIG_FILE" 2>/dev/null; then
+      printf "${RED} ${ERROR_SYMBOL}Warning: nobody user cannot read config file. Attempting to fix...${PLAIN}\n"
+      sudo chmod 644 "$CONFIG_FILE"
+      sudo chmod 755 "$CONFIG_DIR"
+      if ! sudo -u nobody test -r "$CONFIG_FILE" 2>/dev/null; then
+        printf "${RED} ${ERROR_SYMBOL}Failed to fix permissions. Consider using alternative config location.${PLAIN}\n"
+        return 1
+      else
+        printf "${GREEN} ${SUCCESS_SYMBOL}Fixed permissions - nobody user can now read config file.${PLAIN}\n"
+      fi
     fi
   fi
 }
@@ -346,6 +370,35 @@ apply_config() {
     config_param="-C \"$abs_config_file\""
   fi
 
+# 创建gost用户（如果不存在）
+if ! id "gost" &>/dev/null; then
+  printf "${CYAN} ${INFO_SYMBOL}Creating gost system user...${PLAIN}\n"
+  sudo useradd --system --no-create-home --shell /bin/false gost 2>/dev/null || {
+    printf "${YELLOW} ${WARN_SYMBOL}Failed to create gost user, using nobody instead${PLAIN}\n"
+    GOST_USER="nobody"
+    GOST_GROUP="nogroup"
+  }
+  if [ -z "$GOST_USER" ]; then
+    GOST_USER="gost"
+    GOST_GROUP="gost"
+    # 确保gost用户可以读取配置文件
+    if [[ "$CONFIG_DIR" == "/etc/"* ]]; then
+      sudo chown -R root:gost "$CONFIG_DIR"
+      sudo chmod -R 750 "$CONFIG_DIR"
+      sudo chmod 640 "$CONFIG_FILE"
+    fi
+  fi
+else
+  GOST_USER="gost"
+  GOST_GROUP="gost"
+  # 确保gost用户可以读取配置文件
+  if [[ "$CONFIG_DIR" == "/etc/"* ]]; then
+    sudo chown -R root:gost "$CONFIG_DIR"
+    sudo chmod -R 750 "$CONFIG_DIR"
+    sudo chmod 640 "$CONFIG_FILE"
+  fi
+fi
+
 SERVICE_FILE_CONTENT=$(cat <<EOF
 [Unit]
 Description=GOST Proxy Service
@@ -356,8 +409,14 @@ Wants=network.target
 ExecStart=/usr/local/bin/gost $config_param
 Restart=always
 RestartSec=5
-User=nobody
-Group=nogroup
+User=$GOST_USER
+Group=$GOST_GROUP
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
