@@ -248,53 +248,71 @@ ensure_config_dir() {
 add_forward_to_config() {
   local name=$1
   local listen_addr=$2
-  local target_addr=$3
+  local nodes_json_array_string=$3 # JSON string for the "nodes" array
   local proto=$4
 
   ensure_config_dir
   local temp_file=$(mktemp)
   
   if [ "$proto" = "tcp-udp" ]; then
-    local tcp_service='{
-      "name": "'$name'-tcp",
-      "addr": "'$listen_addr'",
+    # For tcp-udp, we create two services, each with the same multi-target forwarder
+    # Ensure names are distinct if the base name was already specific
+    local base_name_for_pair="$name"
+    # If name already ends with -tcp or -udp (e.g. from single proto converted to tcp-udp), strip it for base.
+    if [[ "$name" == *-tcp || "$name" == *-udp ]]; then
+        base_name_for_pair="${name%-*}"
+    fi
+
+    local tcp_service_template='{
+      "name": "%s-tcp",
+      "addr": "%s",
       "handler": { "type": "tcp" },
       "listener": { "type": "tcp" },
-      "forwarder": { "nodes": [ { "name": "target-0", "addr": "'$target_addr'" } ] }
+      "forwarder": { "nodes": %s }
     }'
-    local udp_service='{
-      "name": "'$name'-udp",
-      "addr": "'$listen_addr'",
+    local udp_service_template='{
+      "name": "%s-udp",
+      "addr": "%s",
       "handler": { "type": "udp" },
       "listener": { "type": "udp" },
-      "forwarder": { "nodes": [ { "name": "target-0", "addr": "'$target_addr'" } ] }
+      "forwarder": { "nodes": %s }
     }'
-    jq ".services += [${tcp_service}, ${udp_service}]" "$CONFIG_FILE" > "$temp_file"
-    if [ $? -eq 0 ]; then
-      mv "$temp_file" "$CONFIG_FILE"
-    else
-      printf "${RED} ${ERROR_SYMBOL}Error adding services to config file using jq.${PLAIN}\n"
-      rm -f "$temp_file"
-      return 1
-    fi
+    local tcp_service_json
+    printf -v tcp_service_json "$tcp_service_template" "$base_name_for_pair" "$listen_addr" "$nodes_json_array_string"
+    local udp_service_json
+    printf -v udp_service_json "$udp_service_template" "$base_name_for_pair" "$listen_addr" "$nodes_json_array_string"
+
+    jq ".services += [${tcp_service_json}, ${udp_service_json}]" "$CONFIG_FILE" > "$temp_file"
   else 
-    local service='{
-      "name": "'$name'",
-      "addr": "'$listen_addr'",
-      "handler": { "type": "'$proto'" },
-      "listener": { "type": "'$proto'" },
-      "forwarder": { "nodes": [ { "name": "target-0", "addr": "'$target_addr'" } ] }
+    local service_template='{
+      "name": "%s",
+      "addr": "%s",
+      "handler": { "type": "%s" },
+      "listener": { "type": "%s" },
+      "forwarder": { "nodes": %s }
     }'
-    jq ".services += [${service}]" "$CONFIG_FILE" > "$temp_file"
-    if [ $? -eq 0 ]; then
-      mv "$temp_file" "$CONFIG_FILE"
-    else
-      printf "${RED} ${ERROR_SYMBOL}Error adding service to config file using jq.${PLAIN}\n"
-      rm -f "$temp_file"
-      return 1
-    fi
+    local service_json
+    printf -v service_json "$service_template" "$name" "$listen_addr" "$proto" "$proto" "$nodes_json_array_string"
+    jq ".services += [${service_json}]" "$CONFIG_FILE" > "$temp_file"
   fi
-  printf "${GREEN} ${SUCCESS_SYMBOL}Added forwarding to config file.${PLAIN}\n"
+  
+  if [ $? -eq 0 ]; then
+    if [[ "$CONFIG_FILE" == "/etc/gost/"* ]]; then
+        sudo mv "$temp_file" "$CONFIG_FILE"
+        sudo chown root:root "$CONFIG_FILE" # Ensure correct ownership
+        sudo chmod 644 "$CONFIG_FILE"      # Ensure correct permissions
+    else
+        mv "$temp_file" "$CONFIG_FILE"
+        chmod 644 "$CONFIG_FILE" # Ensure correct permissions for non-sudo
+    fi
+  else
+    printf "${RED} ${ERROR_SYMBOL}Error adding service(s) to config file using jq.${PLAIN}\\n"
+    rm -f "$temp_file"
+    return 1
+  fi
+  # If mv failed above, temp_file would still exist unless caught by jq error.
+  # If mv succeeded, temp_file is gone. No explicit rm needed here if logic is correct.
+  printf "${GREEN} ${SUCCESS_SYMBOL}Added forwarding to config file.${PLAIN}\\n"
 }
 
 apply_config() {
@@ -491,7 +509,7 @@ find_free_port() {
 }
 
 create_forward_service() {
-  printf "${CYAN}${INFO_SYMBOL}=== Create a new port forwarding ===${PLAIN}\n"
+  printf "${CYAN}${INFO_SYMBOL}=== Create a new port forwarding ===${PLAIN}\\n"
   read -p "Local port (default: random available port): " local_port
   if [ -n "$local_port" ]; then
     if ! validate_input "$local_port" "port"; then
@@ -500,30 +518,58 @@ create_forward_service() {
     fi
   else
     local_port=$(find_free_port)
-    printf "${YELLOW} ${INFO_SYMBOL}Selected available local port: ${BOLD}%s${PLAIN}${YELLOW}\n" "$local_port" # Ensure PLAIN is reset
+    printf "${YELLOW} ${INFO_SYMBOL}Selected available local port: ${BOLD}%s${PLAIN}${YELLOW}\\n" "$local_port" # Ensure PLAIN is reset
   fi
 
-  read -p "Target IP or hostname: " target_ip
-  if [ -z "$target_ip" ]; then
-    printf "${RED} ${ERROR_SYMBOL}Target IP or hostname cannot be empty.${PLAIN}\n"
-    read -n1 -r -p "Press any key to try again..."
+  local targets_array=()
+  local target_count=0
+  while true; do
+    target_count=$((target_count + 1))
+    printf "${CYAN}${INFO_SYMBOL}Enter details for Target #%s:${PLAIN}\\n" "$target_count"
+    read -p "Target IP or hostname (leave empty if done adding targets): " target_ip
+    
+    if [ -z "$target_ip" ]; then
+      if [ ${#targets_array[@]} -eq 0 ]; then # Must have at least one target
+        printf "${RED} ${ERROR_SYMBOL}Target IP or hostname cannot be empty for the first target.${PLAIN}\\n"
+        target_count=$((target_count - 1)) # Decrement to re-ask for the same target number
+        read -n1 -r -p "Press any key to try again..."
+        continue 
+      else
+        # If not the first target and IP is empty, assume user is done adding targets.
+        printf "${YELLOW} ${INFO_SYMBOL}Finished adding targets.${PLAIN}\\n"
+        break
+      fi
+    fi
+
+    read -p "Target port: " target_port
+    if ! validate_input "$target_port" "port"; then
+      printf "${RED} ${ERROR_SYMBOL}Invalid target port. Skipping this target and re-prompting for Target #%s.${PLAIN}\\n" "$target_count"
+      read -n1 -r -p "Press any key to try again..."
+      continue # Skip this invalid target and re-prompt for the same target number
+    fi
+
+    if [[ $target_ip == *:* ]] && [[ $target_ip != \\[\\[*\\] ]]; then # Check for IPv6 and ensure brackets
+      target_ip="[$target_ip]"
+    fi
+    targets_array+=("${target_ip}:${target_port}")
+
+    # Always ask after a valid target is added, unless it was the first one and IP was then blanked.
+    read -p "Add another target? (y/N): " add_another_target
+    if [[ $add_another_target != [Yy]* ]]; then
+        break
+    fi
+  done
+
+  if [ ${#targets_array[@]} -eq 0 ]; then
+    printf "${RED} ${ERROR_SYMBOL}No valid targets specified. Aborting.${PLAIN}\\n"
+    read -n1 -r -p "Press any key to continue..."
     return
   fi
-
-  read -p "Target port: " target_port
-  if ! validate_input "$target_port" "port"; then
-    read -n1 -r -p "Press any key to try again..."
-    return
-  fi
-
-  if [[ $target_ip == *:* ]] && [[ $target_ip != \\[*\] ]]; then
-    target_ip="[$target_ip]"
-  fi
-
-  printf "${CYAN}${INFO_SYMBOL}Select protocol:${PLAIN}\n"
-  printf "${GREEN}1.${PLAIN} TCP\n"
-  printf "${GREEN}2.${PLAIN} UDP\n"
-  printf "${GREEN}3.${PLAIN} Both TCP & UDP ${YELLOW}(default)${PLAIN}\n"
+  
+  printf "${CYAN}${INFO_SYMBOL}Select protocol:${PLAIN}\\n"
+  printf "${GREEN}1.${PLAIN} TCP\\n"
+  printf "${GREEN}2.${PLAIN} UDP\\n"
+  printf "${GREEN}3.${PLAIN} Both TCP & UDP ${YELLOW}(default)${PLAIN}\\n"
   read -p "Select [1-3] (default: 3): " protocol_type
 
   case $protocol_type in
@@ -532,8 +578,29 @@ create_forward_service() {
   *) proto="tcp-udp" ;; 
   esac
 
-  service_name="forward-$local_port-to-$target_port"
-  add_forward_to_config "$service_name" ":$local_port" "$target_ip:$target_port" "$proto"
+  local nodes_json_array_string="["
+  local first_node=true
+  for i in "${!targets_array[@]}"; do
+    if [ "$first_node" = false ]; then
+      nodes_json_array_string+=","
+    fi
+    nodes_json_array_string+='{"name":"target-'$i'","addr":"'${targets_array[$i]}'"}';
+    first_node=false
+  done
+  nodes_json_array_string+="]"
+
+  local service_name
+  if [ ${#targets_array[@]} -eq 1 ]; then
+    # If only one target, use the traditional naming convention
+    local first_target_full="${targets_array[0]}"
+    # Extract target port for the name, handling potential IPv6 brackets in target_ip part
+    local first_target_port_for_name="${first_target_full##*:}"
+    service_name="forward-$local_port-to-$first_target_port_for_name"
+  else
+    service_name="forward-$local_port-multi"
+  fi
+  
+  add_forward_to_config "$service_name" ":$local_port" "$nodes_json_array_string" "$proto"
   
   read -p "Apply config file now? (Y/n): " apply_now
   if [[ $apply_now != "n" && $apply_now != "N" ]]; then
@@ -542,9 +609,9 @@ create_forward_service() {
 }
 
 create_port_range_forward() {
-  printf "${CYAN}${INFO_SYMBOL}=== Create Port Range Forwarding ===${PLAIN}\n"
-  printf "${GREEN}1.${PLAIN} Many-to-One (Multiple local ports to one target port)\n"
-  printf "${GREEN}2.${PLAIN} Many-to-Many (Each local port maps to corresponding target port)\n"
+  printf "${CYAN}${INFO_SYMBOL}=== Create Port Range Forwarding ===${PLAIN}\\n"
+  printf "${GREEN}1.${PLAIN} Many-to-One (Multiple local ports to one target port)\\n"
+  printf "${GREEN}2.${PLAIN} Many-to-Many (Each local port maps to corresponding target port)\\n"
   read -p "Select forwarding type [1-2]: " range_type
 
   read -p "Local port range start: " local_start
@@ -553,7 +620,7 @@ create_port_range_forward() {
   if ! validate_input "$local_end" "port"; then read -n1 -r -p "Press any key..." ; return; fi
 
   if [ "$local_start" -gt "$local_end" ]; then
-    printf "${RED} ${ERROR_SYMBOL}Start port cannot be greater than end port.${PLAIN}\n"
+    printf "${RED} ${ERROR_SYMBOL}Start port cannot be greater than end port.${PLAIN}\\n"
     read -n1 -r -p "Press any key to try again..."
     return
   fi
@@ -561,55 +628,48 @@ create_port_range_forward() {
   read -p "Target IP or hostname: " target_ip
   if [ -z "$target_ip" ]; then printf "${RED} ${ERROR_SYMBOL}Target IP or hostname cannot be empty.${PLAIN}"; read -n1 -r -p "Press any key..." ; return; fi
 
-  if [[ $target_ip == *:* ]] && [[ $target_ip != \\[*\] ]]; then target_ip="[$target_ip]"; fi
+  if [[ $target_ip == *:* ]] && [[ $target_ip != \\[\\[*\\] ]]; then target_ip="[$target_ip]"; fi
 
-  printf "${CYAN}${INFO_SYMBOL}Select protocol:${PLAIN}\n"
-  printf "${GREEN}1.${PLAIN} TCP\n"
-  printf "${GREEN}2.${PLAIN} UDP\n"
-  printf "${GREEN}3.${PLAIN} Both TCP & UDP ${YELLOW}(default)${PLAIN}\n"
+  printf "${CYAN}${INFO_SYMBOL}Select protocol:${PLAIN}\\n"
+  printf "${GREEN}1.${PLAIN} TCP\\n"
+  printf "${GREEN}2.${PLAIN} UDP\\n"
+  printf "${GREEN}3.${PLAIN} Both TCP & UDP ${YELLOW}(default)${PLAIN}\\n"
   read -p "Select [1-3] (default: 3): " protocol_type
   case $protocol_type in 1) proto="tcp";; 2) proto="udp";; *) proto="tcp-udp";; esac
 
-  local temp_file=$(mktemp)
-  local service_name target_addr tcp_service udp_service service
+  local service_name target_addr
 
   if [ "$range_type" = "1" ]; then
     read -p "Target port: " target_port
-    if ! validate_input "$target_port" "port"; then read -n1 -r -p "Press any key..." ; rm -f "$temp_file"; return; fi
+    if ! validate_input "$target_port" "port"; then read -n1 -r -p "Press any key..." ; return; fi
     service_name="range-${local_start}-${local_end}-to-${target_port}"
     target_addr="${target_ip}:${target_port}"
-  else
+  else # range_type is "2" (Many-to-Many)
     read -p "Target port range start: " target_start
-    if ! validate_input "$target_start" "port"; then read -n1 -r -p "Press any key..." ; rm -f "$temp_file"; return; fi
+    if ! validate_input "$target_start" "port"; then read -n1 -r -p "Press any key..." ; return; fi
     local port_count=$((local_end - local_start + 1))
     local target_end=$((target_start + port_count - 1))
+    # Validate target_end port
+    if [ "$target_end" -gt 65535 ]; then
+        printf "${RED} ${ERROR_SYMBOL}Calculated target end port (%s) exceeds 65535.${PLAIN}\\n" "$target_end"
+        read -n1 -r -p "Press any key to try again..."
+        return
+    fi
     service_name="range-${local_start}-${local_end}-to-${target_start}-${target_end}"
     target_addr="${target_ip}:${target_start}-${target_end}"
   fi
   
-  ensure_config_dir
-  if [ "$proto" = "tcp-udp" ]; then
-    tcp_service='{"name":"'$service_name'-tcp","addr":":${local_start}-${local_end}","handler":{"type":"tcp"},"listener":{"type":"tcp"},"forwarder":{"nodes":[{"name":"target-0","addr":"'$target_addr'"}]}}'
-    udp_service='{"name":"'$service_name'-udp","addr":":${local_start}-${local_end}","handler":{"type":"udp"},"listener":{"type":"udp"},"forwarder":{"nodes":[{"name":"target-0","addr":"'$target_addr'"}]}}'
-    jq ".services += [${tcp_service}, ${udp_service}]" "$CONFIG_FILE" > "$temp_file"
-  else
-    service='{"name":"'$service_name'","addr":":${local_start}-${local_end}","handler":{"type":"'$proto'"},"listener":{"type":"'$proto'"},"forwarder":{"nodes":[{"name":"target-0","addr":"'$target_addr'"}]}}'
-    jq ".services += [${service}]" "$CONFIG_FILE" > "$temp_file"
-  fi
-    
-  if [ $? -eq 0 ]; then
-    mv "$temp_file" "$CONFIG_FILE"
-  else
-    printf "${RED} ${ERROR_SYMBOL}Error adding service to config file using jq.${PLAIN}\n"
-    rm -f "$temp_file"
-    return 1
-  fi
-  rm -f "$temp_file"
+  # For port range forwarding, there's effectively one "node" in gost terms,
+  # whose address might itself be a range.
+  local nodes_json_array_string='[{"name":"target-0","addr":"'$target_addr'"}]'
   
-  printf "${GREEN} ${SUCCESS_SYMBOL}Port range forwarding added to config file.${PLAIN}\n"
-  printf "  ${CYAN}${INFO_SYMBOL}- Name: %s${PLAIN}\n" "$service_name"
-  printf "  ${CYAN}${INFO_SYMBOL}- Ports: %s-%s${PLAIN}\n" "$local_start" "$local_end"
-  printf "  ${CYAN}${INFO_SYMBOL}- Protocol: %s${PLAIN}\n" "$proto"
+  add_forward_to_config "$service_name" ":${local_start}-${local_end}" "$nodes_json_array_string" "$proto"
+  
+  printf "${GREEN} ${SUCCESS_SYMBOL}Port range forwarding added to config file.${PLAIN}\\n"
+  printf "  ${CYAN}${INFO_SYMBOL}- Name: %s${PLAIN}\\n" "$service_name"
+  printf "  ${CYAN}${INFO_SYMBOL}- Local Ports: %s-%s${PLAIN}\\n" "$local_start" "$local_end"
+  printf "  ${CYAN}${INFO_SYMBOL}- Target Address: %s${PLAIN}\\n" "$target_addr" # Display the target_addr string
+  printf "  ${CYAN}${INFO_SYMBOL}- Protocol: %s${PLAIN}\\n" "$proto"
   
   read -p "Apply config file now? (Y/n): " apply_now
   if [[ $apply_now != "n" && $apply_now != "N" ]]; then
