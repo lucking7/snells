@@ -1000,7 +1000,8 @@ delete_config_forward() {
   fi
 
   local target_name=${entries[$entry_number - 1]}
-  read -p "Are you sure you want to delete the forwarding entry ${BOLD}${target_name}${PLAIN}? (${GREEN}Y${PLAIN}/${RED}N${PLAIN}): " confirm
+  printf "Are you sure you want to delete the forwarding entry ${BOLD}%s${PLAIN}? (${GREEN}Y${PLAIN}/${RED}N${PLAIN}): " "$target_name"
+  read confirm
   if [[ $confirm != [Yy]* ]]; then
     printf "${YELLOW} ${WARN_SYMBOL}Deletion cancelled.${PLAIN}\n"; return 0;
   fi
