@@ -509,7 +509,7 @@ find_free_port() {
 }
 
 create_forward_service() {
-  printf "${CYAN}${INFO_SYMBOL}=== Create a new port forwarding ===${PLAIN}\\n"
+  printf "${CYAN}${INFO_SYMBOL}=== Create a new port forwarding ===${PLAIN}\\\n"
   read -p "Local port (default: random available port): " local_port
   if [ -n "$local_port" ]; then
     if ! validate_input "$local_port" "port"; then
@@ -518,89 +518,120 @@ create_forward_service() {
     fi
   else
     local_port=$(find_free_port)
-    printf "${YELLOW} ${INFO_SYMBOL}Selected available local port: ${BOLD}%s${PLAIN}${YELLOW}\\n" "$local_port" # Ensure PLAIN is reset
+    printf "${YELLOW} ${INFO_SYMBOL}Selected available local port: ${BOLD}%s${PLAIN}${YELLOW}\\\n" "$local_port" # Ensure PLAIN is reset
   fi
 
-  local targets_array=()
-  local target_count=0
-  while true; do
-    target_count=$((target_count + 1))
-    printf "${CYAN}${INFO_SYMBOL}Enter details for Target #%s:${PLAIN}\\n" "$target_count"
-    read -p "Target IP or hostname (leave empty if done adding targets): " target_ip
-    
-    if [ -z "$target_ip" ]; then
-      if [ ${#targets_array[@]} -eq 0 ]; then # Must have at least one target
-        printf "${RED} ${ERROR_SYMBOL}Target IP or hostname cannot be empty for the first target.${PLAIN}\\n"
-        target_count=$((target_count - 1)) # Decrement to re-ask for the same target number
-        read -n1 -r -p "Press any key to try again..."
-        continue 
-      else
-        # If not the first target and IP is empty, assume user is done adding targets.
-        printf "${YELLOW} ${INFO_SYMBOL}Finished adding targets.${PLAIN}\\n"
-        break
-      fi
-    fi
+  printf "${CYAN}${INFO_SYMBOL}Select protocol:${PLAIN}\\\n"
+  printf "${GREEN}1.${PLAIN} TCP (to a single target)\\\n"
+  printf "${GREEN}2.${PLAIN} UDP (to a single target)\\\n"
+  printf "${GREEN}3.${PLAIN} Both TCP & UDP (to the SAME single target) ${YELLOW}(default)${PLAIN}\\\n"
+  printf "${GREEN}4.${PLAIN} Split: TCP to one target, UDP to a DIFFERENT target (same local port)\\\n"
+  read -p "Select [1-4] (default: 3): " protocol_choice
 
-    read -p "Target port: " target_port
-    if ! validate_input "$target_port" "port"; then
-      printf "${RED} ${ERROR_SYMBOL}Invalid target port. Skipping this target and re-prompting for Target #%s.${PLAIN}\\n" "$target_count"
-      read -n1 -r -p "Press any key to try again..."
-      continue # Skip this invalid target and re-prompt for the same target number
-    fi
+  local proto_selected # Can be "tcp", "udp", "tcp-udp" (for same targets), or "tcp-udp-split"
 
-    if [[ $target_ip == *:* ]] && [[ $target_ip != \\[\\[*\\] ]]; then # Check for IPv6 and ensure brackets
-      target_ip="[$target_ip]"
-    fi
-    targets_array+=("${target_ip}:${target_port}")
-
-    # Always ask after a valid target is added, unless it was the first one and IP was then blanked.
-    read -p "Add another target? (y/N): " add_another_target
-    if [[ $add_another_target != [Yy]* ]]; then
-        break
-    fi
-  done
-
-  if [ ${#targets_array[@]} -eq 0 ]; then
-    printf "${RED} ${ERROR_SYMBOL}No valid targets specified. Aborting.${PLAIN}\\n"
-    read -n1 -r -p "Press any key to continue..."
-    return
-  fi
-  
-  printf "${CYAN}${INFO_SYMBOL}Select protocol:${PLAIN}\\n"
-  printf "${GREEN}1.${PLAIN} TCP\\n"
-  printf "${GREEN}2.${PLAIN} UDP\\n"
-  printf "${GREEN}3.${PLAIN} Both TCP & UDP ${YELLOW}(default)${PLAIN}\\n"
-  read -p "Select [1-3] (default: 3): " protocol_type
-
-  case $protocol_type in
-  1) proto="tcp" ;; 
-  2) proto="udp" ;; 
-  *) proto="tcp-udp" ;; 
+  case $protocol_choice in
+  1) proto_selected="tcp" ;;
+  2) proto_selected="udp" ;;
+  4) proto_selected="tcp-udp-split" ;;
+  *) proto_selected="tcp-udp" ;; # Default is 3, or any other input
   esac
 
-  local nodes_json_array_string="["
-  local first_node=true
-  for i in "${!targets_array[@]}"; do
-    if [ "$first_node" = false ]; then
-      nodes_json_array_string+=","
-    fi
-    nodes_json_array_string+='{"name":"target-'$i'","addr":"'${targets_array[$i]}'"}';
-    first_node=false
-  done
-  nodes_json_array_string+="]"
+  if [ "$proto_selected" = "tcp-udp-split" ]; then
+    # --- Handle TCP-UDP Split to Different Targets (remains unchanged) ---
+    printf "\\n${CYAN}${INFO_SYMBOL}Configuring TCP forwarding leg:${PLAIN}\\\n"
+    local tcp_target_ip tcp_target_port
+    while true; do
+      read -p "TCP Target IP or hostname: " tcp_target_ip
+      if [ -z "$tcp_target_ip" ]; then
+        printf "${RED} ${ERROR_SYMBOL}TCP Target IP or hostname cannot be empty.${PLAIN}\\\n"
+        read -n1 -r -p "Press any key to try again..."
+        continue
+      fi
+      break
+    done
+    while true; do
+      read -p "TCP Target port: " tcp_target_port
+      if ! validate_input "$tcp_target_port" "port"; then
+        read -n1 -r -p "Press any key to try again..."
+        continue
+      fi
+      break
+    done
 
-  local service_name
-  if [ ${#targets_array[@]} -eq 1 ]; then
-    # If only one target, use the traditional naming convention
-    local first_target_full="${targets_array[0]}"
-    # Extract target port for the name, handling potential IPv6 brackets in target_ip part
-    local first_target_port_for_name="${first_target_full##*:}"
-    service_name="forward-$local_port-to-$first_target_port_for_name"
+    if [[ $tcp_target_ip == *:* ]] && [[ $tcp_target_ip != \\\\[*\\] ]]; then # Check for IPv6 and ensure brackets
+        tcp_target_ip="[$tcp_target_ip]"
+    fi
+    local tcp_nodes_json_array_string=\'[{\"name\":\"target-0\",\"addr\":\"\'"${tcp_target_ip}:${tcp_target_port}"\'\"}]\'
+    local tcp_service_name="forward-$local_port-to-$tcp_target_port-tcp"
+
+    printf "\\n${CYAN}${INFO_SYMBOL}Configuring UDP forwarding leg:${PLAIN}\\\n"
+    local udp_target_ip udp_target_port
+    while true; do
+      read -p "UDP Target IP or hostname: " udp_target_ip
+      if [ -z "$udp_target_ip" ]; then
+        printf "${RED} ${ERROR_SYMBOL}UDP Target IP or hostname cannot be empty.${PLAIN}\\\n"
+        read -n1 -r -p "Press any key to try again..."
+        continue
+      fi
+      break
+    done
+    while true; do
+      read -p "UDP Target port: " udp_target_port
+      if ! validate_input "$udp_target_port" "port"; then
+        read -n1 -r -p "Press any key to try again..."
+        continue
+      fi
+      break
+    done
+    if [[ $udp_target_ip == *:* ]] && [[ $udp_target_ip != \\\\[*\\] ]]; then # Check for IPv6 and ensure brackets
+      udp_target_ip="[$udp_target_ip]"
+    fi
+    local udp_nodes_json_array_string=\'[{\"name\":\"target-0\",\"addr\":\"\'"${udp_target_ip}:${udp_target_port}"\'\"}]\'
+    local udp_service_name="forward-$local_port-to-$udp_target_port-udp"
+
+    add_forward_to_config "$tcp_service_name" ":$local_port" "$tcp_nodes_json_array_string" "tcp"
+    local add_tcp_rc=$?
+    add_forward_to_config "$udp_service_name" ":$local_port" "$udp_nodes_json_array_string" "udp"
+    local add_udp_rc=$?
+
+    if [ $add_tcp_rc -ne 0 ] || [ $add_udp_rc -ne 0 ]; then
+      printf "${RED} ${ERROR_SYMBOL}Failed to add one or both forwarding legs for split configuration.${PLAIN}\\\n"
+    fi
+
   else
-    service_name="forward-$local_port-multi"
+    # --- Handle TCP, UDP, or TCP-UDP to a SINGLE Target ---
+    printf "\\n${CYAN}${INFO_SYMBOL}Enter details for the Target (for %s traffic):${PLAIN}\\\n" "$proto_selected"
+    local target_ip target_port
+
+    while true; do
+      read -p "Target IP or hostname: " target_ip
+      if [ -z "$target_ip" ]; then
+        printf "${RED} ${ERROR_SYMBOL}Target IP or hostname cannot be empty.${PLAIN}\\\n"
+        read -n1 -r -p "Press any key to try again..."
+        continue
+      fi
+      break
+    done
+
+    while true; do
+      read -p "Target port: " target_port
+      if ! validate_input "$target_port" "port"; then
+        read -n1 -r -p "Press any key to try again..."
+        continue
+      fi
+      break
+    done
+
+    if [[ $target_ip == *:* ]] && [[ $target_ip != \\\\[*\\] ]]; then # Check for IPv6 and ensure brackets
+      target_ip="[$target_ip]"
+    fi
+    
+    local nodes_json_array_string=\'[{\"name\":\"target-0\",\"addr\":\"\'"${target_ip}:${target_port}"\'\"}]\'
+    local service_name="forward-$local_port-to-$target_port"
+        
+    add_forward_to_config "$service_name" ":$local_port" "$nodes_json_array_string" "$proto_selected"
   fi
-  
-  add_forward_to_config "$service_name" ":$local_port" "$nodes_json_array_string" "$proto"
   
   read -p "Apply config file now? (Y/n): " apply_now
   if [[ $apply_now != "n" && $apply_now != "N" ]]; then
