@@ -97,122 +97,86 @@ check_and_install_dependencies() {
     fi
   fi
 
-  # 检查Brook是否安装 - 使用多种检测方式
-  local brook_available=false
-  local nami_bin_path="${SCRIPT_RUNNER_HOME}/.nami/bin"
-  
-  if command -v brook &>/dev/null && brook --help &>/dev/null; then
-    brook_available=true
-  elif [ -x "${nami_bin_path}/brook" ] && "${nami_bin_path}/brook" --help &>/dev/null; then
-    brook_available=true
-  fi
-  
-  if ! $brook_available; then
-    printf "${YELLOW}${INFO_SYMBOL} Brook未安装或无法执行。尝试安装/修复...${PLAIN}\n"
+  # 简化Brook检测，优先使用二进制安装方式
+  if ! command -v brook &>/dev/null || ! brook --help &>/dev/null; then
+    printf "${YELLOW}${INFO_SYMBOL} Brook未安装或无法执行。开始安装Brook...${PLAIN}\n"
     
-    local nami_bin_path="${SCRIPT_RUNNER_HOME}/.nami/bin"
-    
-    if ! command -v nami &>/dev/null && ! [ -x "${nami_bin_path}/nami" ]; then
-      printf "${CYAN}${INFO_SYMBOL} Nami未安装，开始安装nami...${PLAIN}\n"
-      local nami_install_script_url="https://bash.ooo/nami.sh"
-      local tmp_nami_script="/tmp/nami_install_temp.sh"
-      curl -fsSL "$nami_install_script_url" -o "$tmp_nami_script" || {
-          printf "${RED}${ERROR_SYMBOL} 下载nami安装脚本失败 (%s)。${PLAIN}\n" "$nami_install_script_url";
-          install_brook_binary; return $?;
-      }
-      # 从下载的脚本中移除 'exec -l $SHELL' 这一行
-      sed -i.bak '/^exec -l /d' "$tmp_nami_script"
-      
-      bash "$tmp_nami_script"
-      local nami_install_status=$?
-      rm -f "$tmp_nami_script" "$tmp_nami_script.bak"
-
-      if [ $nami_install_status -ne 0 ]; then
-        printf "${RED}${ERROR_SYMBOL} Nami安装脚本执行失败。${PLAIN}\n"
-        install_brook_binary
-        return $?
-      fi
-      printf "${GREEN}${SUCCESS_SYMBOL} Nami已安装。${PLAIN}\n"
-    fi
-    
-    if ! echo "$PATH" | grep -qF "${nami_bin_path}"; then export PATH="${nami_bin_path}:$PATH"; printf "${INFO_SYMBOL} Nami路径已添加到当前会话PATH: %s${PLAIN}\n" "$nami_bin_path"; fi
-
-    local nami_cmd="nami"
-    if ! command -v nami &>/dev/null; then
-        if [ -x "${nami_bin_path}/nami" ]; then
-            nami_cmd="${nami_bin_path}/nami"
-        else
-            printf "${RED}${ERROR_SYMBOL} Nami安装后仍无法找到命令，尝试手动下载brook...${PLAIN}\n"; install_brook_binary; return $?;
-        fi 
-    fi
-
-    printf "${CYAN}${INFO_SYMBOL} 使用 '$nami_cmd' 安装Brook...${PLAIN}\n"
-    $nami_cmd install brook || {
-      printf "${RED}${ERROR_SYMBOL} 使用nami安装brook失败，尝试手动下载...${PLAIN}\n"
-      install_brook_binary
-      return $?
-    }
-    
-    # 检查Brook是否安装成功 - 使用多种方式验证
-    if command -v brook &>/dev/null && brook --help &>/dev/null; then
-      printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功并可执行。${PLAIN}\n"
-    elif [ -x "${nami_bin_path}/brook" ] && "${nami_bin_path}/brook" --help &>/dev/null; then
-      printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功并可执行。${PLAIN}\n"
-    elif $nami_cmd run brook --help &>/dev/null; then
-      printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功并可执行。${PLAIN}\n"
-    else
-      printf "${RED}${ERROR_SYMBOL} Nami安装Brook后，Brook仍无法执行，尝试手动下载...${PLAIN}\n"
-      install_brook_binary
-      return $?
-    fi
+    # 直接使用二进制安装，避免nami复杂性
+    install_brook_binary
+    return $?
   else
     printf "${GREEN}${SUCCESS_SYMBOL} Brook已安装并可执行。${PLAIN}\n"
   fi
   return 0
 }
 
-# 手动下载安装brook二进制文件 (作为nami安装失败的备用方案)
+# 下载安装brook二进制文件
 install_brook_binary() {
-  printf "${CYAN}${INFO_SYMBOL} 尝试手动下载Brook二进制文件...${PLAIN}\n"
+  printf "${CYAN}${INFO_SYMBOL} 正在下载Brook二进制文件...${PLAIN}\n"
+  
+  # 检测系统架构
   ARCH=$(uname -m)
   case $ARCH in
-    x86_64|amd64) BROOK_ARCH="amd64" ;; aarch64|arm64) BROOK_ARCH="arm64" ;; i386|i686) BROOK_ARCH="386" ;; 
+    x86_64|amd64) BROOK_ARCH="amd64" ;; 
+    aarch64|arm64) BROOK_ARCH="arm64" ;; 
+    i386|i686) BROOK_ARCH="386" ;; 
     *) printf "${RED}${ERROR_SYMBOL} 不支持的系统架构: %s${PLAIN}\n" "$ARCH"; return 1 ;;
   esac
+  
+  # 检测操作系统
   OS=$(uname -s | tr '[:upper:]' '[:lower:]')
   case $OS in
-    linux) BROOK_OS="linux" ;; darwin) BROOK_OS="darwin" ;; 
+    linux) BROOK_OS="linux" ;; 
+    darwin) BROOK_OS="darwin" ;; 
     *) printf "${RED}${ERROR_SYMBOL} 不支持的操作系统: %s${PLAIN}\n" "$OS"; return 1 ;;
   esac
   
-  BROOK_VERSION=$(curl -s https://api.github.com/repos/txthinking/brook/releases/latest | grep -o '"tag_name": "v[^"]*' | sed 's/"tag_name": "v//g')
-  BROOK_VERSION=${BROOK_VERSION:-20230401} # 默认版本
-  printf "${GREEN}${SUCCESS_SYMBOL} 使用Brook版本: %s for ${BROOK_OS}/${BROOK_ARCH}${PLAIN}\n" "$BROOK_VERSION"
+  # 获取最新版本
+  printf "${CYAN}${INFO_SYMBOL} 获取Brook最新版本信息...${PLAIN}\n"
+  BROOK_VERSION=$(curl -s --connect-timeout 10 https://api.github.com/repos/txthinking/brook/releases/latest | grep -o '"tag_name": "v[^"]*' | sed 's/"tag_name": "v//g' | head -1)
+  if [ -z "$BROOK_VERSION" ]; then
+    BROOK_VERSION="20250202"  # 备用版本
+    printf "${YELLOW}${WARN_SYMBOL} 无法获取最新版本，使用默认版本: %s${PLAIN}\n" "$BROOK_VERSION"
+  else
+    printf "${GREEN}${SUCCESS_SYMBOL} 检测到Brook版本: %s${PLAIN}\n" "$BROOK_VERSION"
+  fi
   
+  # 构建下载URL
   BROOK_URL="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_OS}_${BROOK_ARCH}"
-  # 旧版Brook可能没有版本号在文件名中 (brook_linux_amd64)
-  BROOK_URL_LEGACY="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_OS}_${BROOK_ARCH}" 
-  # 更正：brook_VERSION 应该从文件名中去掉
-  BROOK_URL_CORRECTED="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_OS}_${BROOK_ARCH}"
-  # 实际的brook release文件名通常是 brook_linux_amd64 (无版本号), 但URL路径有版本号
-  # 因此，下载的文件名是 brook, URL是 .../vVERSION/brook_os_arch
-  # Let's use BROOK_URL_CORRECTED
-
-  printf "${CYAN}${INFO_SYMBOL} 正在下载Brook: %s${PLAIN}\n" "$BROOK_URL_CORRECTED"
-  curl -L -o /tmp/brook "$BROOK_URL_CORRECTED"
-  if [ $? -ne 0 ] || [ ! -s /tmp/brook ]; then
-    printf "${RED}${ERROR_SYMBOL} 下载Brook失败 (URL: %s)。请手动安装。${PLAIN}\n" "$BROOK_URL_CORRECTED"
+  printf "${CYAN}${INFO_SYMBOL} 下载地址: %s${PLAIN}\n" "$BROOK_URL"
+  
+  # 下载brook
+  printf "${CYAN}${INFO_SYMBOL} 正在下载Brook...${PLAIN}\n"
+  if curl -L --connect-timeout 30 --max-time 300 -o /tmp/brook "$BROOK_URL"; then
+    if [ -s /tmp/brook ]; then
+      printf "${GREEN}${SUCCESS_SYMBOL} Brook下载成功${PLAIN}\n"
+    else
+      printf "${RED}${ERROR_SYMBOL} 下载的文件为空${PLAIN}\n"
+      return 1
+    fi
+  else
+    printf "${RED}${ERROR_SYMBOL} Brook下载失败${PLAIN}\n"
     return 1
   fi
   
+  # 安装brook
+  printf "${CYAN}${INFO_SYMBOL} 安装Brook到 /usr/local/bin/...${PLAIN}\n"
   $SUDO chmod +x /tmp/brook
-  $SUDO mv /tmp/brook /usr/local/bin/brook
+  if $SUDO mv /tmp/brook /usr/local/bin/brook; then
+    printf "${GREEN}${SUCCESS_SYMBOL} Brook文件安装成功${PLAIN}\n"
+  else
+    printf "${RED}${ERROR_SYMBOL} Brook安装失败${PLAIN}\n"
+    return 1
+  fi
   
+  # 验证安装
+  printf "${CYAN}${INFO_SYMBOL} 验证Brook安装...${PLAIN}\n"
   if command -v brook &>/dev/null && brook --help &>/dev/null; then
-    printf "${GREEN}${SUCCESS_SYMBOL} Brook手动安装成功。${PLAIN}\n"
+    printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功并可正常执行${PLAIN}\n"
+    brook --version 2>/dev/null || printf "${CYAN}${INFO_SYMBOL} Brook版本: %s${PLAIN}\n" "$BROOK_VERSION"
     return 0
   else
-    printf "${RED}${ERROR_SYMBOL} Brook手动安装后仍无法执行。请检查/usr/local/bin。${PLAIN}\n"
+    printf "${RED}${ERROR_SYMBOL} Brook安装后无法执行${PLAIN}\n"
     return 1
   fi
 }
@@ -272,25 +236,13 @@ generate_service_name() { local local_port=$1; local proto=$2; echo "${SERVICE_P
 create_systemd_service() {
   local service_name=$1; local local_port=$2; local remote_addr=$3; local proto=$4
   local service_file="${SERVICE_DIR}/${service_name}.service"
-  local nami_bin_dir_for_service="${SCRIPT_RUNNER_HOME}/.nami/bin"
   local brook_exec_command_for_service
 
-  # 确定Brook执行命令的优先级，确保使用绝对路径避免PATH问题:
-  # 1. /path/to/user/home/.nami/bin/brook (nami安装的brook绝对路径)
-  # 2. brook in PATH (如果brook在PATH中且可用)
-  # 3. /usr/local/bin/brook (手动安装的brook)
-  # 4. nami run brook (如果nami可用，作为最后选择)
-
-  if [ -x "${nami_bin_dir_for_service}/brook" ] && "${nami_bin_dir_for_service}/brook" --help &>/dev/null; then
-    brook_exec_command_for_service="${nami_bin_dir_for_service}/brook"
-  elif command -v brook &>/dev/null && brook --help &>/dev/null; then
+  # 简化Brook路径检测，优先使用实际可用的brook路径
+  if command -v brook &>/dev/null && brook --help &>/dev/null; then
     brook_exec_command_for_service=$(command -v brook)
   elif [ -x "/usr/local/bin/brook" ] && /usr/local/bin/brook --help &>/dev/null; then
     brook_exec_command_for_service="/usr/local/bin/brook"
-  elif command -v nami &>/dev/null && nami run brook --help &>/dev/null; then
-    brook_exec_command_for_service="nami run brook"
-  elif [ -x "${nami_bin_dir_for_service}/nami" ] && "${nami_bin_dir_for_service}/nami" run brook --help &>/dev/null; then
-    brook_exec_command_for_service="${nami_bin_dir_for_service}/nami run brook"
   else
     printf "${RED}${ERROR_SYMBOL} 无法确定Brook的有效执行命令。请确保Brook已正确安装。${PLAIN}\n"
     return 1
@@ -323,7 +275,7 @@ Restart=always
 RestartSec=5
 User=root
 Group=root
-Environment=\"PATH=${nami_bin_dir_for_service}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"
+Environment=\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"
 # 安全性设置
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -540,38 +492,18 @@ uninstall_brook() {
   $SUDO systemctl daemon-reload
   $SUDO rm -rf "$CONFIG_DIR" 2>/dev/null
 
-  local nami_cmd="nami"
-  local nami_bin_path="${SCRIPT_RUNNER_HOME}/.nami/bin"
-  if ! command -v nami &>/dev/null && [ -x "${nami_bin_path}/nami" ]; then nami_cmd="${nami_bin_path}/nami"; fi
-
-  if command -v $nami_cmd &>/dev/null; then
-    printf "${CYAN}${INFO_SYMBOL} 卸载Brook (使用 $nami_cmd)...${PLAIN}\n"
-    $nami_cmd remove brook 2>/dev/null || printf "${YELLOW}${WARN_SYMBOL} 使用nami卸载Brook失败${PLAIN}\n"
-  else
-    printf "${YELLOW}${WARN_SYMBOL} Nami命令未找到，尝试直接删除Brook文件...${PLAIN}\n"
-    $SUDO rm -f /usr/local/bin/brook 2>/dev/null # 尝试标准路径
-    $SUDO rm -f "${nami_bin_path}/brook" 2>/dev/null # 尝试nami的bin路径下的brook
+  # 简化Brook卸载，直接删除二进制文件
+  printf "${CYAN}${INFO_SYMBOL} 卸载Brook...${PLAIN}\n"
+  if command -v brook &>/dev/null; then
+    local brook_path=$(command -v brook)
+    $SUDO rm -f "$brook_path" 2>/dev/null
+    printf "${GREEN}${SUCCESS_SYMBOL} Brook已从 %s 删除${PLAIN}\n" "$brook_path"
   fi
+  
+  # 清理可能的其他位置
+  $SUDO rm -f /usr/local/bin/brook 2>/dev/null
+  
   printf "${GREEN}${SUCCESS_SYMBOL} Brook已完全卸载${PLAIN}\n"
-
-  # 询问是否卸载Nami
-  if command -v $nami_cmd &>/dev/null || [ -d "${SCRIPT_RUNNER_HOME}/.nami" ]; then # 只有在找到nami或nami目录时才询问
-    printf "\n${YELLOW}${WARN_SYMBOL} 是否也卸载Nami (包管理器)？这将移除Nami本身及其所有已安装的包。 [y/N]: ${PLAIN}"
-    read -r confirm_nami
-    if [[ "$confirm_nami" =~ ^[Yy]$ ]]; then
-      printf "${CYAN}${INFO_SYMBOL} 卸载Nami...${PLAIN}\n"
-      if command -v $nami_cmd &>/dev/null; then
-        # 如果nami命令可用，尝试用nami卸载自身 (虽然nami可能没有这个功能)
-        # 通常卸载nami是删除其目录和清除PATH
-        printf "${YELLOW}${INFO_SYMBOL} Nami没有 'nami remove nami' 这样的命令。将删除Nami目录和相关的PATH配置。${PLAIN}\n"
-      fi
-      $SUDO rm -rf "${SCRIPT_RUNNER_HOME}/.nami"
-      printf "${GREEN}${SUCCESS_SYMBOL} Nami目录 (${SCRIPT_RUNNER_HOME}/.nami) 已删除。${PLAIN}\n"
-      printf "${YELLOW}${WARN_SYMBOL} 请手动从您的shell配置文件 (如 .bashrc, .zshrc) 中移除 'export PATH=$HOME/.nami/bin:$PATH' 这一行。${PLAIN}\n"
-    else
-      printf "${INFO_SYMBOL} 已选择不卸载Nami。${PLAIN}\n"
-    fi
-  fi
   return 0
 }
 
@@ -778,8 +710,6 @@ view_service_logs() {
     printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"
   fi
 }
-
-
 
 # 测试Brook转发功能
 test_brook_forward() {
