@@ -854,7 +854,7 @@ config_file_management() {
         fi
         if command -v jq &>/dev/null && jq empty "$CONFIG_FILE" > /dev/null 2>&1; then
           printf "${GREEN} ${SUCCESS_SYMBOL}Config file format is valid JSON.${PLAIN}\n"
-        elif command -v jq &>/dev/null; # jq is present but format is invalid
+        elif command -v jq &>/dev/null; then # jq is present but format is invalid
           printf "${YELLOW} ${WARN_SYMBOL}WARNING: Config file format is invalid JSON! This may cause issues.${PLAIN}\n"
         else # jq not present, cannot validate
           printf "${YELLOW} ${WARN_SYMBOL}jq not found. Cannot validate JSON format.${PLAIN}\n"
