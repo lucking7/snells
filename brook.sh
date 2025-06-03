@@ -646,16 +646,43 @@ show_ip_info() {
   printf "\n"
 }
 
+# 获取简洁的IP信息
+get_simple_ip_info() {
+  if ! command -v curl &>/dev/null; then
+    return 1
+  fi
+  
+  # 获取IPv4信息
+  local ip_info=$(curl -s4 https://ipinfo.io/json 2>/dev/null)
+  if [ -n "$ip_info" ]; then
+    local ip=$(echo "$ip_info" | grep -o '"ip": "[^"]*' | cut -d'"' -f4)
+    local country=$(echo "$ip_info" | grep -o '"country": "[^"]*' | cut -d'"' -f4)
+    local city=$(echo "$ip_info" | grep -o '"city": "[^"]*' | cut -d'"' -f4)
+    local org=$(echo "$ip_info" | grep -o '"org": "[^"]*' | cut -d'"' -f4 | sed 's/AS[0-9]* //')
+    
+    echo "${ip} | ${country}, ${city} | ${org}"
+  else
+    echo "无法获取IP信息"
+  fi
+}
+
 # 显示菜单
 show_menu() {
+  # 获取IP信息并显示在菜单顶部
+  local ip_info=$(get_simple_ip_info)
+  
   printf "\n${PURPLE}${BOLD}========== Brook 端口转发管理 ==========${PLAIN}\n"
+  if [ -n "$ip_info" ]; then
+    printf "${CYAN}${INFO_SYMBOL} 本机IP: ${GREEN}%s${PLAIN}\n" "$ip_info"
+  fi
+  printf "${PURPLE}${BOLD}---------------------------------------${PLAIN}\n"
   printf "  ${GREEN}1.${PLAIN} 添加转发\n"
   printf "  ${GREEN}2.${PLAIN} 列出所有转发\n"
   printf "  ${GREEN}3.${PLAIN} 删除转发\n"
   printf "  ${GREEN}4.${PLAIN} 重启所有服务\n"
   printf "  ${GREEN}5.${PLAIN} 查看服务日志\n"
   printf "  ${GREEN}6.${PLAIN} 卸载Brook\n"
-  printf "  ${GREEN}7.${PLAIN} 显示本机IP信息\n"
+  printf "  ${GREEN}7.${PLAIN} 显示详细IP信息\n"
   printf "  ${GREEN}0.${PLAIN} 退出\n"
   printf "${PURPLE}${BOLD}=======================================${PLAIN}\n"
 }
