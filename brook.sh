@@ -2,7 +2,7 @@
 
 # Brook端口转发统一管理脚本
 # 支持功能: TCP转发、UDP转发、TCP+UDP转发、TCP和UDP分别转发到不同地址
-# 版本: 1.2
+# 版本: 1.3.1
 
 # 颜色定义
 RED='\033[0;31m'
@@ -30,12 +30,13 @@ ERROR_SYMBOL="[x]"
 INFO_SYMBOL="[i]"
 WARN_SYMBOL="[!]"
 
+# 脚本运行者的HOME目录，用于定位nami安装
+SCRIPT_RUNNER_HOME="$HOME"
+
 # 检查是否为root用户，决定是否需要sudo前缀
 if [ "$EUID" -eq 0 ]; then
-  # 如果是root用户，不需要sudo
   SUDO=""
 else
-  # 如果不是root用户，需要sudo
   SUDO="sudo"
 fi
 
@@ -65,7 +66,6 @@ check_and_install_dependencies() {
   local pkgs_to_install=()
   local pkg_manager_detected=""
 
-  # 检测包管理器
   if command -v apt-get &>/dev/null; then
     pkg_manager_detected="apt-get"
   elif command -v yum &>/dev/null; then
@@ -77,14 +77,12 @@ check_and_install_dependencies() {
     exit 1
   fi
 
-  # 检查缺失的包
   for pkg in "${essential_pkgs[@]}"; do
     if ! command -v $pkg &>/dev/null; then
       pkgs_to_install+=($pkg)
     fi
   done
 
-  # 安装缺失的包
   if [ ${#pkgs_to_install[@]} -gt 0 ]; then
     printf "${YELLOW}${INFO_SYMBOL} 缺失以下包: %s${PLAIN}\n" "${pkgs_to_install[*]}"
     printf "${YELLOW}${INFO_SYMBOL} 尝试使用 %s 安装...${PLAIN}\n" "$pkg_manager_detected"
@@ -99,207 +97,111 @@ check_and_install_dependencies() {
     fi
   fi
 
-  # 检查并安装brook
-  if ! command -v brook &>/dev/null; then
-    printf "${YELLOW}${INFO_SYMBOL} Brook未安装。正在安装Brook...${PLAIN}\n"
+  if ! command -v brook &>/dev/null || ! brook --help &>/dev/null; then
+    printf "${YELLOW}${INFO_SYMBOL} Brook未安装或无法执行。尝试安装/修复...${PLAIN}\n"
     
-    # 优先使用nami安装brook
-    printf "${CYAN}${INFO_SYMBOL} 尝试使用nami安装Brook...${PLAIN}\n"
+    local nami_bin_path="${SCRIPT_RUNNER_HOME}/.nami/bin"
     
-    # 首先检查nami是否已安装
-    if ! command -v nami &>/dev/null; then
-      printf "${CYAN}${INFO_SYMBOL} 首先安装nami...${PLAIN}\n"
-      # 使用bash.ooo/nami.sh安装nami
-      bash <(curl -fsSL https://bash.ooo/nami.sh) || {
-        printf "${RED}${ERROR_SYMBOL} 安装nami失败，尝试手动下载brook...${PLAIN}\n"
-        install_brook_binary
-        return
+    if ! command -v nami &>/dev/null && ! [ -x "${nami_bin_path}/nami" ]; then
+      printf "${CYAN}${INFO_SYMBOL} Nami未安装，开始安装nami...${PLAIN}\n"
+      local nami_install_script_url="https://bash.ooo/nami.sh"
+      local tmp_nami_script="/tmp/nami_install_temp.sh"
+      curl -fsSL "$nami_install_script_url" -o "$tmp_nami_script" || {
+          printf "${RED}${ERROR_SYMBOL} 下载nami安装脚本失败 (%s)。${PLAIN}\n" "$nami_install_script_url";
+          install_brook_binary; return $?;
       }
+      # 从下载的脚本中移除 'exec -l $SHELL' 这一行
+      sed -i.bak '/^exec -l /d' "$tmp_nami_script"
       
-      # 刷新环境变量以找到nami
-      export PATH=$HOME/.nami/bin:$PATH
-      
-      # 再次检查nami是否可用
-      if ! command -v nami &>/dev/null; then
-        printf "${YELLOW}${WARN_SYMBOL} nami安装成功但命令不可用，尝试直接使用nami的路径...${PLAIN}\n"
-        # 直接使用nami的路径安装brook
-        $HOME/.nami/bin/nami install brook || {
-          printf "${RED}${ERROR_SYMBOL} 使用nami安装brook失败，尝试手动下载...${PLAIN}\n"
-          install_brook_binary
-          return
-        }
-        
-        # 创建brook的符号链接
-        if [ -f "$HOME/.nami/bin/brook" ]; then
-          $SUDO ln -sf $HOME/.nami/bin/brook /usr/local/bin/brook
-          printf "${GREEN}${SUCCESS_SYMBOL} 已创建brook的符号链接到/usr/local/bin/brook${PLAIN}\n"
-        else
-          printf "${RED}${ERROR_SYMBOL} 找不到nami安装的brook文件${PLAIN}\n"
-          install_brook_binary
-          return
-        fi
-      else
-        # 使用nami安装brook
-        nami install brook || {
-          printf "${RED}${ERROR_SYMBOL} 使用nami安装brook失败，尝试手动下载...${PLAIN}\n"
-          install_brook_binary
-          return
-        }
+      bash "$tmp_nami_script"
+      local nami_install_status=$?
+      rm -f "$tmp_nami_script" "$tmp_nami_script.bak"
+
+      if [ $nami_install_status -ne 0 ]; then
+        printf "${RED}${ERROR_SYMBOL} Nami安装脚本执行失败。${PLAIN}\n"
+        install_brook_binary
+        return $?
       fi
-    else
-      # nami已安装，使用它安装brook
-      nami install brook || {
-        printf "${RED}${ERROR_SYMBOL} 使用nami安装brook失败，尝试手动下载...${PLAIN}\n"
-        install_brook_binary
-        return
-      }
+      printf "${GREEN}${SUCCESS_SYMBOL} Nami已安装。${PLAIN}\n"
     fi
     
-    # 检查brook是否已安装并可执行
-    if command -v brook &>/dev/null; then
-      if brook --help &>/dev/null; then
-        printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功并可正常执行。${PLAIN}\n"
-      else
-        printf "${RED}${ERROR_SYMBOL} Brook已安装但不可执行，尝试创建符号链接...${PLAIN}\n"
-        # 尝试查找nami安装的brook位置
-        if [ -f "$HOME/.nami/bin/brook" ]; then
-          $SUDO ln -sf $HOME/.nami/bin/brook /usr/local/bin/brook
-          printf "${GREEN}${SUCCESS_SYMBOL} 已创建brook的符号链接到/usr/local/bin/brook${PLAIN}\n"
-          
-          # 再次检查brook是否可执行
-          if brook --help &>/dev/null; then
-            printf "${GREEN}${SUCCESS_SYMBOL} Brook现在可以正常执行。${PLAIN}\n"
-          else
-            printf "${RED}${ERROR_SYMBOL} Brook仍然不可执行，尝试手动下载...${PLAIN}\n"
-            install_brook_binary
-          fi
+    if ! echo "$PATH" | grep -qF "${nami_bin_path}"; then export PATH="${nami_bin_path}:$PATH"; printf "${INFO_SYMBOL} Nami路径已添加到当前会话PATH: %s${PLAIN}\n" "$nami_bin_path"; fi
+
+    local nami_cmd="nami"
+    if ! command -v nami &>/dev/null; then
+        if [ -x "${nami_bin_path}/nami" ]; then
+            nami_cmd="${nami_bin_path}/nami"
         else
-          printf "${RED}${ERROR_SYMBOL} 找不到nami安装的brook文件，尝试手动下载...${PLAIN}\n"
-          install_brook_binary
-        fi
-      fi
-    else
-      printf "${RED}${ERROR_SYMBOL} Brook安装失败，尝试手动下载...${PLAIN}\n"
+            printf "${RED}${ERROR_SYMBOL} Nami安装后仍无法找到命令，尝试手动下载brook...${PLAIN}\n"; install_brook_binary; return $?;
+        fi 
+    fi
+
+    printf "${CYAN}${INFO_SYMBOL} 使用 '$nami_cmd' 安装Brook...${PLAIN}\n"
+    $nami_cmd install brook || {
+      printf "${RED}${ERROR_SYMBOL} 使用nami安装brook失败，尝试手动下载...${PLAIN}\n"
       install_brook_binary
+      return $?
+    }
+    
+    if command -v brook &>/dev/null && brook --help &>/dev/null; then
+      printf "${GREEN}${SUCCESS_SYMBOL} Brook通过nami安装成功并可执行。${PLAIN}\n"
+    elif $nami_cmd run brook --help &>/dev/null; then
+      printf "${GREEN}${SUCCESS_SYMBOL} Brook通过 'nami run brook' 安装成功并可执行。${PLAIN}\n"
+    else
+      printf "${RED}${ERROR_SYMBOL} Nami安装Brook后，Brook仍无法执行，尝试手动下载...${PLAIN}\n"
+      install_brook_binary
+      return $?
     fi
   else
-    printf "${GREEN}${SUCCESS_SYMBOL} Brook已安装。${PLAIN}\n"
-    # 验证brook是否可正常执行
-    if brook --help &>/dev/null; then
-      printf "${GREEN}${SUCCESS_SYMBOL} Brook可正常执行。${PLAIN}\n"
-    else
-      printf "${RED}${ERROR_SYMBOL} Brook已安装但不可执行，尝试重新安装...${PLAIN}\n"
-      $SUDO rm -f $(which brook)
-      printf "${CYAN}${INFO_SYMBOL} 已删除不可执行的brook，重新安装...${PLAIN}\n"
-      check_and_install_dependencies
-    fi
+    printf "${GREEN}${SUCCESS_SYMBOL} Brook已安装并可执行。${PLAIN}\n"
   fi
+  return 0
 }
 
-# 手动下载安装brook二进制文件
+# 手动下载安装brook二进制文件 (作为nami安装失败的备用方案)
 install_brook_binary() {
   printf "${CYAN}${INFO_SYMBOL} 尝试手动下载Brook二进制文件...${PLAIN}\n"
-  
-  # 检测系统架构
   ARCH=$(uname -m)
   case $ARCH in
-    x86_64|amd64)
-      BROOK_ARCH="amd64"
-      ;;
-    aarch64|arm64)
-      BROOK_ARCH="arm64"
-      ;;
-    i386|i686)
-      BROOK_ARCH="386"
-      ;;
-    *)
-      printf "${RED}${ERROR_SYMBOL} 不支持的系统架构: %s${PLAIN}\n" "$ARCH"
-      exit 1
-      ;;
+    x86_64|amd64) BROOK_ARCH="amd64" ;; aarch64|arm64) BROOK_ARCH="arm64" ;; i386|i686) BROOK_ARCH="386" ;; 
+    *) printf "${RED}${ERROR_SYMBOL} 不支持的系统架构: %s${PLAIN}\n" "$ARCH"; return 1 ;;
   esac
-  
-  # 检测操作系统类型
   OS=$(uname -s | tr '[:upper:]' '[:lower:]')
   case $OS in
-    linux)
-      BROOK_OS="linux"
-      ;;
-    darwin)
-      BROOK_OS="darwin"
-      ;;
-    *)
-      printf "${RED}${ERROR_SYMBOL} 不支持的操作系统: %s${PLAIN}\n" "$OS"
-      exit 1
-      ;;
+    linux) BROOK_OS="linux" ;; darwin) BROOK_OS="darwin" ;; 
+    *) printf "${RED}${ERROR_SYMBOL} 不支持的操作系统: %s${PLAIN}\n" "$OS"; return 1 ;;
   esac
   
-  # 获取最新版本
   BROOK_VERSION=$(curl -s https://api.github.com/repos/txthinking/brook/releases/latest | grep -o '"tag_name": "v[^"]*' | sed 's/"tag_name": "v//g')
-  if [ -z "$BROOK_VERSION" ]; then
-    BROOK_VERSION="20230401" # 设置一个默认版本
-    printf "${YELLOW}${WARN_SYMBOL} 无法获取最新版本，使用默认版本: %s${PLAIN}\n" "$BROOK_VERSION"
-  else
-    printf "${GREEN}${SUCCESS_SYMBOL} 检测到最新版本: %s${PLAIN}\n" "$BROOK_VERSION"
+  BROOK_VERSION=${BROOK_VERSION:-20230401} # 默认版本
+  printf "${GREEN}${SUCCESS_SYMBOL} 使用Brook版本: %s for ${BROOK_OS}/${BROOK_ARCH}${PLAIN}\n" "$BROOK_VERSION"
+  
+  BROOK_URL="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_OS}_${BROOK_ARCH}"
+  # 旧版Brook可能没有版本号在文件名中 (brook_linux_amd64)
+  BROOK_URL_LEGACY="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_OS}_${BROOK_ARCH}" 
+  # 更正：brook_VERSION 应该从文件名中去掉
+  BROOK_URL_CORRECTED="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_OS}_${BROOK_ARCH}"
+  # 实际的brook release文件名通常是 brook_linux_amd64 (无版本号), 但URL路径有版本号
+  # 因此，下载的文件名是 brook, URL是 .../vVERSION/brook_os_arch
+  # Let's use BROOK_URL_CORRECTED
+
+  printf "${CYAN}${INFO_SYMBOL} 正在下载Brook: %s${PLAIN}\n" "$BROOK_URL_CORRECTED"
+  curl -L -o /tmp/brook "$BROOK_URL_CORRECTED"
+  if [ $? -ne 0 ] || [ ! -s /tmp/brook ]; then
+    printf "${RED}${ERROR_SYMBOL} 下载Brook失败 (URL: %s)。请手动安装。${PLAIN}\n" "$BROOK_URL_CORRECTED"
+    return 1
   fi
   
-  # 下载brook
-  BROOK_URL="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_VERSION}_${BROOK_OS}_${BROOK_ARCH}"
-  printf "${CYAN}${INFO_SYMBOL} 正在下载Brook: %s${PLAIN}\n" "$BROOK_URL"
-  
-  curl -L -o /tmp/brook "$BROOK_URL"
-  if [ $? -ne 0 ]; then
-    printf "${RED}${ERROR_SYMBOL} 下载Brook失败，请检查网络连接或手动安装。${PLAIN}\n"
-    exit 1
-  fi
-  
-  # 检查文件是否正确下载（非空）
-  if [ ! -s /tmp/brook ]; then
-    printf "${RED}${ERROR_SYMBOL} 下载的Brook文件为空，尝试备用版本...${PLAIN}\n"
-    BROOK_VERSION="20230401"
-    BROOK_URL="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_VERSION}_${BROOK_OS}_${BROOK_ARCH}"
-    printf "${CYAN}${INFO_SYMBOL} 正在下载备用版本Brook: %s${PLAIN}\n" "$BROOK_URL"
-    
-    curl -L -o /tmp/brook "$BROOK_URL"
-    if [ $? -ne 0 ] || [ ! -s /tmp/brook ]; then
-      printf "${RED}${ERROR_SYMBOL} 下载备用版本Brook失败，请手动安装。${PLAIN}\n"
-      exit 1
-    fi
-  fi
-  
-  # 安装brook
   $SUDO chmod +x /tmp/brook
   $SUDO mv /tmp/brook /usr/local/bin/brook
   
-  # 验证brook是否可执行
-  if ! $SUDO /usr/local/bin/brook --help &>/dev/null; then
-    printf "${RED}${ERROR_SYMBOL} Brook可能无法在当前系统上执行，尝试其他架构版本...${PLAIN}\n"
-    
-    # 如果是amd64，尝试386架构
-    if [ "$BROOK_ARCH" = "amd64" ]; then
-      BROOK_ARCH="386"
-      BROOK_URL="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_VERSION}_${BROOK_OS}_${BROOK_ARCH}"
-      printf "${CYAN}${INFO_SYMBOL} 尝试下载386架构Brook: %s${PLAIN}\n" "$BROOK_URL"
-      
-      curl -L -o /tmp/brook "$BROOK_URL"
-      if [ $? -eq 0 ] && [ -s /tmp/brook ]; then
-        $SUDO chmod +x /tmp/brook
-        $SUDO mv /tmp/brook /usr/local/bin/brook
-        
-        if ! $SUDO /usr/local/bin/brook --help &>/dev/null; then
-          printf "${RED}${ERROR_SYMBOL} Brook依然无法在当前系统上执行，请手动安装。${PLAIN}\n"
-          exit 1
-        fi
-      else
-        printf "${RED}${ERROR_SYMBOL} 下载386架构Brook失败，请手动安装。${PLAIN}\n"
-        exit 1
-      fi
-    else
-      printf "${RED}${ERROR_SYMBOL} Brook无法在当前系统上执行，请手动安装。${PLAIN}\n"
-      exit 1
-    fi
+  if command -v brook &>/dev/null && brook --help &>/dev/null; then
+    printf "${GREEN}${SUCCESS_SYMBOL} Brook手动安装成功。${PLAIN}\n"
+    return 0
+  else
+    printf "${RED}${ERROR_SYMBOL} Brook手动安装后仍无法执行。请检查/usr/local/bin。${PLAIN}\n"
+    return 1
   fi
-  
-  printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功。${PLAIN}\n"
 }
 
 # 设置配置目录
@@ -308,7 +210,6 @@ setup_config_dir() {
     $SUDO mkdir -p "$CONFIG_DIR"
     printf "${GREEN}${SUCCESS_SYMBOL} 创建配置目录: %s${PLAIN}\n" "$CONFIG_DIR"
   fi
-
   if [ ! -f "$CONFIG_FILE" ]; then
     $SUDO touch "$CONFIG_FILE"
     printf "${GREEN}${SUCCESS_SYMBOL} 创建配置文件: %s${PLAIN}\n" "$CONFIG_FILE"
@@ -319,48 +220,15 @@ setup_config_dir() {
 validate_input() {
   local input=$1
   local input_type=$2
-
   case $input_type in
-  "port")
-    if ! [[ "$input" =~ ^[0-9]+$ ]] || [ "$input" -lt 1 ] || [ "$input" -gt 65535 ]; then
-      printf "${RED}${ERROR_SYMBOL} 无效的端口号。必须在1-65535之间。${PLAIN}\n"
-      return 1
-    fi
-    ;;
-  "ip")
-    if [[ "$input" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-      IFS='.' read -r -a octets <<<"$input"
-      for octet in "${octets[@]}"; do
-        if [ "$octet" -gt 255 ]; then
-          printf "${RED}${ERROR_SYMBOL} 无效的IPv4地址。${PLAIN}\n"
-          return 1
-        fi
-      done
-      return 0
-    fi
-    if [[ "$input" =~ ^[0-9a-fA-F:]+$ ]]; then
-      return 0
-    fi
-    printf "${RED}${ERROR_SYMBOL} 无效的IP地址格式。${PLAIN}\n"
-    return 1
-    ;;
-  "hostname")
-    if [[ "$input" =~ ^[a-zA-Z0-9]([-a-zA-Z0-9\.]{0,61}[a-zA-Z0-9])?$ ]]; then
-      return 0
-    fi
-    printf "${RED}${ERROR_SYMBOL} 无效的主机名格式。${PLAIN}\n"
-    return 1
-    ;;
-  esac
-  return 0
+  "port") if ! [[ "$input" =~ ^[0-9]+$ ]] || [ "$input" -lt 1 ] || [ "$input" -gt 65535 ]; then printf "${RED}${ERROR_SYMBOL} 无效的端口号。必须在1-65535之间。${PLAIN}\n"; return 1; fi ;;
+  "ip") if [[ "$input" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then IFS='.' read -r -a octets <<<"$input"; for octet in "${octets[@]}"; do if [ "$octet" -gt 255 ]; then printf "${RED}${ERROR_SYMBOL} 无效的IPv4地址。${PLAIN}\n"; return 1; fi; done; return 0; fi; if [[ "$input" =~ ^[0-9a-fA-F:]+$ ]]; then return 0; fi; printf "${RED}${ERROR_SYMBOL} 无效的IP地址格式。${PLAIN}\n"; return 1 ;; 
+  "hostname") if [[ "$input" =~ ^[a-zA-Z0-9]([-a-zA-Z0-9\.]{0,61}[a-zA-Z0-9])?$ ]]; then return 0; fi; printf "${RED}${ERROR_SYMBOL} 无效的主机名格式。${PLAIN}\n"; return 1 ;; 
+esac; return 0;
 }
 
 # 生成服务名称
-generate_service_name() {
-  local local_port=$1
-  local proto=$2
-  echo "${SERVICE_PREFIX}-${local_port}-${proto}"
-}
+generate_service_name() { local local_port=$1; local proto=$2; echo "${SERVICE_PREFIX}-${local_port}-${proto}"; }
 
 # 创建systemd服务
 create_systemd_service() {
@@ -370,49 +238,73 @@ create_systemd_service() {
   local proto=$4
   local service_file="${SERVICE_DIR}/${service_name}.service"
 
-  # 根据协议类型构建命令
-  local brook_cmd="/usr/local/bin/brook relay -f :${local_port} -t ${remote_addr}"
+  local nami_bin_dir_for_service="${SCRIPT_RUNNER_HOME}/.nami/bin"
+  local brook_exec_command_for_service
+
+  # 确定Brook执行命令的优先级:
+  # 1. nami run brook (如果nami在PATH中且可用)
+  # 2. /path/to/user/home/.nami/bin/nami run brook (nami的绝对路径)
+  # 3. brook (如果brook在PATH中且可用)
+  # 4. /path/to/user/home/.nami/bin/brook (brook的绝对路径, nami可能将其放在此处)
+  # 5. /usr/local/bin/brook (最后的备用路径)
+
+  if command -v nami &>/dev/null && nami run brook --help &>/dev/null; then
+    brook_exec_command_for_service="nami run brook"
+  elif [ -x "${nami_bin_dir_for_service}/nami" ] && "${nami_bin_dir_for_service}/nami" run brook --help &>/dev/null; then
+    brook_exec_command_for_service="\"${nami_bin_dir_for_service}/nami\" run brook" # 引号处理路径中的特殊字符
+  elif command -v brook &>/dev/null && brook --help &>/dev/null; then
+    brook_exec_command_for_service=$(command -v brook)
+  elif [ -x "${nami_bin_dir_for_service}/brook" ] && "${nami_bin_dir_for_service}/brook" --help &>/dev/null; then
+    brook_exec_command_for_service="\"${nami_bin_dir_for_service}/brook\"" # 引号处理路径中的特殊字符
+  elif [ -x "/usr/local/bin/brook" ] && /usr/local/bin/brook --help &>/dev/null; then
+    brook_exec_command_for_service="/usr/local/bin/brook"
+  else
+    printf "${RED}${ERROR_SYMBOL} 无法确定Brook的有效执行命令。请确保Brook已正确安装。${PLAIN}\n"
+    return 1
+  fi
   
-  # Brook relay命令支持--tcpTimeout和--udpTimeout参数
+  printf "${CYAN}${INFO_SYMBOL} Systemd服务将使用以下Brook命令: ${GREEN}%s${PLAIN}\n" "$brook_exec_command_for_service"
+
+    # Fallback: 尝试直接调用brook (如果nami将其放在了PATH或nami的bin目录)
+    if command -v brook &>/dev/null && brook --help &>/dev/null; then
+      brook_exec_command_for_service=$(command -v brook)
+    elif [ -x "${nami_bin_dir_for_service}/brook" ] && "${nami_bin_dir_for_service}/brook" --help &>/dev/null; then
+      brook_exec_command_for_service="${nami_bin_dir_for_service}/brook"
+    elif [ -x "/usr/local/bin/brook" ] && /usr/local/bin/brook --help &>/dev/null; then # 最后的备用路径
+      brook_exec_command_for_service="/usr/local/bin/brook"
+    else
+      printf "${RED}${ERROR_SYMBOL} 无法确定Brook的有效执行命令。请确保Brook已正确安装并通过 'nami run brook' 或直接 'brook' 可执行。${PLAIN}\n"
+      return 1
+    fi
+  fi
+  
+  printf "${CYAN}${INFO_SYMBOL} Systemd服务将使用以下Brook命令: ${GREEN}%s${PLAIN}\n" "$brook_exec_command_for_service"
+
+  local brook_relay_cmd_line="${brook_exec_command_for_service} relay -f :${local_port} -t ${remote_addr}"
   case $proto in
-    "tcp")
-      brook_cmd="$brook_cmd --udpTimeout 0"  # 禁用UDP
-      ;;
-    "udp")
-      brook_cmd="$brook_cmd --tcpTimeout 0"  # 禁用TCP
-      ;;
-    "both")
-      # 默认TCP和UDP都启用
-      ;;
+    "tcp") brook_relay_cmd_line="$brook_relay_cmd_line --udpTimeout 0" ;; 
+    "udp") brook_relay_cmd_line="$brook_relay_cmd_line --tcpTimeout 0" ;; 
   esac
 
-  # 创建服务文件内容
   local service_content="[Unit]
 Description=Brook Forward ${local_port} ${proto} to ${remote_addr}
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${brook_cmd}
+ExecStart=${brook_relay_cmd_line}
 Restart=always
 RestartSec=5
-# 使用root用户运行服务，避免nobody用户导致的权限问题
 User=root
 Group=root
+Environment=\"PATH=${nami_bin_dir_for_service}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"
 
 [Install]
 WantedBy=multi-user.target"
 
-  # 写入服务文件
   echo "$service_content" | $SUDO tee "$service_file" > /dev/null
-  
-  # 设置权限
   $SUDO chmod 644 "$service_file"
-  
-  # 重载systemd配置
   $SUDO systemctl daemon-reload
-  
-  # 启用并启动服务
   $SUDO systemctl enable "$service_name" >/dev/null 2>&1
   $SUDO systemctl start "$service_name"
   
@@ -420,21 +312,14 @@ WantedBy=multi-user.target"
     printf "${GREEN}${SUCCESS_SYMBOL} 服务 %s 启动成功${PLAIN}\n" "$service_name"
     return 0
   else
-    printf "${RED}${ERROR_SYMBOL} 服务 %s 启动失败${PLAIN}\n" "$service_name"
-    $SUDO journalctl -u "$service_name" --no-pager -n 10
+    printf "${RED}${ERROR_SYMBOL} 服务 %s 启动失败。请检查日志 (选项 5)。${PLAIN}\n" "$service_name"
+    # $SUDO journalctl -u "$service_name" --no-pager -n 10 # 暂时注释掉，避免过多输出
     return 1
   fi
 }
 
 # 保存转发配置到文件
-save_forward_config() {
-  local local_port=$1
-  local remote_addr=$2
-  local proto=$3
-  local service_name=$4
-  
-  echo "${service_name}|${local_port}|${remote_addr}|${proto}" | $SUDO tee -a "$CONFIG_FILE" > /dev/null
-}
+save_forward_config() { local local_port=$1; local remote_addr=$2; local proto=$3; local service_name=$4; echo "${service_name}|${local_port}|${remote_addr}|${proto}" | $SUDO tee -a "$CONFIG_FILE" > /dev/null; }
 
 # 添加转发
 add_forward() {
@@ -443,429 +328,166 @@ add_forward() {
   printf "  ${GREEN}2.${PLAIN} 仅UDP转发\n"
   printf "  ${GREEN}3.${PLAIN} TCP+UDP转发到相同地址\n"
   printf "  ${GREEN}4.${PLAIN} TCP和UDP分别转发到不同地址\n"
-  
   read -p "请选择 [1-4]: " forward_type
-  
-  case $forward_type in
-    1|2|3|4)
-      ;;
-    *)
-      printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"
-      return 1
-      ;;
-  esac
+  if ! [[ "$forward_type" =~ ^[1-4]$ ]]; then printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"; return 1; fi
 
-  # 获取本地端口
-  while true; do
-    read -p "请输入本地监听端口 [1-65535]: " local_port
-    if validate_input "$local_port" "port"; then
-      # 检查端口是否已被占用
-      if lsof -i:$local_port >/dev/null 2>&1; then
-        printf "${RED}${ERROR_SYMBOL} 端口 $local_port 已被占用${PLAIN}\n"
+  while true; do read -p "请输入本地监听端口 [1-65535]: " local_port; if validate_input "$local_port" "port"; then if lsof -i:$local_port >/dev/null 2>&1; then printf "${RED}${ERROR_SYMBOL} 端口 $local_port 已被占用${PLAIN}\n"; else break; fi; fi; done
+
+  case $forward_type in
+    1|2|3) # TCP only, UDP only, or Both to same target
+      local proto_str="tcp"
+      if [ "$forward_type" -eq 2 ]; then proto_str="udp"; fi
+      if [ "$forward_type" -eq 3 ]; then proto_str="both"; fi
+      
+      while true; do read -p "请输入目标IP地址或域名: " remote_ip; if validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname"; then break; fi; done
+      while true; do read -p "请输入目标端口 [1-65535]: " remote_port; if validate_input "$remote_port" "port"; then break; fi; done
+      remote_addr="${remote_ip}:${remote_port}"
+      printf "${CYAN}${INFO_SYMBOL} 目标地址: ${remote_addr}${PLAIN}\n"
+      
+      service_name=$(generate_service_name "$local_port" "$proto_str")
+      if create_systemd_service "$service_name" "$local_port" "$remote_addr" "$proto_str"; then
+        save_forward_config "$local_port" "$remote_addr" "$proto_str" "$service_name"
+        printf "${GREEN}${SUCCESS_SYMBOL} 转发添加成功！${PLAIN}\n"
       else
-        break
+        printf "${RED}${ERROR_SYMBOL} 添加转发失败，服务未能启动。${PLAIN}\n"
       fi
-    fi
-  done
-
-  case $forward_type in
-    1) # 仅TCP
-      while true; do
-        read -p "请输入目标IP地址或域名: " remote_ip
-        if validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname"; then
-          break
-        fi
-      done
-      
-      while true; do
-        read -p "请输入目标端口 [1-65535]: " remote_port
-        if validate_input "$remote_port" "port"; then
-          break
-        fi
-      done
-      
-      remote_addr="${remote_ip}:${remote_port}"
-      printf "${CYAN}${INFO_SYMBOL} 目标地址: ${remote_addr}${PLAIN}\n"
-      
-      service_name=$(generate_service_name "$local_port" "tcp")
-      create_systemd_service "$service_name" "$local_port" "$remote_addr" "tcp"
-      save_forward_config "$local_port" "$remote_addr" "tcp" "$service_name"
       ;;
-      
-    2) # 仅UDP
-      while true; do
-        read -p "请输入目标IP地址或域名: " remote_ip
-        if validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname"; then
-          break
-        fi
-      done
-      
-      while true; do
-        read -p "请输入目标端口 [1-65535]: " remote_port
-        if validate_input "$remote_port" "port"; then
-          break
-        fi
-      done
-      
-      remote_addr="${remote_ip}:${remote_port}"
-      printf "${CYAN}${INFO_SYMBOL} 目标地址: ${remote_addr}${PLAIN}\n"
-      
-      service_name=$(generate_service_name "$local_port" "udp")
-      create_systemd_service "$service_name" "$local_port" "$remote_addr" "udp"
-      save_forward_config "$local_port" "$remote_addr" "udp" "$service_name"
-      ;;
-      
-    3) # TCP+UDP到相同地址
-      while true; do
-        read -p "请输入目标IP地址或域名: " remote_ip
-        if validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname"; then
-          break
-        fi
-      done
-      
-      while true; do
-        read -p "请输入目标端口 [1-65535]: " remote_port
-        if validate_input "$remote_port" "port"; then
-          break
-        fi
-      done
-      
-      remote_addr="${remote_ip}:${remote_port}"
-      printf "${CYAN}${INFO_SYMBOL} 目标地址: ${remote_addr}${PLAIN}\n"
-      
-      service_name=$(generate_service_name "$local_port" "both")
-      create_systemd_service "$service_name" "$local_port" "$remote_addr" "both"
-      save_forward_config "$local_port" "$remote_addr" "both" "$service_name"
-      ;;
-      
-    4) # TCP和UDP分别转发
-      # TCP目标地址
+    4) # TCP and UDP to different targets
       printf "${CYAN}${BOLD}TCP转发设置:${PLAIN}\n"
-      while true; do
-        read -p "请输入TCP目标IP地址或域名: " tcp_remote_ip
-        if validate_input "$tcp_remote_ip" "ip" || validate_input "$tcp_remote_ip" "hostname"; then
-          break
-        fi
-      done
-      
-      while true; do
-        read -p "请输入TCP目标端口 [1-65535]: " tcp_remote_port
-        if validate_input "$tcp_remote_port" "port"; then
-          break
-        fi
-      done
-      
+      while true; do read -p "请输入TCP目标IP地址或域名: " tcp_remote_ip; if validate_input "$tcp_remote_ip" "ip" || validate_input "$tcp_remote_ip" "hostname"; then break; fi; done
+      while true; do read -p "请输入TCP目标端口 [1-65535]: " tcp_remote_port; if validate_input "$tcp_remote_port" "port"; then break; fi; done
       tcp_remote_addr="${tcp_remote_ip}:${tcp_remote_port}"
       printf "${CYAN}${INFO_SYMBOL} TCP目标地址: ${tcp_remote_addr}${PLAIN}\n"
       
-      # UDP目标地址
       printf "\n${CYAN}${BOLD}UDP转发设置:${PLAIN}\n"
-      while true; do
-        read -p "请输入UDP目标IP地址或域名: " udp_remote_ip
-        if validate_input "$udp_remote_ip" "ip" || validate_input "$udp_remote_ip" "hostname"; then
-          break
-        fi
-      done
-      
-      while true; do
-        read -p "请输入UDP目标端口 [1-65535]: " udp_remote_port
-        if validate_input "$udp_remote_port" "port"; then
-          break
-        fi
-      done
-      
+      while true; do read -p "请输入UDP目标IP地址或域名: " udp_remote_ip; if validate_input "$udp_remote_ip" "ip" || validate_input "$udp_remote_ip" "hostname"; then break; fi; done
+      while true; do read -p "请输入UDP目标端口 [1-65535]: " udp_remote_port; if validate_input "$udp_remote_port" "port"; then break; fi; done
       udp_remote_addr="${udp_remote_ip}:${udp_remote_port}"
       printf "${CYAN}${INFO_SYMBOL} UDP目标地址: ${udp_remote_addr}${PLAIN}\n"
       
-      # 创建TCP服务
       tcp_service_name=$(generate_service_name "$local_port" "tcp")
-      create_systemd_service "$tcp_service_name" "$local_port" "$tcp_remote_addr" "tcp"
-      save_forward_config "$local_port" "$tcp_remote_addr" "tcp" "$tcp_service_name"
+      udp_service_name=$(generate_service_name "$local_port" "udp") # Note: Using same local port for both services implies they are distinct (tcp vs udp)
       
-      # 创建UDP服务
-      udp_service_name=$(generate_service_name "$local_port" "udp")
-      create_systemd_service "$udp_service_name" "$local_port" "$udp_remote_addr" "udp"
-      save_forward_config "$local_port" "$udp_remote_addr" "udp" "$udp_service_name"
+      tcp_success=false
+      if create_systemd_service "$tcp_service_name" "$local_port" "$tcp_remote_addr" "tcp"; then
+        save_forward_config "$local_port" "$tcp_remote_addr" "tcp" "$tcp_service_name"
+        tcp_success=true
+      fi
+      
+      udp_success=false
+      if create_systemd_service "$udp_service_name" "$local_port" "$udp_remote_addr" "udp"; then
+        save_forward_config "$local_port" "$udp_remote_addr" "udp" "$udp_service_name"
+        udp_success=true
+      fi
+      
+      if $tcp_success && $udp_success; then printf "${GREEN}${SUCCESS_SYMBOL} TCP和UDP转发均添加成功！${PLAIN}\n"; 
+      elif $tcp_success; then printf "${YELLOW}${WARN_SYMBOL} TCP转发添加成功，UDP转发失败。${PLAIN}\n";
+      elif $udp_success; then printf "${YELLOW}${WARN_SYMBOL} UDP转发添加成功，TCP转发失败。${PLAIN}\n";
+      else printf "${RED}${ERROR_SYMBOL} TCP和UDP转发均添加失败。${PLAIN}\n"; fi
       ;;
   esac
-  
-  printf "${GREEN}${SUCCESS_SYMBOL} 转发添加成功！${PLAIN}\n"
 }
 
 # 列出所有转发
-list_forwards() {
-  printf "${CYAN}${BOLD}当前活动的Brook转发:${PLAIN}\n"
-  printf "${CYAN}%-5s %-20s %-10s %-25s %-8s %-10s${PLAIN}\n" "编号" "服务名称" "本地端口" "目标地址" "协议" "状态"
-  printf "${CYAN}%s${PLAIN}\n" "--------------------------------------------------------------------------------"
-  
-  local count=0
-  local services=$($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}')
-  
-  if [ -z "$services" ]; then
-    printf "${YELLOW}${WARN_SYMBOL} 没有找到活动的转发服务${PLAIN}\n"
-    return
-  fi
-  
-  for service in $services; do
-    ((count++))
-    local service_name=$(echo $service | sed 's/.service$//')
-    local status="未知"
-    
-    if $SUDO systemctl is-active --quiet "$service"; then
-      status="${GREEN}运行中${PLAIN}"
-    else
-      status="${RED}已停止${PLAIN}"
-    fi
-    
-    # 从配置文件读取信息
-    local info=$(grep "^${service_name}|" "$CONFIG_FILE" 2>/dev/null | head -1)
-    if [ -n "$info" ]; then
-      local local_port=$(echo "$info" | cut -d'|' -f2)
-      local remote_addr=$(echo "$info" | cut -d'|' -f3)
-      local proto=$(echo "$info" | cut -d'|' -f4)
-      
-      printf "%-5s %-20s %-10s %-25s %-8s %b\n" "$count" "$service_name" "$local_port" "$remote_addr" "$proto" "$status"
-    else
-      # 如果配置文件中没有，尝试从服务名称解析
-      local parts=(${service_name//-/ })
-      if [ ${#parts[@]} -ge 4 ]; then
-        local local_port=${parts[2]}
-        local proto=${parts[3]}
-        printf "%-5s %-20s %-10s %-25s %-8s %b\n" "$count" "$service_name" "$local_port" "未知" "$proto" "$status"
-      fi
-    fi
-  done
-  
-  printf "\n${CYAN}${INFO_SYMBOL} 共 %d 个转发服务${PLAIN}\n" "$count"
-}
+list_forwards() { printf "${CYAN}${BOLD}当前活动的Brook转发:${PLAIN}\n"; printf "${CYAN}%-5s %-20s %-10s %-25s %-8s %-10s${PLAIN}\n" "编号" "服务名称" "本地端口" "目标地址" "协议" "状态"; printf "${CYAN}%s${PLAIN}\n" "--------------------------------------------------------------------------------"; local count=0; local services=$($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}'); if [ -z "$services" ]; then printf "${YELLOW}${WARN_SYMBOL} 没有找到活动的转发服务${PLAIN}\n"; return; fi; for service in $services; do ((count++)); local service_name=$(echo $service | sed 's/.service$//'); local status="未知"; if $SUDO systemctl is-active --quiet "$service"; then status="${GREEN}运行中${PLAIN}"; else status="${RED}已停止${PLAIN}"; fi; local info=$(grep "^${service_name}|" "$CONFIG_FILE" 2>/dev/null | head -1); if [ -n "$info" ]; then local local_port=$(echo "$info" | cut -d'|' -f2); local remote_addr=$(echo "$info" | cut -d'|' -f3); local proto=$(echo "$info" | cut -d'|' -f4); printf "%-5s %-20s %-10s %-25s %-8s %b\n" "$count" "$service_name" "$local_port" "$remote_addr" "$proto" "$status"; else local parts=(${service_name//-/ }); if [ ${#parts[@]} -ge 4 ]; then local local_port=${parts[2]}; local proto=${parts[3]}; printf "%-5s %-20s %-10s %-25s %-8s %b\n" "$count" "$service_name" "$local_port" "未知" "$proto" "$status"; fi; fi; done; printf "\n${CYAN}${INFO_SYMBOL} 共 %d 个转发服务${PLAIN}\n" "$count"; }
 
 # 删除转发
-delete_forward() {
-  list_forwards
-  
-  local services=($($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
-  
-  if [ ${#services[@]} -eq 0 ]; then
-    return
-  fi
-  
-  printf "\n"
-  read -p "请输入要删除的服务编号 (输入0取消): " choice
-  
-  if [ "$choice" -eq 0 ]; then
-    printf "${YELLOW}${INFO_SYMBOL} 已取消删除${PLAIN}\n"
-    return
-  fi
-  
-  if [ "$choice" -lt 1 ] || [ "$choice" -gt ${#services[@]} ]; then
-    printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"
-    return
-  fi
-  
-  local service_name=${services[$((choice-1))]}
-  
-  printf "${YELLOW}${WARN_SYMBOL} 确定要删除服务 %s 吗? [y/N]: ${PLAIN}" "$service_name"
-  read -r confirm
-  
-  if [[ "$confirm" =~ ^[Yy]$ ]]; then
-    # 停止并禁用服务
-    $SUDO systemctl stop "$service_name" 2>/dev/null
-    $SUDO systemctl disable "$service_name" 2>/dev/null
-    
-    # 删除服务文件
-    $SUDO rm -f "${SERVICE_DIR}/${service_name}.service"
-    
-    # 从配置文件中删除
-    $SUDO sed -i "/^${service_name}|/d" "$CONFIG_FILE"
-    
-    # 重载systemd
-    $SUDO systemctl daemon-reload
-    
-    printf "${GREEN}${SUCCESS_SYMBOL} 服务 %s 已删除${PLAIN}\n" "$service_name"
-  else
-    printf "${YELLOW}${INFO_SYMBOL} 已取消删除${PLAIN}\n"
-  fi
-}
+delete_forward() { list_forwards; local services=($($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//')); if [ ${#services[@]} -eq 0 ]; then return; fi; printf "\n"; read -p "请输入要删除的服务编号 (输入0取消): " choice; if [ "$choice" -eq 0 ]; then printf "${YELLOW}${INFO_SYMBOL} 已取消删除${PLAIN}\n"; return; fi; if [ "$choice" -lt 1 ] || [ "$choice" -gt ${#services[@]} ]; then printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"; return; fi; local service_name=${services[$((choice-1))]}; printf "${YELLOW}${WARN_SYMBOL} 确定要删除服务 %s 吗? [y/N]: ${PLAIN}" "$service_name"; read -r confirm; if [[ "$confirm" =~ ^[Yy]$ ]]; then $SUDO systemctl stop "$service_name" 2>/dev/null; $SUDO systemctl disable "$service_name" 2>/dev/null; $SUDO rm -f "${SERVICE_DIR}/${service_name}.service"; $SUDO sed -i "/^${service_name}|/d" "$CONFIG_FILE"; $SUDO systemctl daemon-reload; printf "${GREEN}${SUCCESS_SYMBOL} 服务 %s 已删除${PLAIN}\n" "$service_name"; else printf "${YELLOW}${INFO_SYMBOL} 已取消删除${PLAIN}\n"; fi; }
 
 # 卸载brook
 uninstall_brook() {
   printf "${YELLOW}${WARN_SYMBOL} 此操作将卸载Brook并删除所有转发服务。确定要继续吗? [y/N]: ${PLAIN}"
-  read -r confirm
-  
-  if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-    printf "${YELLOW}${INFO_SYMBOL} 已取消卸载${PLAIN}\n"
-    return
-  fi
-  
+  read -r confirm_brook
+  if [[ ! "$confirm_brook" =~ ^[Yy]$ ]]; then printf "${YELLOW}${INFO_SYMBOL} 已取消卸载Brook${PLAIN}\n"; return 1; fi
+
   printf "${CYAN}${INFO_SYMBOL} 停止所有Brook转发服务...${PLAIN}\n"
-  
-  # 停止并删除所有brook转发服务
   local services=$($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}')
   for service in $services; do
     $SUDO systemctl stop "$service" 2>/dev/null
     $SUDO systemctl disable "$service" 2>/dev/null
     $SUDO rm -f "${SERVICE_DIR}/$service"
   done
-  
-  # 重载systemd
   $SUDO systemctl daemon-reload
-  
-  # 删除配置文件和目录
   $SUDO rm -rf "$CONFIG_DIR"
-  
-  # 卸载brook
-  if command -v nami &>/dev/null; then
-    printf "${CYAN}${INFO_SYMBOL} 卸载Brook...${PLAIN}\n"
-    nami remove brook
-  else
-    # 如果没有nami，尝试直接删除brook二进制文件
-    $SUDO rm -f /usr/local/bin/brook
-  fi
-  
-  printf "${GREEN}${SUCCESS_SYMBOL} Brook已完全卸载${PLAIN}\n"
-}
 
-# 显示IP信息
-show_ip_info() {
-  printf "${CYAN}${BOLD}获取IP地址信息...${PLAIN}\n"
-  
-  if ! command -v curl &>/dev/null; then
-    printf "${RED}${ERROR_SYMBOL} 未找到curl命令，无法获取IP信息${PLAIN}\n"
-    return 1
+  local nami_cmd="nami"
+  local nami_bin_path="${SCRIPT_RUNNER_HOME}/.nami/bin"
+  if ! command -v nami &>/dev/null && [ -x "${nami_bin_path}/nami" ]; then nami_cmd="${nami_bin_path}/nami"; fi
+
+  if command -v $nami_cmd &>/dev/null; then
+    printf "${CYAN}${INFO_SYMBOL} 卸载Brook (使用 $nami_cmd)...${PLAIN}\n"
+    $SUDO $nami_cmd remove brook
+  else
+    printf "${YELLOW}${WARN_SYMBOL} Nami命令未找到，尝试直接删除Brook文件...${PLAIN}\n"
+    $SUDO rm -f /usr/local/bin/brook # 尝试标准路径
+    $SUDO rm -f "${nami_bin_path}/brook" # 尝试nami的bin路径下的brook
   fi
-  
-  printf "${CYAN}${INFO_SYMBOL} IPv4地址信息:${PLAIN}\n"
-  if ! curl -s4 https://ipinfo.io/json | jq . 2>/dev/null; then
-    curl -s4 https://ipinfo.io/json | grep -E '("ip"|"country"|"city"|"region"|"org"|"loc")'
+  printf "${GREEN}${SUCCESS_SYMBOL} Brook已尝试卸载。${PLAIN}\n"
+
+  # 询问是否卸载Nami
+  if command -v $nami_cmd &>/dev/null || [ -d "${SCRIPT_RUNNER_HOME}/.nami" ]; then # 只有在找到nami或nami目录时才询问
+    printf "\n${YELLOW}${WARN_SYMBOL} 是否也卸载Nami (包管理器)？这将移除Nami本身及其所有已安装的包。 [y/N]: ${PLAIN}"
+    read -r confirm_nami
+    if [[ "$confirm_nami" =~ ^[Yy]$ ]]; then
+      printf "${CYAN}${INFO_SYMBOL} 卸载Nami...${PLAIN}\n"
+      if command -v $nami_cmd &>/dev/null; then
+        # 如果nami命令可用，尝试用nami卸载自身 (虽然nami可能没有这个功能)
+        # 通常卸载nami是删除其目录和清除PATH
+        printf "${YELLOW}${INFO_SYMBOL} Nami没有 'nami remove nami' 这样的命令。将删除Nami目录和相关的PATH配置。${PLAIN}\n"
+      fi
+      $SUDO rm -rf "${SCRIPT_RUNNER_HOME}/.nami"
+      printf "${GREEN}${SUCCESS_SYMBOL} Nami目录 (${SCRIPT_RUNNER_HOME}/.nami) 已删除。${PLAIN}\n"
+      printf "${YELLOW}${WARN_SYMBOL} 请手动从您的shell配置文件 (如 .bashrc, .zshrc) 中移除 'export PATH=$HOME/.nami/bin:$PATH' 这一行。${PLAIN}\n"
+    else
+      printf "${INFO_SYMBOL} 已选择不卸载Nami。${PLAIN}\n"
+    fi
   fi
-  
-  printf "\n${CYAN}${INFO_SYMBOL} IPv6地址信息 (如果支持):${PLAIN}\n"
-  if ! curl -s6 https://ipinfo.io/json | jq . 2>/dev/null; then
-    curl -s6 https://ipinfo.io/json | grep -E '("ip"|"country"|"city"|"region"|"org"|"loc")' || printf "${YELLOW}${WARN_SYMBOL} 没有检测到IPv6连接${PLAIN}\n"
-  fi
-  
-  printf "\n"
+  return 0
 }
 
 # 获取简洁的IP信息
-get_simple_ip_info() {
-  if ! command -v curl &>/dev/null; then
-    return 1
-  fi
-  
-  # 获取IPv4信息
-  local ip_info=$(curl -s4 https://ipinfo.io/json 2>/dev/null)
-  if [ -n "$ip_info" ]; then
-    local ip=$(echo "$ip_info" | grep -o '"ip": "[^"]*' | cut -d'"' -f4)
-    local country=$(echo "$ip_info" | grep -o '"country": "[^"]*' | cut -d'"' -f4)
-    local city=$(echo "$ip_info" | grep -o '"city": "[^"]*' | cut -d'"' -f4)
-    local org=$(echo "$ip_info" | grep -o '"org": "[^"]*' | cut -d'"' -f4 | sed 's/AS[0-9]* //')
-    
-    echo "${ip} | ${country}, ${city} | ${org}"
-  else
-    echo "无法获取IP信息"
-  fi
-}
+get_simple_ip_info() { if ! command -v curl &>/dev/null; then return 1; fi; local ip_info=$(curl -s4 https://ipinfo.io/json 2>/dev/null); if [ -n "$ip_info" ]; then local ip=$(echo "$ip_info" | grep -o '"ip": "[^"]*' | cut -d'"' -f4); local country=$(echo "$ip_info" | grep -o '"country": "[^"]*' | cut -d'"' -f4); local city=$(echo "$ip_info" | grep -o '"city": "[^"]*' | cut -d'"' -f4); local org=$(echo "$ip_info" | grep -o '"org": "[^"]*' | cut -d'"' -f4 | sed 's/AS[0-9]* //'); echo "${ip} | ${country}, ${city} | ${org}"; else echo "无法获取IP信息"; fi; }
+
+# 显示详细IP信息
+show_ip_info() { printf "${CYAN}${BOLD}获取IP地址信息...${PLAIN}\n"; if ! command -v curl &>/dev/null; then printf "${RED}${ERROR_SYMBOL} 未找到curl命令，无法获取IP信息${PLAIN}\n"; return 1; fi; printf "${CYAN}${INFO_SYMBOL} IPv4地址信息:${PLAIN}\n"; if ! curl -s4 https://ipinfo.io/json | jq . 2>/dev/null; then curl -s4 https://ipinfo.io/json | grep -E '("ip"|"country"|"city"|"region"|"org"|"loc")'; fi; printf "\n${CYAN}${INFO_SYMBOL} IPv6地址信息 (如果支持):${PLAIN}\n"; if ! curl -s6 https://ipinfo.io/json | jq . 2>/dev/null; then curl -s6 https://ipinfo.io/json | grep -E '("ip"|"country"|"city"|"region"|"org"|"loc")' || printf "${YELLOW}${WARN_SYMBOL} 没有检测到IPv6连接${PLAIN}\n"; fi; printf "\n"; }
 
 # 显示菜单
-show_menu() {
-  # 获取IP信息并显示在菜单顶部
-  local ip_info=$(get_simple_ip_info)
-  
-  printf "\n${PURPLE}${BOLD}========== Brook 端口转发管理 ==========${PLAIN}\n"
-  if [ -n "$ip_info" ]; then
-    printf "${CYAN}${INFO_SYMBOL} 本机IP: ${GREEN}%s${PLAIN}\n" "$ip_info"
-  fi
-  printf "${PURPLE}${BOLD}---------------------------------------${PLAIN}\n"
-  printf "  ${GREEN}1.${PLAIN} 添加转发\n"
-  printf "  ${GREEN}2.${PLAIN} 列出所有转发\n"
-  printf "  ${GREEN}3.${PLAIN} 删除转发\n"
-  printf "  ${GREEN}4.${PLAIN} 重启所有服务\n"
-  printf "  ${GREEN}5.${PLAIN} 查看服务日志\n"
-  printf "  ${GREEN}6.${PLAIN} 卸载Brook\n"
-  printf "  ${GREEN}7.${PLAIN} 显示详细IP信息\n"
-  printf "  ${GREEN}0.${PLAIN} 退出\n"
-  printf "${PURPLE}${BOLD}=======================================${PLAIN}\n"
-}
+show_menu() { local ip_info=$(get_simple_ip_info); printf "\n${PURPLE}${BOLD}========== Brook 端口转发管理 ==========${PLAIN}\n"; if [ -n "$ip_info" ]; then printf "${CYAN}${INFO_SYMBOL} 本机IP: ${GREEN}%s${PLAIN}\n" "$ip_info"; fi; printf "${PURPLE}${BOLD}---------------------------------------${PLAIN}\n"; printf "  ${GREEN}1.${PLAIN} 添加转发\n"; printf "  ${GREEN}2.${PLAIN} 列出所有转发\n"; printf "  ${GREEN}3.${PLAIN} 删除转发\n"; printf "  ${GREEN}4.${PLAIN} 重启所有服务\n"; printf "  ${GREEN}5.${PLAIN} 查看服务日志\n"; printf "  ${GREEN}6.${PLAIN} 卸载Brook\n"; printf "  ${GREEN}7.${PLAIN} 显示详细IP信息\n"; printf "  ${GREEN}0.${PLAIN} 退出\n"; printf "${PURPLE}${BOLD}=======================================${PLAIN}\n"; }
 
 # 重启所有服务
-restart_all_services() {
-  printf "${CYAN}${INFO_SYMBOL} 重启所有Brook转发服务...${PLAIN}\n"
-  
-  local services=$($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}')
-  local count=0
-  
-  for service in $services; do
-    if $SUDO systemctl restart "$service"; then
-      ((count++))
-      printf "${GREEN}${SUCCESS_SYMBOL} %s 重启成功${PLAIN}\n" "$service"
-    else
-      printf "${RED}${ERROR_SYMBOL} %s 重启失败${PLAIN}\n" "$service"
-    fi
-  done
-  
-  printf "${GREEN}${SUCCESS_SYMBOL} 共重启 %d 个服务${PLAIN}\n" "$count"
-}
+restart_all_services() { printf "${CYAN}${INFO_SYMBOL} 重启所有Brook转发服务...${PLAIN}\n"; local services=$($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}'); local count=0; for service in $services; do if $SUDO systemctl restart "$service"; then ((count++)); printf "${GREEN}${SUCCESS_SYMBOL} %s 重启成功${PLAIN}\n" "$service"; else printf "${RED}${ERROR_SYMBOL} %s 重启失败${PLAIN}\n" "$service"; fi; done; printf "${GREEN}${SUCCESS_SYMBOL} 共重启 %d 个服务${PLAIN}\n" "$count"; }
 
 # 查看服务日志
-view_service_logs() {
-  list_forwards
-  
-  local services=($($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
-  
-  if [ ${#services[@]} -eq 0 ]; then
-    return
-  fi
-  
-  printf "\n"
-  read -p "请输入要查看日志的服务编号 (输入0查看所有): " choice
-  
-  if [ "$choice" -eq 0 ]; then
-    printf "${CYAN}${INFO_SYMBOL} 显示所有Brook服务的最新日志...${PLAIN}\n"
-    $SUDO journalctl -u "${SERVICE_PREFIX}*" --no-pager -n 50
-  elif [ "$choice" -ge 1 ] && [ "$choice" -le ${#services[@]} ]; then
-    local service_name=${services[$((choice-1))]}
-    printf "${CYAN}${INFO_SYMBOL} 显示 %s 的日志...${PLAIN}\n" "$service_name"
-    $SUDO journalctl -u "$service_name" --no-pager -n 50
-  else
-    printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"
-  fi
-}
+view_service_logs() { list_forwards; local services=($($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//')); if [ ${#services[@]} -eq 0 ]; then return; fi; printf "\n"; read -p "请输入要查看日志的服务编号 (输入0查看所有): " choice; if [ "$choice" -eq 0 ]; then printf "${CYAN}${INFO_SYMBOL} 显示所有Brook服务的最新日志...${PLAIN}\n"; $SUDO journalctl -u "${SERVICE_PREFIX}*" --no-pager -n 50; elif [ "$choice" -ge 1 ] && [ "$choice" -le ${#services[@]} ]; then local service_name=${services[$((choice-1))]}; printf "${CYAN}${INFO_SYMBOL} 显示 %s 的日志...${PLAIN}\n" "$service_name"; $SUDO journalctl -u "$service_name" --no-pager -n 50; else printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"; fi; }
 
 # 主函数
 main() {
-  # 检查root权限
-  if [ "$EUID" -eq 0 ]; then
-    printf "${YELLOW}${WARN_SYMBOL} 检测到root用户。建议使用普通用户运行此脚本。${PLAIN}\n"
+  if [ "$EUID" -ne 0 ]; then # 提示非root用户需要sudo
+    if ! command -v sudo &>/dev/null; then
+      printf "${RED}${ERROR_SYMBOL}检测到非root用户，且sudo命令未找到。请以root用户运行或安装sudo。${PLAIN}\n"
+      exit 1
+    fi
+    printf "${YELLOW}${WARN_SYMBOL} 检测到非root用户，部分操作将需要sudo权限。${PLAIN}\n"
+  else
+    printf "${YELLOW}${WARN_SYMBOL} 检测到root用户。${PLAIN}\n" # Root用户运行时，SUDO变量为空，直接执行命令
   fi
   
-  # 初始化
-  check_and_install_dependencies
+  if ! check_and_install_dependencies; then
+    printf "${RED}${ERROR_SYMBOL} 初始化或依赖安装失败，脚本终止。${PLAIN}\n"
+    exit 1
+  fi
   setup_config_dir
   
-  # 主循环
   while true; do
     show_menu
     read -p "请选择操作 [0-7]: " choice
-    
     case $choice in
-      1) add_forward ;;
-      2) list_forwards ;;
-      3) delete_forward ;;
-      4) restart_all_services ;;
-      5) view_service_logs ;;
-      6) uninstall_brook; break ;;
-      7) show_ip_info ;;
-      0) 
-        printf "${GREEN}${SUCCESS_SYMBOL} 感谢使用，再见！${PLAIN}\n"
-        break 
-        ;;
-      *)
-        printf "${RED}${ERROR_SYMBOL} 无效的选择，请重试${PLAIN}\n"
-        ;;
+      1) add_forward ;; 2) list_forwards ;; 3) delete_forward ;; 4) restart_all_services ;;
+      5) view_service_logs ;; 6) uninstall_brook; if [ $? -eq 0 ]; then break; fi ;; # 卸载成功后退出
+      7) show_ip_info ;; 0) printf "${GREEN}${SUCCESS_SYMBOL} 感谢使用，再见！${PLAIN}\n"; break ;; 
+      *) printf "${RED}${ERROR_SYMBOL} 无效的选择，请重试${PLAIN}\n" ;;
     esac
   done
 }
 
-# 运行主函数
 main "$@" 
