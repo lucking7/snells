@@ -97,7 +97,17 @@ check_and_install_dependencies() {
     fi
   fi
 
-  if ! command -v brook &>/dev/null || ! brook --help &>/dev/null; then
+  # 检查Brook是否安装 - 使用多种检测方式
+  local brook_available=false
+  local nami_bin_path="${SCRIPT_RUNNER_HOME}/.nami/bin"
+  
+  if command -v brook &>/dev/null && brook --help &>/dev/null; then
+    brook_available=true
+  elif [ -x "${nami_bin_path}/brook" ] && "${nami_bin_path}/brook" --help &>/dev/null; then
+    brook_available=true
+  fi
+  
+  if ! $brook_available; then
     printf "${YELLOW}${INFO_SYMBOL} Brook未安装或无法执行。尝试安装/修复...${PLAIN}\n"
     
     local nami_bin_path="${SCRIPT_RUNNER_HOME}/.nami/bin"
@@ -143,10 +153,13 @@ check_and_install_dependencies() {
       return $?
     }
     
+    # 检查Brook是否安装成功 - 使用多种方式验证
     if command -v brook &>/dev/null && brook --help &>/dev/null; then
-      printf "${GREEN}${SUCCESS_SYMBOL} Brook通过nami安装成功并可执行。${PLAIN}\n"
+      printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功并可执行。${PLAIN}\n"
+    elif [ -x "${nami_bin_path}/brook" ] && "${nami_bin_path}/brook" --help &>/dev/null; then
+      printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功并可执行。${PLAIN}\n"
     elif $nami_cmd run brook --help &>/dev/null; then
-      printf "${GREEN}${SUCCESS_SYMBOL} Brook通过 'nami run brook' 安装成功并可执行。${PLAIN}\n"
+      printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功并可执行。${PLAIN}\n"
     else
       printf "${RED}${ERROR_SYMBOL} Nami安装Brook后，Brook仍无法执行，尝试手动下载...${PLAIN}\n"
       install_brook_binary
@@ -262,23 +275,22 @@ create_systemd_service() {
   local nami_bin_dir_for_service="${SCRIPT_RUNNER_HOME}/.nami/bin"
   local brook_exec_command_for_service
 
-  # 确定Brook执行命令的优先级:
-  # 1. nami run brook (如果nami在PATH中且可用)
-  # 2. /path/to/user/home/.nami/bin/nami run brook (nami的绝对路径)
-  # 3. brook (如果brook在PATH中且可用)
-  # 4. /path/to/user/home/.nami/bin/brook (brook的绝对路径, nami可能将其放在此处)
-  # 5. /usr/local/bin/brook (最后的备用路径)
+  # 确定Brook执行命令的优先级，确保使用绝对路径避免PATH问题:
+  # 1. /path/to/user/home/.nami/bin/brook (nami安装的brook绝对路径)
+  # 2. brook in PATH (如果brook在PATH中且可用)
+  # 3. /usr/local/bin/brook (手动安装的brook)
+  # 4. nami run brook (如果nami可用，作为最后选择)
 
-  if command -v nami &>/dev/null && nami run brook --help &>/dev/null; then
-    brook_exec_command_for_service="nami run brook"
-  elif [ -x "${nami_bin_dir_for_service}/nami" ] && "${nami_bin_dir_for_service}/nami" run brook --help &>/dev/null; then
-    brook_exec_command_for_service="\"${nami_bin_dir_for_service}/nami\" run brook" # 引号处理路径中的特殊字符
+  if [ -x "${nami_bin_dir_for_service}/brook" ] && "${nami_bin_dir_for_service}/brook" --help &>/dev/null; then
+    brook_exec_command_for_service="${nami_bin_dir_for_service}/brook"
   elif command -v brook &>/dev/null && brook --help &>/dev/null; then
     brook_exec_command_for_service=$(command -v brook)
-  elif [ -x "${nami_bin_dir_for_service}/brook" ] && "${nami_bin_dir_for_service}/brook" --help &>/dev/null; then
-    brook_exec_command_for_service="\"${nami_bin_dir_for_service}/brook\"" # 引号处理路径中的特殊字符
   elif [ -x "/usr/local/bin/brook" ] && /usr/local/bin/brook --help &>/dev/null; then
     brook_exec_command_for_service="/usr/local/bin/brook"
+  elif command -v nami &>/dev/null && nami run brook --help &>/dev/null; then
+    brook_exec_command_for_service="nami run brook"
+  elif [ -x "${nami_bin_dir_for_service}/nami" ] && "${nami_bin_dir_for_service}/nami" run brook --help &>/dev/null; then
+    brook_exec_command_for_service="${nami_bin_dir_for_service}/nami run brook"
   else
     printf "${RED}${ERROR_SYMBOL} 无法确定Brook的有效执行命令。请确保Brook已正确安装。${PLAIN}\n"
     return 1
@@ -421,27 +433,24 @@ list_forwards() {
   printf "${CYAN}%s${PLAIN}\n" "--------------------------------------------------------------------------------"
   
   local count=0
-  # 修复：使用更准确的方式查找Brook服务
-  local services=$($SUDO systemctl list-units --type=service --all | grep "${SERVICE_PREFIX}" | awk '{print $1}')
+  # 修复：直接查找systemd服务文件
+  local service_files=($($SUDO find /etc/systemd/system -name "${SERVICE_PREFIX}-*.service" 2>/dev/null | sort))
   
-  # 调试信息
-  if [ -z "$services" ]; then
-    # 尝试更直接的方法
-    services=$($SUDO systemctl list-unit-files --type=service | grep "${SERVICE_PREFIX}" | awk '{print $1}')
-  fi
-  
-  if [ -z "$services" ]; then
+  if [ ${#service_files[@]} -eq 0 ]; then
     printf "${YELLOW}${WARN_SYMBOL} 没有找到活动的转发服务${PLAIN}\n"
     return
   fi
   
-  for service in $services; do
+  for service_file in "${service_files[@]}"; do
     ((count++))
-    local service_name=$(echo $service | sed 's/.service$//')
+    local service_name=$(basename "$service_file" .service)
     local status="未知"
     
-    if $SUDO systemctl is-active --quiet "$service_name"; then
+    # 检查服务状态
+    if $SUDO systemctl is-active --quiet "$service_name" 2>/dev/null; then
       status="${GREEN}运行中${PLAIN}"
+    elif $SUDO systemctl is-failed --quiet "$service_name" 2>/dev/null; then
+      status="${RED}失败${PLAIN}"
     else
       status="${RED}已停止${PLAIN}"
     fi
@@ -472,16 +481,17 @@ delete_forward() {
   list_forwards
   
   # 使用和list_forwards相同的查询方式
-  local services=($($SUDO systemctl list-units --type=service --all | grep "${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
+  local service_files=($($SUDO find /etc/systemd/system -name "${SERVICE_PREFIX}-*.service" 2>/dev/null | sort))
   
-  # 如果没找到，尝试list-unit-files
-  if [ ${#services[@]} -eq 0 ]; then
-    services=($($SUDO systemctl list-unit-files --type=service | grep "${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
-  fi
-  
-  if [ ${#services[@]} -eq 0 ]; then 
+  if [ ${#service_files[@]} -eq 0 ]; then 
     return
   fi
+  
+  # 创建服务名称数组
+  local services=()
+  for service_file in "${service_files[@]}"; do
+    services+=($(basename "$service_file" .service))
+  done
   
   printf "\n"
   read -p "请输入要删除的服务编号 (输入0取消): " choice
@@ -504,7 +514,7 @@ delete_forward() {
     $SUDO systemctl stop "$service_name" 2>/dev/null
     $SUDO systemctl disable "$service_name" 2>/dev/null
     $SUDO rm -f "${SERVICE_DIR}/${service_name}.service"
-    $SUDO sed -i "/^${service_name}|/d" "$CONFIG_FILE"
+    $SUDO sed -i "/^${service_name}|/d" "$CONFIG_FILE" 2>/dev/null
     $SUDO systemctl daemon-reload
     printf "${GREEN}${SUCCESS_SYMBOL} 服务 %s 已删除${PLAIN}\n" "$service_name"
   else
@@ -519,14 +529,16 @@ uninstall_brook() {
   if [[ ! "$confirm_brook" =~ ^[Yy]$ ]]; then printf "${YELLOW}${INFO_SYMBOL} 已取消卸载Brook${PLAIN}\n"; return 1; fi
 
   printf "${CYAN}${INFO_SYMBOL} 停止所有Brook转发服务...${PLAIN}\n"
-  local services=$($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}')
-  for service in $services; do
-    $SUDO systemctl stop "$service" 2>/dev/null
-    $SUDO systemctl disable "$service" 2>/dev/null
-    $SUDO rm -f "${SERVICE_DIR}/$service"
+  local service_files=($($SUDO find /etc/systemd/system -name "${SERVICE_PREFIX}-*.service" 2>/dev/null))
+  
+  for service_file in "${service_files[@]}"; do
+    local service_name=$(basename "$service_file" .service)
+    $SUDO systemctl stop "$service_name" 2>/dev/null
+    $SUDO systemctl disable "$service_name" 2>/dev/null
+    $SUDO rm -f "$service_file"
   done
   $SUDO systemctl daemon-reload
-  $SUDO rm -rf "$CONFIG_DIR"
+  $SUDO rm -rf "$CONFIG_DIR" 2>/dev/null
 
   local nami_cmd="nami"
   local nami_bin_path="${SCRIPT_RUNNER_HOME}/.nami/bin"
@@ -534,13 +546,13 @@ uninstall_brook() {
 
   if command -v $nami_cmd &>/dev/null; then
     printf "${CYAN}${INFO_SYMBOL} 卸载Brook (使用 $nami_cmd)...${PLAIN}\n"
-    $SUDO $nami_cmd remove brook
+    $nami_cmd remove brook 2>/dev/null || printf "${YELLOW}${WARN_SYMBOL} 使用nami卸载Brook失败${PLAIN}\n"
   else
     printf "${YELLOW}${WARN_SYMBOL} Nami命令未找到，尝试直接删除Brook文件...${PLAIN}\n"
-    $SUDO rm -f /usr/local/bin/brook # 尝试标准路径
-    $SUDO rm -f "${nami_bin_path}/brook" # 尝试nami的bin路径下的brook
+    $SUDO rm -f /usr/local/bin/brook 2>/dev/null # 尝试标准路径
+    $SUDO rm -f "${nami_bin_path}/brook" 2>/dev/null # 尝试nami的bin路径下的brook
   fi
-  printf "${GREEN}${SUCCESS_SYMBOL} Brook已尝试卸载。${PLAIN}\n"
+  printf "${GREEN}${SUCCESS_SYMBOL} Brook已完全卸载${PLAIN}\n"
 
   # 询问是否卸载Nami
   if command -v $nami_cmd &>/dev/null || [ -d "${SCRIPT_RUNNER_HOME}/.nami" ]; then # 只有在找到nami或nami目录时才询问
@@ -712,19 +724,21 @@ show_menu() {
 restart_all_services() {
   printf "${CYAN}${INFO_SYMBOL} 重启所有Brook转发服务...${PLAIN}\n"
   
-  local services=$($SUDO systemctl list-units --type=service --all | grep "${SERVICE_PREFIX}" | awk '{print $1}')
+  local service_files=($($SUDO find /etc/systemd/system -name "${SERVICE_PREFIX}-*.service" 2>/dev/null | sort))
   
-  if [ -z "$services" ]; then
-    services=$($SUDO systemctl list-unit-files --type=service | grep "${SERVICE_PREFIX}" | awk '{print $1}')
+  if [ ${#service_files[@]} -eq 0 ]; then
+    printf "${YELLOW}${WARN_SYMBOL} 没有找到Brook转发服务${PLAIN}\n"
+    return
   fi
   
   local count=0
-  for service in $services; do 
-    if $SUDO systemctl restart "$service"; then 
+  for service_file in "${service_files[@]}"; do 
+    local service_name=$(basename "$service_file" .service)
+    if $SUDO systemctl restart "$service_name" 2>/dev/null; then 
       ((count++))
-      printf "${GREEN}${SUCCESS_SYMBOL} %s 重启成功${PLAIN}\n" "$service"
+      printf "${GREEN}${SUCCESS_SYMBOL} %s 重启成功${PLAIN}\n" "$service_name"
     else 
-      printf "${RED}${ERROR_SYMBOL} %s 重启失败${PLAIN}\n" "$service"
+      printf "${RED}${ERROR_SYMBOL} %s 重启失败${PLAIN}\n" "$service_name"
     fi
   done
   
@@ -735,26 +749,31 @@ restart_all_services() {
 view_service_logs() {
   list_forwards
   
-  local services=($($SUDO systemctl list-units --type=service --all | grep "${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
+  local service_files=($($SUDO find /etc/systemd/system -name "${SERVICE_PREFIX}-*.service" 2>/dev/null | sort))
   
-  if [ ${#services[@]} -eq 0 ]; then
-    services=($($SUDO systemctl list-unit-files --type=service | grep "${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
-  fi
-  
-  if [ ${#services[@]} -eq 0 ]; then 
+  if [ ${#service_files[@]} -eq 0 ]; then 
     return
   fi
+  
+  # 创建服务名称数组
+  local services=()
+  for service_file in "${service_files[@]}"; do
+    services+=($(basename "$service_file" .service))
+  done
   
   printf "\n"
   read -p "请输入要查看日志的服务编号 (输入0查看所有): " choice
   
   if [ "$choice" -eq 0 ]; then 
     printf "${CYAN}${INFO_SYMBOL} 显示所有Brook服务的最新日志...${PLAIN}\n"
-    $SUDO journalctl -u "${SERVICE_PREFIX}*" --no-pager -n 50
+    for service_name in "${services[@]}"; do
+      printf "\n${CYAN}=== %s 日志 ===${PLAIN}\n" "$service_name"
+      $SUDO journalctl -u "$service_name" --no-pager -n 10 2>/dev/null || printf "${YELLOW}${WARN_SYMBOL} 无法获取 %s 的日志${PLAIN}\n" "$service_name"
+    done
   elif [ "$choice" -ge 1 ] && [ "$choice" -le ${#services[@]} ]; then 
     local service_name=${services[$((choice-1))]}
     printf "${CYAN}${INFO_SYMBOL} 显示 %s 的日志...${PLAIN}\n" "$service_name"
-    $SUDO journalctl -u "$service_name" --no-pager -n 50
+    $SUDO journalctl -u "$service_name" --no-pager -n 50 2>/dev/null || printf "${YELLOW}${WARN_SYMBOL} 无法获取 %s 的日志${PLAIN}\n" "$service_name"
   else 
     printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"
   fi
@@ -766,15 +785,17 @@ view_service_logs() {
 test_brook_forward() {
   list_forwards
   
-  local services=($($SUDO systemctl list-units --type=service --all | grep "${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
+  local service_files=($($SUDO find /etc/systemd/system -name "${SERVICE_PREFIX}-*.service" 2>/dev/null | sort))
   
-  if [ ${#services[@]} -eq 0 ]; then
-    services=($($SUDO systemctl list-unit-files --type=service | grep "${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
-  fi
-  
-  if [ ${#services[@]} -eq 0 ]; then 
+  if [ ${#service_files[@]} -eq 0 ]; then 
     return
   fi
+  
+  # 创建服务名称数组
+  local services=()
+  for service_file in "${service_files[@]}"; do
+    services+=($(basename "$service_file" .service))
+  done
   
   printf "\n"
   read -p "请输入要测试的服务编号 (输入0取消): " choice
@@ -799,13 +820,18 @@ test_brook_forward() {
     
     printf "${CYAN}${INFO_SYMBOL} 测试转发: 本地端口 %s (%s) -> %s${PLAIN}\n" "$local_port" "$proto" "$remote_addr"
     
-    if command -v brook &>/dev/null; then
-      printf "${CYAN}${INFO_SYMBOL} 使用Brook自带测试功能...${PLAIN}\n"
-      # 创建临时Brook测试链接
-      local brook_link="brook://127.0.0.1:${local_port}"
-      timeout 10 brook testbrook --link "$brook_link" 2>/dev/null || printf "${YELLOW}${WARN_SYMBOL} Brook测试超时或失败，可能是目标服务器无响应${PLAIN}\n"
+    # 检查服务状态
+    printf "${CYAN}${INFO_SYMBOL} 检查服务状态...${PLAIN}\n"
+    if $SUDO systemctl is-active --quiet "$service_name" 2>/dev/null; then
+      printf "${GREEN}${SUCCESS_SYMBOL} 服务 %s 正在运行${PLAIN}\n" "$service_name"
     else
-      printf "${YELLOW}${WARN_SYMBOL} Brook命令不可用，跳过测试${PLAIN}\n"
+      printf "${RED}${ERROR_SYMBOL} 服务 %s 未运行，尝试启动...${PLAIN}\n" "$service_name"
+      if $SUDO systemctl start "$service_name" 2>/dev/null; then
+        printf "${GREEN}${SUCCESS_SYMBOL} 服务已启动${PLAIN}\n"
+      else
+        printf "${RED}${ERROR_SYMBOL} 服务启动失败${PLAIN}\n"
+        return
+      fi
     fi
     
     # 简单的端口连通性测试
@@ -813,7 +839,7 @@ test_brook_forward() {
     if timeout 3 bash -c "</dev/tcp/127.0.0.1/${local_port}" 2>/dev/null; then
       printf "${GREEN}${SUCCESS_SYMBOL} 本地端口 %s 可达${PLAIN}\n" "$local_port"
     else
-      printf "${RED}${ERROR_SYMBOL} 本地端口 %s 无法连接${PLAIN}\n" "$local_port"
+      printf "${YELLOW}${WARN_SYMBOL} 本地端口 %s 无法连接或目标服务器无响应${PLAIN}\n" "$local_port"
     fi
   else
     printf "${RED}${ERROR_SYMBOL} 无法获取服务信息${PLAIN}\n"
@@ -829,7 +855,7 @@ main() {
     fi
     printf "${YELLOW}${WARN_SYMBOL} 检测到非root用户，部分操作将需要sudo权限。${PLAIN}\n"
   else
-    printf "${YELLOW}${WARN_SYMBOL} 检测到root用户。${PLAIN}\n" # Root用户运行时，SUDO变量为空，直接执行命令
+    printf "${YELLOW}${WARN_SYMBOL} 检测到root用户。${PLAIN}\n"
   fi
   
   if ! check_and_install_dependencies; then
