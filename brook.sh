@@ -2,7 +2,7 @@
 
 # Brook端口转发统一管理脚本
 # 支持功能: TCP转发、UDP转发、TCP+UDP转发、TCP和UDP分别转发到不同地址
-# 版本: 1.3.3 - 改进验证、安全性和添加测试功能
+# 版本: 1.4.1 - 修复服务列表显示问题，简化界面，移除emoji适配服务器环境
 
 # 颜色定义
 RED='\033[0;31m'
@@ -415,10 +415,102 @@ add_forward() {
 }
 
 # 列出所有转发
-list_forwards() { printf "${CYAN}${BOLD}当前活动的Brook转发:${PLAIN}\n"; printf "${CYAN}%-5s %-20s %-10s %-25s %-8s %-10s${PLAIN}\n" "编号" "服务名称" "本地端口" "目标地址" "协议" "状态"; printf "${CYAN}%s${PLAIN}\n" "--------------------------------------------------------------------------------"; local count=0; local services=$($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}'); if [ -z "$services" ]; then printf "${YELLOW}${WARN_SYMBOL} 没有找到活动的转发服务${PLAIN}\n"; return; fi; for service in $services; do ((count++)); local service_name=$(echo $service | sed 's/.service$//'); local status="未知"; if $SUDO systemctl is-active --quiet "$service"; then status="${GREEN}运行中${PLAIN}"; else status="${RED}已停止${PLAIN}"; fi; local info=$(grep "^${service_name}|" "$CONFIG_FILE" 2>/dev/null | head -1); if [ -n "$info" ]; then local local_port=$(echo "$info" | cut -d'|' -f2); local remote_addr=$(echo "$info" | cut -d'|' -f3); local proto=$(echo "$info" | cut -d'|' -f4); printf "%-5s %-20s %-10s %-25s %-8s %b\n" "$count" "$service_name" "$local_port" "$remote_addr" "$proto" "$status"; else local parts=(${service_name//-/ }); if [ ${#parts[@]} -ge 4 ]; then local local_port=${parts[2]}; local proto=${parts[3]}; printf "%-5s %-20s %-10s %-25s %-8s %b\n" "$count" "$service_name" "$local_port" "未知" "$proto" "$status"; fi; fi; done; printf "\n${CYAN}${INFO_SYMBOL} 共 %d 个转发服务${PLAIN}\n" "$count"; }
+list_forwards() {
+  printf "${CYAN}${BOLD}当前活动的Brook转发:${PLAIN}\n"
+  printf "${CYAN}%-5s %-20s %-10s %-25s %-8s %-10s${PLAIN}\n" "编号" "服务名称" "本地端口" "目标地址" "协议" "状态"
+  printf "${CYAN}%s${PLAIN}\n" "--------------------------------------------------------------------------------"
+  
+  local count=0
+  # 修复：使用更准确的方式查找Brook服务
+  local services=$($SUDO systemctl list-units --type=service --all | grep "${SERVICE_PREFIX}" | awk '{print $1}')
+  
+  # 调试信息
+  if [ -z "$services" ]; then
+    # 尝试更直接的方法
+    services=$($SUDO systemctl list-unit-files --type=service | grep "${SERVICE_PREFIX}" | awk '{print $1}')
+  fi
+  
+  if [ -z "$services" ]; then
+    printf "${YELLOW}${WARN_SYMBOL} 没有找到活动的转发服务${PLAIN}\n"
+    return
+  fi
+  
+  for service in $services; do
+    ((count++))
+    local service_name=$(echo $service | sed 's/.service$//')
+    local status="未知"
+    
+    if $SUDO systemctl is-active --quiet "$service_name"; then
+      status="${GREEN}运行中${PLAIN}"
+    else
+      status="${RED}已停止${PLAIN}"
+    fi
+    
+    # 从配置文件获取信息
+    local info=$(grep "^${service_name}|" "$CONFIG_FILE" 2>/dev/null | head -1)
+    if [ -n "$info" ]; then
+      local local_port=$(echo "$info" | cut -d'|' -f2)
+      local remote_addr=$(echo "$info" | cut -d'|' -f3)
+      local proto=$(echo "$info" | cut -d'|' -f4)
+      printf "%-5s %-20s %-10s %-25s %-8s %b\n" "$count" "$service_name" "$local_port" "$remote_addr" "$proto" "$status"
+    else
+      # 从服务名称解析信息
+      local parts=(${service_name//-/ })
+      if [ ${#parts[@]} -ge 4 ]; then
+        local local_port=${parts[2]}
+        local proto=${parts[3]}
+        printf "%-5s %-20s %-10s %-25s %-8s %b\n" "$count" "$service_name" "$local_port" "未知" "$proto" "$status"
+      fi
+    fi
+  done
+  
+  printf "\n${CYAN}${INFO_SYMBOL} 共 %d 个转发服务${PLAIN}\n" "$count"
+}
 
 # 删除转发
-delete_forward() { list_forwards; local services=($($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//')); if [ ${#services[@]} -eq 0 ]; then return; fi; printf "\n"; read -p "请输入要删除的服务编号 (输入0取消): " choice; if [ "$choice" -eq 0 ]; then printf "${YELLOW}${INFO_SYMBOL} 已取消删除${PLAIN}\n"; return; fi; if [ "$choice" -lt 1 ] || [ "$choice" -gt ${#services[@]} ]; then printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"; return; fi; local service_name=${services[$((choice-1))]}; printf "${YELLOW}${WARN_SYMBOL} 确定要删除服务 %s 吗? [y/N]: ${PLAIN}" "$service_name"; read -r confirm; if [[ "$confirm" =~ ^[Yy]$ ]]; then $SUDO systemctl stop "$service_name" 2>/dev/null; $SUDO systemctl disable "$service_name" 2>/dev/null; $SUDO rm -f "${SERVICE_DIR}/${service_name}.service"; $SUDO sed -i "/^${service_name}|/d" "$CONFIG_FILE"; $SUDO systemctl daemon-reload; printf "${GREEN}${SUCCESS_SYMBOL} 服务 %s 已删除${PLAIN}\n" "$service_name"; else printf "${YELLOW}${INFO_SYMBOL} 已取消删除${PLAIN}\n"; fi; }
+delete_forward() {
+  list_forwards
+  
+  # 使用和list_forwards相同的查询方式
+  local services=($($SUDO systemctl list-units --type=service --all | grep "${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
+  
+  # 如果没找到，尝试list-unit-files
+  if [ ${#services[@]} -eq 0 ]; then
+    services=($($SUDO systemctl list-unit-files --type=service | grep "${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
+  fi
+  
+  if [ ${#services[@]} -eq 0 ]; then 
+    return
+  fi
+  
+  printf "\n"
+  read -p "请输入要删除的服务编号 (输入0取消): " choice
+  
+  if [ "$choice" -eq 0 ]; then 
+    printf "${YELLOW}${INFO_SYMBOL} 已取消删除${PLAIN}\n"
+    return
+  fi
+  
+  if [ "$choice" -lt 1 ] || [ "$choice" -gt ${#services[@]} ]; then 
+    printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"
+    return
+  fi
+  
+  local service_name=${services[$((choice-1))]}
+  printf "${YELLOW}${WARN_SYMBOL} 确定要删除服务 %s 吗? [y/N]: ${PLAIN}" "$service_name"
+  read -r confirm
+  
+  if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    $SUDO systemctl stop "$service_name" 2>/dev/null
+    $SUDO systemctl disable "$service_name" 2>/dev/null
+    $SUDO rm -f "${SERVICE_DIR}/${service_name}.service"
+    $SUDO sed -i "/^${service_name}|/d" "$CONFIG_FILE"
+    $SUDO systemctl daemon-reload
+    printf "${GREEN}${SUCCESS_SYMBOL} 服务 %s 已删除${PLAIN}\n" "$service_name"
+  else
+    printf "${YELLOW}${INFO_SYMBOL} 已取消删除${PLAIN}\n"
+  fi
+}
 
 # 卸载brook
 uninstall_brook() {
@@ -471,29 +563,222 @@ uninstall_brook() {
   return 0
 }
 
-# 获取简洁的IP信息
-get_simple_ip_info() { if ! command -v curl &>/dev/null; then return 1; fi; local ip_info=$(curl -s4 https://ipinfo.io/json 2>/dev/null); if [ -n "$ip_info" ]; then local ip=$(echo "$ip_info" | grep -o '"ip": "[^"]*' | cut -d'"' -f4); local country=$(echo "$ip_info" | grep -o '"country": "[^"]*' | cut -d'"' -f4); local city=$(echo "$ip_info" | grep -o '"city": "[^"]*' | cut -d'"' -f4); local org=$(echo "$ip_info" | grep -o '"org": "[^"]*' | cut -d'"' -f4 | sed 's/AS[0-9]* //'); echo "${ip} | ${country}, ${city} | ${org}"; else echo "无法获取IP信息"; fi; }
+# 获取简洁的IP信息用于菜单显示
+get_simple_ip_info() {
+  if ! command -v curl &>/dev/null; then 
+    echo "网络工具未就绪"
+    return 1
+  fi
+  
+  # 获取IPv4信息
+  local ipv4_info=$(curl -s4 --connect-timeout 3 https://ipinfo.io/json 2>/dev/null)
+  if [ -n "$ipv4_info" ] && echo "$ipv4_info" | grep -q '"ip"'; then
+    local ip=$(echo "$ipv4_info" | grep -o '"ip": "[^"]*' | cut -d'"' -f4)
+    local country=$(echo "$ipv4_info" | grep -o '"country": "[^"]*' | cut -d'"' -f4)
+    local city=$(echo "$ipv4_info" | grep -o '"city": "[^"]*' | cut -d'"' -f4)
+    local org=$(echo "$ipv4_info" | grep -o '"org": "[^"]*' | cut -d'"' -f4 | sed 's/AS[0-9]* //')
+    echo "${ip} | ${country}, ${city} | ${org}"
+  else
+    echo "无法获取IP信息"
+  fi
+}
+
+# 获取详细IP信息
+get_enhanced_ip_info() {
+  if ! command -v curl &>/dev/null; then 
+    echo "网络工具未就绪"
+    return 1
+  fi
+  
+  local ipv4_info ipv6_info result_info=""
+  
+  # 获取IPv4信息
+  ipv4_info=$(curl -s4 --connect-timeout 3 https://ipinfo.io/json 2>/dev/null)
+  if [ -n "$ipv4_info" ] && echo "$ipv4_info" | grep -q '"ip"'; then
+    local ipv4=$(echo "$ipv4_info" | grep -o '"ip": "[^"]*' | cut -d'"' -f4)
+    local country=$(echo "$ipv4_info" | grep -o '"country": "[^"]*' | cut -d'"' -f4)
+    local city=$(echo "$ipv4_info" | grep -o '"city": "[^"]*' | cut -d'"' -f4)
+    result_info="IPv4: ${GREEN}${ipv4}${PLAIN} (${country}, ${city})"
+  else
+    result_info="IPv4: 无连接"
+  fi
+  
+  # 检测IPv6连接
+  if curl -s6 --connect-timeout 2 https://ipv6.icanhazip.com >/dev/null 2>&1; then
+    ipv6_info=$(curl -s6 --connect-timeout 3 https://ipinfo.io/json 2>/dev/null)
+    if [ -n "$ipv6_info" ] && echo "$ipv6_info" | grep -q '"ip"'; then
+      local ipv6=$(echo "$ipv6_info" | grep -o '"ip": "[^"]*' | cut -d'"' -f4)
+      result_info="${result_info} | IPv6: 支持"
+    else
+      result_info="${result_info} | IPv6: 检测中"
+    fi
+  else
+    result_info="${result_info} | IPv6: 不支持"
+  fi
+  
+  echo "$result_info"
+}
 
 # 显示详细IP信息
-show_ip_info() { printf "${CYAN}${BOLD}获取IP地址信息...${PLAIN}\n"; if ! command -v curl &>/dev/null; then printf "${RED}${ERROR_SYMBOL} 未找到curl命令，无法获取IP信息${PLAIN}\n"; return 1; fi; printf "${CYAN}${INFO_SYMBOL} IPv4地址信息:${PLAIN}\n"; if ! curl -s4 https://ipinfo.io/json | jq . 2>/dev/null; then curl -s4 https://ipinfo.io/json | grep -E '("ip"|"country"|"city"|"region"|"org"|"loc")'; fi; printf "\n${CYAN}${INFO_SYMBOL} IPv6地址信息 (如果支持):${PLAIN}\n"; if ! curl -s6 https://ipinfo.io/json | jq . 2>/dev/null; then curl -s6 https://ipinfo.io/json | grep -E '("ip"|"country"|"city"|"region"|"org"|"loc")' || printf "${YELLOW}${WARN_SYMBOL} 没有检测到IPv6连接${PLAIN}\n"; fi; printf "\n"; }
+show_ip_info() {
+  printf "\n${CYAN}${BOLD}========== 网络信息详情 ==========${PLAIN}\n"
+  
+  if ! command -v curl &>/dev/null; then 
+    printf "${RED}${ERROR_SYMBOL} 未找到curl命令，无法获取IP信息${PLAIN}\n"
+    return 1
+  fi
+  
+  printf "${CYAN}${INFO_SYMBOL} IPv4地址信息:${PLAIN}\n"
+  local ipv4_info=$(curl -s4 --connect-timeout 5 https://ipinfo.io/json 2>/dev/null)
+  
+  if [ -n "$ipv4_info" ] && echo "$ipv4_info" | grep -q '"ip"'; then
+    if command -v jq &>/dev/null; then
+      echo "$ipv4_info" | jq .
+    else
+      echo "$ipv4_info" | grep -E '("ip"|"country"|"city"|"region"|"org"|"loc"|"timezone")'
+    fi
+  else
+    printf "${RED}${ERROR_SYMBOL} 无法获取IPv4公网信息${PLAIN}\n"
+  fi
+  
+  printf "\n${CYAN}${INFO_SYMBOL} IPv6地址信息:${PLAIN}\n"
+  if curl -s6 --connect-timeout 3 https://ipv6.icanhazip.com >/dev/null 2>&1; then
+    local ipv6_info=$(curl -s6 --connect-timeout 5 https://ipinfo.io/json 2>/dev/null)
+    
+    if [ -n "$ipv6_info" ] && echo "$ipv6_info" | grep -q '"ip"'; then
+      if command -v jq &>/dev/null; then
+        echo "$ipv6_info" | jq .
+      else
+        echo "$ipv6_info" | grep -E '("ip"|"country"|"city"|"region"|"org"|"loc")'
+      fi
+    else
+      printf "${YELLOW}${WARN_SYMBOL} IPv6连接可用，但无法获取详细信息${PLAIN}\n"
+    fi
+  else
+    printf "${YELLOW}${WARN_SYMBOL} 没有检测到IPv6连接${PLAIN}\n"
+  fi
+  
+  # 网络连接性测试
+  printf "\n${CYAN}${INFO_SYMBOL} 网络连接性测试:${PLAIN}\n"
+  
+  printf "DNS解析测试: "
+  if timeout 3 nslookup google.com >/dev/null 2>&1; then
+    printf "${GREEN}正常${PLAIN}\n"
+  else
+    printf "${RED}失败${PLAIN}\n"
+  fi
+  
+  printf "HTTP连接测试: "
+  if timeout 3 curl -s http://www.google.com >/dev/null 2>&1; then
+    printf "${GREEN}正常${PLAIN}\n"
+  else
+    printf "${RED}失败${PLAIN}\n"
+  fi
+  
+  printf "HTTPS连接测试: "
+  if timeout 3 curl -s https://www.google.com >/dev/null 2>&1; then
+    printf "${GREEN}正常${PLAIN}\n"
+  else
+    printf "${RED}失败${PLAIN}\n"
+  fi
+  
+  printf "\n"
+}
 
 # 显示菜单
-show_menu() { local ip_info=$(get_simple_ip_info); printf "\n${PURPLE}${BOLD}========== Brook 端口转发管理 ==========${PLAIN}\n"; if [ -n "$ip_info" ]; then printf "${CYAN}${INFO_SYMBOL} 本机IP: ${GREEN}%s${PLAIN}\n" "$ip_info"; fi; printf "${PURPLE}${BOLD}---------------------------------------${PLAIN}\n"; printf "  ${GREEN}1.${PLAIN} 添加转发\n"; printf "  ${GREEN}2.${PLAIN} 列出所有转发\n"; printf "  ${GREEN}3.${PLAIN} 删除转发\n"; printf "  ${GREEN}4.${PLAIN} 重启所有服务\n"; printf "  ${GREEN}5.${PLAIN} 查看服务日志\n"; printf "  ${GREEN}6.${PLAIN} 测试转发功能\n"; printf "  ${GREEN}7.${PLAIN} 卸载Brook\n"; printf "  ${GREEN}8.${PLAIN} 显示详细IP信息\n"; printf "  ${GREEN}0.${PLAIN} 退出\n"; printf "${PURPLE}${BOLD}=======================================${PLAIN}\n"; }
+show_menu() {
+  local ip_info=$(get_simple_ip_info)
+  
+  printf "\n${PURPLE}${BOLD}========== Brook 端口转发管理 ==========${PLAIN}\n"
+  
+  if [ -n "$ip_info" ]; then
+    printf "${CYAN}${INFO_SYMBOL} 本机IP: ${GREEN}%s${PLAIN}\n" "$ip_info"
+  fi
+  
+  printf "${PURPLE}${BOLD}---------------------------------------${PLAIN}\n"
+  printf "  ${GREEN}1.${PLAIN} 添加转发\n"
+  printf "  ${GREEN}2.${PLAIN} 列出所有转发\n"
+  printf "  ${GREEN}3.${PLAIN} 删除转发\n"
+  printf "  ${GREEN}4.${PLAIN} 重启所有服务\n"
+  printf "  ${GREEN}5.${PLAIN} 查看服务日志\n"
+  printf "  ${GREEN}6.${PLAIN} 测试转发功能\n"
+  printf "  ${GREEN}7.${PLAIN} 卸载Brook\n"
+  printf "  ${GREEN}8.${PLAIN} 显示详细IP信息\n"
+  printf "  ${GREEN}0.${PLAIN} 退出\n"
+  printf "${PURPLE}${BOLD}=======================================${PLAIN}\n"
+}
 
 # 重启所有服务
-restart_all_services() { printf "${CYAN}${INFO_SYMBOL} 重启所有Brook转发服务...${PLAIN}\n"; local services=$($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}'); local count=0; for service in $services; do if $SUDO systemctl restart "$service"; then ((count++)); printf "${GREEN}${SUCCESS_SYMBOL} %s 重启成功${PLAIN}\n" "$service"; else printf "${RED}${ERROR_SYMBOL} %s 重启失败${PLAIN}\n" "$service"; fi; done; printf "${GREEN}${SUCCESS_SYMBOL} 共重启 %d 个服务${PLAIN}\n" "$count"; }
+restart_all_services() {
+  printf "${CYAN}${INFO_SYMBOL} 重启所有Brook转发服务...${PLAIN}\n"
+  
+  local services=$($SUDO systemctl list-units --type=service --all | grep "${SERVICE_PREFIX}" | awk '{print $1}')
+  
+  if [ -z "$services" ]; then
+    services=$($SUDO systemctl list-unit-files --type=service | grep "${SERVICE_PREFIX}" | awk '{print $1}')
+  fi
+  
+  local count=0
+  for service in $services; do 
+    if $SUDO systemctl restart "$service"; then 
+      ((count++))
+      printf "${GREEN}${SUCCESS_SYMBOL} %s 重启成功${PLAIN}\n" "$service"
+    else 
+      printf "${RED}${ERROR_SYMBOL} %s 重启失败${PLAIN}\n" "$service"
+    fi
+  done
+  
+  printf "${GREEN}${SUCCESS_SYMBOL} 共重启 %d 个服务${PLAIN}\n" "$count"
+}
 
 # 查看服务日志
-view_service_logs() { list_forwards; local services=($($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//')); if [ ${#services[@]} -eq 0 ]; then return; fi; printf "\n"; read -p "请输入要查看日志的服务编号 (输入0查看所有): " choice; if [ "$choice" -eq 0 ]; then printf "${CYAN}${INFO_SYMBOL} 显示所有Brook服务的最新日志...${PLAIN}\n"; $SUDO journalctl -u "${SERVICE_PREFIX}*" --no-pager -n 50; elif [ "$choice" -ge 1 ] && [ "$choice" -le ${#services[@]} ]; then local service_name=${services[$((choice-1))]}; printf "${CYAN}${INFO_SYMBOL} 显示 %s 的日志...${PLAIN}\n" "$service_name"; $SUDO journalctl -u "$service_name" --no-pager -n 50; else printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"; fi; }
+view_service_logs() {
+  list_forwards
+  
+  local services=($($SUDO systemctl list-units --type=service --all | grep "${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
+  
+  if [ ${#services[@]} -eq 0 ]; then
+    services=($($SUDO systemctl list-unit-files --type=service | grep "${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
+  fi
+  
+  if [ ${#services[@]} -eq 0 ]; then 
+    return
+  fi
+  
+  printf "\n"
+  read -p "请输入要查看日志的服务编号 (输入0查看所有): " choice
+  
+  if [ "$choice" -eq 0 ]; then 
+    printf "${CYAN}${INFO_SYMBOL} 显示所有Brook服务的最新日志...${PLAIN}\n"
+    $SUDO journalctl -u "${SERVICE_PREFIX}*" --no-pager -n 50
+  elif [ "$choice" -ge 1 ] && [ "$choice" -le ${#services[@]} ]; then 
+    local service_name=${services[$((choice-1))]}
+    printf "${CYAN}${INFO_SYMBOL} 显示 %s 的日志...${PLAIN}\n" "$service_name"
+    $SUDO journalctl -u "$service_name" --no-pager -n 50
+  else 
+    printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"
+  fi
+}
+
+
 
 # 测试Brook转发功能
 test_brook_forward() {
   list_forwards
-  local services=($($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//')); 
-  if [ ${#services[@]} -eq 0 ]; then return; fi
+  
+  local services=($($SUDO systemctl list-units --type=service --all | grep "${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
+  
+  if [ ${#services[@]} -eq 0 ]; then
+    services=($($SUDO systemctl list-unit-files --type=service | grep "${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
+  fi
+  
+  if [ ${#services[@]} -eq 0 ]; then 
+    return
+  fi
   
   printf "\n"
   read -p "请输入要测试的服务编号 (输入0取消): " choice
+  
   if [ "$choice" -eq 0 ]; then 
     printf "${YELLOW}${INFO_SYMBOL} 已取消测试${PLAIN}\n"
     return
