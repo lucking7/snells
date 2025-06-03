@@ -2,7 +2,7 @@
 
 # Brook端口转发统一管理脚本
 # 支持功能: TCP转发、UDP转发、TCP+UDP转发、TCP和UDP分别转发到不同地址
-# 版本: 1.0
+# 版本: 1.1
 
 # 颜色定义
 RED='\033[0;31m'
@@ -29,6 +29,15 @@ SUCCESS_SYMBOL="[+]"
 ERROR_SYMBOL="[x]"
 INFO_SYMBOL="[i]"
 WARN_SYMBOL="[!]"
+
+# 检查是否为root用户，决定是否需要sudo前缀
+if [ "$EUID" -eq 0 ]; then
+  # 如果是root用户，不需要sudo
+  SUDO=""
+else
+  # 如果不是root用户，需要sudo
+  SUDO="sudo"
+fi
 
 # 显示加载动画
 show_loading() {
@@ -80,9 +89,9 @@ check_and_install_dependencies() {
     printf "${YELLOW}${INFO_SYMBOL} 缺失以下包: %s${PLAIN}\n" "${pkgs_to_install[*]}"
     printf "${YELLOW}${INFO_SYMBOL} 尝试使用 %s 安装...${PLAIN}\n" "$pkg_manager_detected"
     if [ "$pkg_manager_detected" == "apt-get" ]; then
-      sudo apt-get update -y || printf "${RED}${ERROR_SYMBOL} 更新包列表失败。${PLAIN}\n"
+      $SUDO apt-get update -y || printf "${RED}${ERROR_SYMBOL} 更新包列表失败。${PLAIN}\n"
     fi
-    if sudo $pkg_manager_detected install -y "${pkgs_to_install[@]}"; then
+    if $SUDO $pkg_manager_detected install -y "${pkgs_to_install[@]}"; then
       printf "${GREEN}${SUCCESS_SYMBOL} 成功安装: %s${PLAIN}\n" "${pkgs_to_install[*]}"
     else
       printf "${RED}${ERROR_SYMBOL} 安装失败。请手动安装后重试。${PLAIN}\n"
@@ -93,12 +102,76 @@ check_and_install_dependencies() {
   # 检查并安装brook
   if ! command -v brook &>/dev/null; then
     printf "${YELLOW}${INFO_SYMBOL} Brook未安装。正在安装Brook...${PLAIN}\n"
-    (bash <(curl -fsSL https://bash.ooo/nami.sh)) &
-    show_loading $!
-    nami install brook
-    if command -v brook &>/dev/null; then
-      printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功。${PLAIN}\n"
+    
+    # 检查是否已有nami，如果有就使用nami安装
+    if command -v nami &>/dev/null; then
+      printf "${CYAN}${INFO_SYMBOL} 使用nami安装Brook...${PLAIN}\n"
+      nami install brook
     else
+      # nami不存在，使用直接下载方式安装brook
+      printf "${CYAN}${INFO_SYMBOL} 直接下载安装Brook二进制文件...${PLAIN}\n"
+      
+      # 检测系统架构
+      ARCH=$(uname -m)
+      case $ARCH in
+        x86_64|amd64)
+          BROOK_ARCH="amd64"
+          ;;
+        aarch64|arm64)
+          BROOK_ARCH="arm64"
+          ;;
+        i386|i686)
+          BROOK_ARCH="386"
+          ;;
+        *)
+          printf "${RED}${ERROR_SYMBOL} 不支持的系统架构: %s${PLAIN}\n" "$ARCH"
+          exit 1
+          ;;
+      esac
+      
+      # 检测操作系统类型
+      OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+      case $OS in
+        linux)
+          BROOK_OS="linux"
+          ;;
+        darwin)
+          BROOK_OS="darwin"
+          ;;
+        *)
+          printf "${RED}${ERROR_SYMBOL} 不支持的操作系统: %s${PLAIN}\n" "$OS"
+          exit 1
+          ;;
+      esac
+      
+      # 获取最新版本
+      BROOK_VERSION=$(curl -s https://api.github.com/repos/txthinking/brook/releases/latest | grep -o '"tag_name": "v[^"]*' | sed 's/"tag_name": "v//g')
+      if [ -z "$BROOK_VERSION" ]; then
+        BROOK_VERSION="20230606" # 设置一个默认版本
+        printf "${YELLOW}${WARN_SYMBOL} 无法获取最新版本，使用默认版本: %s${PLAIN}\n" "$BROOK_VERSION"
+      else
+        printf "${GREEN}${SUCCESS_SYMBOL} 检测到最新版本: %s${PLAIN}\n" "$BROOK_VERSION"
+      fi
+      
+      # 下载brook
+      BROOK_URL="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_VERSION}_${BROOK_OS}_${BROOK_ARCH}"
+      printf "${CYAN}${INFO_SYMBOL} 正在下载Brook: %s${PLAIN}\n" "$BROOK_URL"
+      
+      curl -L -o /tmp/brook "$BROOK_URL"
+      if [ $? -ne 0 ]; then
+        printf "${RED}${ERROR_SYMBOL} 下载Brook失败，请检查网络连接或手动安装。${PLAIN}\n"
+        exit 1
+      fi
+      
+      # 安装brook
+      $SUDO chmod +x /tmp/brook
+      $SUDO mv /tmp/brook /usr/local/bin/brook
+      
+      printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功。${PLAIN}\n"
+    fi
+    
+    # 再次检查是否成功安装
+    if ! command -v brook &>/dev/null; then
       printf "${RED}${ERROR_SYMBOL} Brook安装失败。请手动安装。${PLAIN}\n"
       exit 1
     fi
@@ -110,12 +183,12 @@ check_and_install_dependencies() {
 # 设置配置目录
 setup_config_dir() {
   if [ ! -d "$CONFIG_DIR" ]; then
-    sudo mkdir -p "$CONFIG_DIR"
+    $SUDO mkdir -p "$CONFIG_DIR"
     printf "${GREEN}${SUCCESS_SYMBOL} 创建配置目录: %s${PLAIN}\n" "$CONFIG_DIR"
   fi
 
   if [ ! -f "$CONFIG_FILE" ]; then
-    sudo touch "$CONFIG_FILE"
+    $SUDO touch "$CONFIG_FILE"
     printf "${GREEN}${SUCCESS_SYMBOL} 创建配置文件: %s${PLAIN}\n" "$CONFIG_FILE"
   fi
 }
@@ -208,24 +281,24 @@ Group=nogroup
 WantedBy=multi-user.target"
 
   # 写入服务文件
-  echo "$service_content" | sudo tee "$service_file" > /dev/null
+  echo "$service_content" | $SUDO tee "$service_file" > /dev/null
   
   # 设置权限
-  sudo chmod 644 "$service_file"
+  $SUDO chmod 644 "$service_file"
   
   # 重载systemd配置
-  sudo systemctl daemon-reload
+  $SUDO systemctl daemon-reload
   
   # 启用并启动服务
-  sudo systemctl enable "$service_name" >/dev/null 2>&1
-  sudo systemctl start "$service_name"
+  $SUDO systemctl enable "$service_name" >/dev/null 2>&1
+  $SUDO systemctl start "$service_name"
   
-  if sudo systemctl is-active --quiet "$service_name"; then
+  if $SUDO systemctl is-active --quiet "$service_name"; then
     printf "${GREEN}${SUCCESS_SYMBOL} 服务 %s 启动成功${PLAIN}\n" "$service_name"
     return 0
   else
     printf "${RED}${ERROR_SYMBOL} 服务 %s 启动失败${PLAIN}\n" "$service_name"
-    sudo journalctl -u "$service_name" --no-pager -n 10
+    $SUDO journalctl -u "$service_name" --no-pager -n 10
     return 1
   fi
 }
@@ -237,7 +310,7 @@ save_forward_config() {
   local proto=$3
   local service_name=$4
   
-  echo "${service_name}|${local_port}|${remote_addr}|${proto}" | sudo tee -a "$CONFIG_FILE" > /dev/null
+  echo "${service_name}|${local_port}|${remote_addr}|${proto}" | $SUDO tee -a "$CONFIG_FILE" > /dev/null
 }
 
 # 添加转发
@@ -381,7 +454,7 @@ list_forwards() {
   printf "${CYAN}%s${PLAIN}\n" "--------------------------------------------------------------------------------"
   
   local count=0
-  local services=$(systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}')
+  local services=$($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}')
   
   if [ -z "$services" ]; then
     printf "${YELLOW}${WARN_SYMBOL} 没有找到活动的转发服务${PLAIN}\n"
@@ -393,7 +466,7 @@ list_forwards() {
     local service_name=$(echo $service | sed 's/.service$//')
     local status="未知"
     
-    if systemctl is-active --quiet "$service"; then
+    if $SUDO systemctl is-active --quiet "$service"; then
       status="${GREEN}运行中${PLAIN}"
     else
       status="${RED}已停止${PLAIN}"
@@ -425,7 +498,7 @@ list_forwards() {
 delete_forward() {
   list_forwards
   
-  local services=($(systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
+  local services=($($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
   
   if [ ${#services[@]} -eq 0 ]; then
     return
@@ -451,17 +524,17 @@ delete_forward() {
   
   if [[ "$confirm" =~ ^[Yy]$ ]]; then
     # 停止并禁用服务
-    sudo systemctl stop "$service_name" 2>/dev/null
-    sudo systemctl disable "$service_name" 2>/dev/null
+    $SUDO systemctl stop "$service_name" 2>/dev/null
+    $SUDO systemctl disable "$service_name" 2>/dev/null
     
     # 删除服务文件
-    sudo rm -f "${SERVICE_DIR}/${service_name}.service"
+    $SUDO rm -f "${SERVICE_DIR}/${service_name}.service"
     
     # 从配置文件中删除
-    sudo sed -i "/^${service_name}|/d" "$CONFIG_FILE"
+    $SUDO sed -i "/^${service_name}|/d" "$CONFIG_FILE"
     
     # 重载systemd
-    sudo systemctl daemon-reload
+    $SUDO systemctl daemon-reload
     
     printf "${GREEN}${SUCCESS_SYMBOL} 服务 %s 已删除${PLAIN}\n" "$service_name"
   else
@@ -482,18 +555,18 @@ uninstall_brook() {
   printf "${CYAN}${INFO_SYMBOL} 停止所有Brook转发服务...${PLAIN}\n"
   
   # 停止并删除所有brook转发服务
-  local services=$(systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}')
+  local services=$($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}')
   for service in $services; do
-    sudo systemctl stop "$service" 2>/dev/null
-    sudo systemctl disable "$service" 2>/dev/null
-    sudo rm -f "${SERVICE_DIR}/$service"
+    $SUDO systemctl stop "$service" 2>/dev/null
+    $SUDO systemctl disable "$service" 2>/dev/null
+    $SUDO rm -f "${SERVICE_DIR}/$service"
   done
   
   # 重载systemd
-  sudo systemctl daemon-reload
+  $SUDO systemctl daemon-reload
   
   # 删除配置文件和目录
-  sudo rm -rf "$CONFIG_DIR"
+  $SUDO rm -rf "$CONFIG_DIR"
   
   # 卸载brook
   if command -v nami &>/dev/null; then
@@ -501,7 +574,7 @@ uninstall_brook() {
     nami remove brook
   else
     # 如果没有nami，尝试直接删除brook二进制文件
-    sudo rm -f /usr/local/bin/brook
+    $SUDO rm -f /usr/local/bin/brook
   fi
   
   printf "${GREEN}${SUCCESS_SYMBOL} Brook已完全卸载${PLAIN}\n"
@@ -524,11 +597,11 @@ show_menu() {
 restart_all_services() {
   printf "${CYAN}${INFO_SYMBOL} 重启所有Brook转发服务...${PLAIN}\n"
   
-  local services=$(systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}')
+  local services=$($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}')
   local count=0
   
   for service in $services; do
-    if sudo systemctl restart "$service"; then
+    if $SUDO systemctl restart "$service"; then
       ((count++))
       printf "${GREEN}${SUCCESS_SYMBOL} %s 重启成功${PLAIN}\n" "$service"
     else
@@ -543,7 +616,7 @@ restart_all_services() {
 view_service_logs() {
   list_forwards
   
-  local services=($(systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
+  local services=($($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//'))
   
   if [ ${#services[@]} -eq 0 ]; then
     return
@@ -554,11 +627,11 @@ view_service_logs() {
   
   if [ "$choice" -eq 0 ]; then
     printf "${CYAN}${INFO_SYMBOL} 显示所有Brook服务的最新日志...${PLAIN}\n"
-    sudo journalctl -u "${SERVICE_PREFIX}*" --no-pager -n 50
+    $SUDO journalctl -u "${SERVICE_PREFIX}*" --no-pager -n 50
   elif [ "$choice" -ge 1 ] && [ "$choice" -le ${#services[@]} ]; then
     local service_name=${services[$((choice-1))]}
     printf "${CYAN}${INFO_SYMBOL} 显示 %s 的日志...${PLAIN}\n" "$service_name"
-    sudo journalctl -u "$service_name" --no-pager -n 50
+    $SUDO journalctl -u "$service_name" --no-pager -n 50
   else
     printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"
   fi
