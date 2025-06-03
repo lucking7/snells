@@ -2,7 +2,7 @@
 
 # Brook端口转发统一管理脚本
 # 支持功能: TCP转发、UDP转发、TCP+UDP转发、TCP和UDP分别转发到不同地址
-# 版本: 1.3.1
+# 版本: 1.3.3 - 改进验证、安全性和添加测试功能
 
 # 颜色定义
 RED='\033[0;31m'
@@ -222,8 +222,33 @@ validate_input() {
   local input_type=$2
   case $input_type in
   "port") if ! [[ "$input" =~ ^[0-9]+$ ]] || [ "$input" -lt 1 ] || [ "$input" -gt 65535 ]; then printf "${RED}${ERROR_SYMBOL} 无效的端口号。必须在1-65535之间。${PLAIN}\n"; return 1; fi ;;
-  "ip") if [[ "$input" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then IFS='.' read -r -a octets <<<"$input"; for octet in "${octets[@]}"; do if [ "$octet" -gt 255 ]; then printf "${RED}${ERROR_SYMBOL} 无效的IPv4地址。${PLAIN}\n"; return 1; fi; done; return 0; fi; if [[ "$input" =~ ^[0-9a-fA-F:]+$ ]]; then return 0; fi; printf "${RED}${ERROR_SYMBOL} 无效的IP地址格式。${PLAIN}\n"; return 1 ;; 
-  "hostname") if [[ "$input" =~ ^[a-zA-Z0-9]([-a-zA-Z0-9\.]{0,61}[a-zA-Z0-9])?$ ]]; then return 0; fi; printf "${RED}${ERROR_SYMBOL} 无效的主机名格式。${PLAIN}\n"; return 1 ;; 
+  "ip") 
+    # IPv4验证
+    if [[ "$input" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then 
+      IFS='.' read -r -a octets <<<"$input"
+      for octet in "${octets[@]}"; do 
+        if [ "$octet" -gt 255 ]; then 
+          printf "${RED}${ERROR_SYMBOL} 无效的IPv4地址。${PLAIN}\n"
+          return 1
+        fi
+      done
+      return 0
+    fi
+    # 改进的IPv6验证 - 基本格式检查
+    if [[ "$input" =~ ^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$ ]] || [[ "$input" =~ ^::([0-9a-fA-F]{0,4}:){0,6}[0-9a-fA-F]{0,4}$ ]] || [[ "$input" =~ ^([0-9a-fA-F]{0,4}:){1,6}::$ ]]; then 
+      return 0
+    fi
+    printf "${RED}${ERROR_SYMBOL} 无效的IP地址格式。${PLAIN}\n"
+    return 1 
+    ;; 
+  "hostname") 
+    # 支持域名和主机名格式，包括下划线
+    if [[ "$input" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\._-]{0,61}[a-zA-Z0-9])?$ ]] || [[ "$input" =~ ^[a-zA-Z0-9\._-]{1,63}(\.[a-zA-Z0-9\._-]{1,63})*$ ]]; then 
+      return 0
+    fi
+    printf "${RED}${ERROR_SYMBOL} 无效的主机名格式。${PLAIN}\n"
+    return 1 
+    ;; 
 esac; return 0;
 }
 
@@ -232,12 +257,8 @@ generate_service_name() { local local_port=$1; local proto=$2; echo "${SERVICE_P
 
 # 创建systemd服务
 create_systemd_service() {
-  local service_name=$1
-  local local_port=$2
-  local remote_addr=$3
-  local proto=$4
+  local service_name=$1; local local_port=$2; local remote_addr=$3; local proto=$4
   local service_file="${SERVICE_DIR}/${service_name}.service"
-
   local nami_bin_dir_for_service="${SCRIPT_RUNNER_HOME}/.nami/bin"
   local brook_exec_command_for_service
 
@@ -265,30 +286,23 @@ create_systemd_service() {
   
   printf "${CYAN}${INFO_SYMBOL} Systemd服务将使用以下Brook命令: ${GREEN}%s${PLAIN}\n" "$brook_exec_command_for_service"
 
-    # Fallback: 尝试直接调用brook (如果nami将其放在了PATH或nami的bin目录)
-    if command -v brook &>/dev/null && brook --help &>/dev/null; then
-      brook_exec_command_for_service=$(command -v brook)
-    elif [ -x "${nami_bin_dir_for_service}/brook" ] && "${nami_bin_dir_for_service}/brook" --help &>/dev/null; then
-      brook_exec_command_for_service="${nami_bin_dir_for_service}/brook"
-    elif [ -x "/usr/local/bin/brook" ] && /usr/local/bin/brook --help &>/dev/null; then # 最后的备用路径
-      brook_exec_command_for_service="/usr/local/bin/brook"
-    else
-      printf "${RED}${ERROR_SYMBOL} 无法确定Brook的有效执行命令。请确保Brook已正确安装并通过 'nami run brook' 或直接 'brook' 可执行。${PLAIN}\n"
-      return 1
-    fi
-  fi
-  
-  printf "${CYAN}${INFO_SYMBOL} Systemd服务将使用以下Brook命令: ${GREEN}%s${PLAIN}\n" "$brook_exec_command_for_service"
-
   local brook_relay_cmd_line="${brook_exec_command_for_service} relay -f :${local_port} -t ${remote_addr}"
-  case $proto in
-    "tcp") brook_relay_cmd_line="$brook_relay_cmd_line --udpTimeout 0" ;; 
-    "udp") brook_relay_cmd_line="$brook_relay_cmd_line --tcpTimeout 0" ;; 
+  # 根据Brook实际行为，timeout设为0可能用于禁用对应协议
+  case $proto in 
+    "tcp") 
+      brook_relay_cmd_line+=" --udpTimeout 0" 
+      ;; 
+    "udp") 
+      brook_relay_cmd_line+=" --tcpTimeout 0" 
+      ;; 
+    # "both" 情况不添加超时参数，保持默认行为
   esac
 
   local service_content="[Unit]
 Description=Brook Forward ${local_port} ${proto} to ${remote_addr}
 After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -298,24 +312,21 @@ RestartSec=5
 User=root
 Group=root
 Environment=\"PATH=${nami_bin_dir_for_service}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"
+# 安全性设置
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target"
 
-  echo "$service_content" | $SUDO tee "$service_file" > /dev/null
-  $SUDO chmod 644 "$service_file"
-  $SUDO systemctl daemon-reload
-  $SUDO systemctl enable "$service_name" >/dev/null 2>&1
-  $SUDO systemctl start "$service_name"
+  echo -e "$service_content" | $SUDO tee "$service_file" > /dev/null
+  $SUDO chmod 644 "$service_file"; $SUDO systemctl daemon-reload
+  $SUDO systemctl enable "$service_name" >/dev/null 2>&1; $SUDO systemctl start "$service_name"
   
-  if $SUDO systemctl is-active --quiet "$service_name"; then
-    printf "${GREEN}${SUCCESS_SYMBOL} 服务 %s 启动成功${PLAIN}\n" "$service_name"
-    return 0
-  else
-    printf "${RED}${ERROR_SYMBOL} 服务 %s 启动失败。请检查日志 (选项 5)。${PLAIN}\n" "$service_name"
-    # $SUDO journalctl -u "$service_name" --no-pager -n 10 # 暂时注释掉，避免过多输出
-    return 1
-  fi
+  if $SUDO systemctl is-active --quiet "$service_name"; then printf "${GREEN}${SUCCESS_SYMBOL} 服务 %s 启动成功${PLAIN}\n" "$service_name"; return 0;
+  else printf "${RED}${ERROR_SYMBOL} 服务 %s 启动失败。请检查日志 (选项 5)。${PLAIN}\n" "$service_name"; return 1; fi
 }
 
 # 保存转发配置到文件
@@ -331,7 +342,22 @@ add_forward() {
   read -p "请选择 [1-4]: " forward_type
   if ! [[ "$forward_type" =~ ^[1-4]$ ]]; then printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"; return 1; fi
 
-  while true; do read -p "请输入本地监听端口 [1-65535]: " local_port; if validate_input "$local_port" "port"; then if lsof -i:$local_port >/dev/null 2>&1; then printf "${RED}${ERROR_SYMBOL} 端口 $local_port 已被占用${PLAIN}\n"; else break; fi; fi; done
+  while true; do 
+    read -p "请输入本地监听端口 [1-65535]: " local_port
+    if validate_input "$local_port" "port"; then 
+      # 检查端口是否被占用 (TCP和UDP)
+      if lsof -i:$local_port >/dev/null 2>&1 || netstat -tuln | grep -q ":$local_port "; then 
+        printf "${RED}${ERROR_SYMBOL} 端口 $local_port 已被占用${PLAIN}\n"
+      else 
+        # 检查是否已有Brook服务使用此端口
+        if grep -q "|$local_port|" "$CONFIG_FILE" 2>/dev/null; then
+          printf "${RED}${ERROR_SYMBOL} 端口 $local_port 已被Brook转发服务占用${PLAIN}\n"
+        else
+          break
+        fi
+      fi
+    fi
+  done
 
   case $forward_type in
     1|2|3) # TCP only, UDP only, or Both to same target
@@ -452,13 +478,62 @@ get_simple_ip_info() { if ! command -v curl &>/dev/null; then return 1; fi; loca
 show_ip_info() { printf "${CYAN}${BOLD}获取IP地址信息...${PLAIN}\n"; if ! command -v curl &>/dev/null; then printf "${RED}${ERROR_SYMBOL} 未找到curl命令，无法获取IP信息${PLAIN}\n"; return 1; fi; printf "${CYAN}${INFO_SYMBOL} IPv4地址信息:${PLAIN}\n"; if ! curl -s4 https://ipinfo.io/json | jq . 2>/dev/null; then curl -s4 https://ipinfo.io/json | grep -E '("ip"|"country"|"city"|"region"|"org"|"loc")'; fi; printf "\n${CYAN}${INFO_SYMBOL} IPv6地址信息 (如果支持):${PLAIN}\n"; if ! curl -s6 https://ipinfo.io/json | jq . 2>/dev/null; then curl -s6 https://ipinfo.io/json | grep -E '("ip"|"country"|"city"|"region"|"org"|"loc")' || printf "${YELLOW}${WARN_SYMBOL} 没有检测到IPv6连接${PLAIN}\n"; fi; printf "\n"; }
 
 # 显示菜单
-show_menu() { local ip_info=$(get_simple_ip_info); printf "\n${PURPLE}${BOLD}========== Brook 端口转发管理 ==========${PLAIN}\n"; if [ -n "$ip_info" ]; then printf "${CYAN}${INFO_SYMBOL} 本机IP: ${GREEN}%s${PLAIN}\n" "$ip_info"; fi; printf "${PURPLE}${BOLD}---------------------------------------${PLAIN}\n"; printf "  ${GREEN}1.${PLAIN} 添加转发\n"; printf "  ${GREEN}2.${PLAIN} 列出所有转发\n"; printf "  ${GREEN}3.${PLAIN} 删除转发\n"; printf "  ${GREEN}4.${PLAIN} 重启所有服务\n"; printf "  ${GREEN}5.${PLAIN} 查看服务日志\n"; printf "  ${GREEN}6.${PLAIN} 卸载Brook\n"; printf "  ${GREEN}7.${PLAIN} 显示详细IP信息\n"; printf "  ${GREEN}0.${PLAIN} 退出\n"; printf "${PURPLE}${BOLD}=======================================${PLAIN}\n"; }
+show_menu() { local ip_info=$(get_simple_ip_info); printf "\n${PURPLE}${BOLD}========== Brook 端口转发管理 ==========${PLAIN}\n"; if [ -n "$ip_info" ]; then printf "${CYAN}${INFO_SYMBOL} 本机IP: ${GREEN}%s${PLAIN}\n" "$ip_info"; fi; printf "${PURPLE}${BOLD}---------------------------------------${PLAIN}\n"; printf "  ${GREEN}1.${PLAIN} 添加转发\n"; printf "  ${GREEN}2.${PLAIN} 列出所有转发\n"; printf "  ${GREEN}3.${PLAIN} 删除转发\n"; printf "  ${GREEN}4.${PLAIN} 重启所有服务\n"; printf "  ${GREEN}5.${PLAIN} 查看服务日志\n"; printf "  ${GREEN}6.${PLAIN} 测试转发功能\n"; printf "  ${GREEN}7.${PLAIN} 卸载Brook\n"; printf "  ${GREEN}8.${PLAIN} 显示详细IP信息\n"; printf "  ${GREEN}0.${PLAIN} 退出\n"; printf "${PURPLE}${BOLD}=======================================${PLAIN}\n"; }
 
 # 重启所有服务
 restart_all_services() { printf "${CYAN}${INFO_SYMBOL} 重启所有Brook转发服务...${PLAIN}\n"; local services=$($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}'); local count=0; for service in $services; do if $SUDO systemctl restart "$service"; then ((count++)); printf "${GREEN}${SUCCESS_SYMBOL} %s 重启成功${PLAIN}\n" "$service"; else printf "${RED}${ERROR_SYMBOL} %s 重启失败${PLAIN}\n" "$service"; fi; done; printf "${GREEN}${SUCCESS_SYMBOL} 共重启 %d 个服务${PLAIN}\n" "$count"; }
 
 # 查看服务日志
 view_service_logs() { list_forwards; local services=($($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//')); if [ ${#services[@]} -eq 0 ]; then return; fi; printf "\n"; read -p "请输入要查看日志的服务编号 (输入0查看所有): " choice; if [ "$choice" -eq 0 ]; then printf "${CYAN}${INFO_SYMBOL} 显示所有Brook服务的最新日志...${PLAIN}\n"; $SUDO journalctl -u "${SERVICE_PREFIX}*" --no-pager -n 50; elif [ "$choice" -ge 1 ] && [ "$choice" -le ${#services[@]} ]; then local service_name=${services[$((choice-1))]}; printf "${CYAN}${INFO_SYMBOL} 显示 %s 的日志...${PLAIN}\n" "$service_name"; $SUDO journalctl -u "$service_name" --no-pager -n 50; else printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"; fi; }
+
+# 测试Brook转发功能
+test_brook_forward() {
+  list_forwards
+  local services=($($SUDO systemctl list-units --type=service --all | grep "^${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/.service$//')); 
+  if [ ${#services[@]} -eq 0 ]; then return; fi
+  
+  printf "\n"
+  read -p "请输入要测试的服务编号 (输入0取消): " choice
+  if [ "$choice" -eq 0 ]; then 
+    printf "${YELLOW}${INFO_SYMBOL} 已取消测试${PLAIN}\n"
+    return
+  fi
+  
+  if [ "$choice" -lt 1 ] || [ "$choice" -gt ${#services[@]} ]; then 
+    printf "${RED}${ERROR_SYMBOL} 无效的选择${PLAIN}\n"
+    return
+  fi
+  
+  local service_name=${services[$((choice-1))]}
+  local info=$(grep "^${service_name}|" "$CONFIG_FILE" 2>/dev/null | head -1)
+  
+  if [ -n "$info" ]; then
+    local local_port=$(echo "$info" | cut -d'|' -f2)
+    local remote_addr=$(echo "$info" | cut -d'|' -f3)
+    local proto=$(echo "$info" | cut -d'|' -f4)
+    
+    printf "${CYAN}${INFO_SYMBOL} 测试转发: 本地端口 %s (%s) -> %s${PLAIN}\n" "$local_port" "$proto" "$remote_addr"
+    
+    if command -v brook &>/dev/null; then
+      printf "${CYAN}${INFO_SYMBOL} 使用Brook自带测试功能...${PLAIN}\n"
+      # 创建临时Brook测试链接
+      local brook_link="brook://127.0.0.1:${local_port}"
+      timeout 10 brook testbrook --link "$brook_link" 2>/dev/null || printf "${YELLOW}${WARN_SYMBOL} Brook测试超时或失败，可能是目标服务器无响应${PLAIN}\n"
+    else
+      printf "${YELLOW}${WARN_SYMBOL} Brook命令不可用，跳过测试${PLAIN}\n"
+    fi
+    
+    # 简单的端口连通性测试
+    printf "${CYAN}${INFO_SYMBOL} 测试端口连通性...${PLAIN}\n"
+    if timeout 3 bash -c "</dev/tcp/127.0.0.1/${local_port}" 2>/dev/null; then
+      printf "${GREEN}${SUCCESS_SYMBOL} 本地端口 %s 可达${PLAIN}\n" "$local_port"
+    else
+      printf "${RED}${ERROR_SYMBOL} 本地端口 %s 无法连接${PLAIN}\n" "$local_port"
+    fi
+  else
+    printf "${RED}${ERROR_SYMBOL} 无法获取服务信息${PLAIN}\n"
+  fi
+}
 
 # 主函数
 main() {
@@ -480,11 +555,17 @@ main() {
   
   while true; do
     show_menu
-    read -p "请选择操作 [0-7]: " choice
+    read -p "请选择操作 [0-8]: " choice
     case $choice in
-      1) add_forward ;; 2) list_forwards ;; 3) delete_forward ;; 4) restart_all_services ;;
-      5) view_service_logs ;; 6) uninstall_brook; if [ $? -eq 0 ]; then break; fi ;; # 卸载成功后退出
-      7) show_ip_info ;; 0) printf "${GREEN}${SUCCESS_SYMBOL} 感谢使用，再见！${PLAIN}\n"; break ;; 
+      1) add_forward ;; 
+      2) list_forwards ;; 
+      3) delete_forward ;; 
+      4) restart_all_services ;;
+      5) view_service_logs ;; 
+      6) test_brook_forward ;;
+      7) uninstall_brook; if [ $? -eq 0 ]; then break; fi ;; # 卸载成功后退出
+      8) show_ip_info ;; 
+      0) printf "${GREEN}${SUCCESS_SYMBOL} 感谢使用，再见！${PLAIN}\n"; break ;; 
       *) printf "${RED}${ERROR_SYMBOL} 无效的选择，请重试${PLAIN}\n" ;;
     esac
   done
