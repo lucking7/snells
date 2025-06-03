@@ -103,124 +103,203 @@ check_and_install_dependencies() {
   if ! command -v brook &>/dev/null; then
     printf "${YELLOW}${INFO_SYMBOL} Brook未安装。正在安装Brook...${PLAIN}\n"
     
-    # 检查是否已有nami，如果有就使用nami安装
-    if command -v nami &>/dev/null; then
-      printf "${CYAN}${INFO_SYMBOL} 使用nami安装Brook...${PLAIN}\n"
-      nami install brook
-    else
-      # nami不存在，使用直接下载方式安装brook
-      printf "${CYAN}${INFO_SYMBOL} 直接下载安装Brook二进制文件...${PLAIN}\n"
+    # 优先使用nami安装brook
+    printf "${CYAN}${INFO_SYMBOL} 尝试使用nami安装Brook...${PLAIN}\n"
+    
+    # 首先检查nami是否已安装
+    if ! command -v nami &>/dev/null; then
+      printf "${CYAN}${INFO_SYMBOL} 首先安装nami...${PLAIN}\n"
+      # 使用bash.ooo/nami.sh安装nami
+      bash <(curl -fsSL https://bash.ooo/nami.sh) || {
+        printf "${RED}${ERROR_SYMBOL} 安装nami失败，尝试手动下载brook...${PLAIN}\n"
+        install_brook_binary
+        return
+      }
       
-      # 检测系统架构
-      ARCH=$(uname -m)
-      case $ARCH in
-        x86_64|amd64)
-          BROOK_ARCH="amd64"
-          ;;
-        aarch64|arm64)
-          BROOK_ARCH="arm64"
-          ;;
-        i386|i686)
-          BROOK_ARCH="386"
-          ;;
-        *)
-          printf "${RED}${ERROR_SYMBOL} 不支持的系统架构: %s${PLAIN}\n" "$ARCH"
-          exit 1
-          ;;
-      esac
+      # 刷新环境变量以找到nami
+      export PATH=$HOME/.nami/bin:$PATH
       
-      # 检测操作系统类型
-      OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-      case $OS in
-        linux)
-          BROOK_OS="linux"
-          ;;
-        darwin)
-          BROOK_OS="darwin"
-          ;;
-        *)
-          printf "${RED}${ERROR_SYMBOL} 不支持的操作系统: %s${PLAIN}\n" "$OS"
-          exit 1
-          ;;
-      esac
-      
-      # 获取最新版本
-      BROOK_VERSION=$(curl -s https://api.github.com/repos/txthinking/brook/releases/latest | grep -o '"tag_name": "v[^"]*' | sed 's/"tag_name": "v//g')
-      if [ -z "$BROOK_VERSION" ]; then
-        BROOK_VERSION="20230606" # 设置一个默认版本
-        printf "${YELLOW}${WARN_SYMBOL} 无法获取最新版本，使用默认版本: %s${PLAIN}\n" "$BROOK_VERSION"
-      else
-        printf "${GREEN}${SUCCESS_SYMBOL} 检测到最新版本: %s${PLAIN}\n" "$BROOK_VERSION"
-      fi
-      
-      # 下载brook
-      BROOK_URL="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_VERSION}_${BROOK_OS}_${BROOK_ARCH}"
-      printf "${CYAN}${INFO_SYMBOL} 正在下载Brook: %s${PLAIN}\n" "$BROOK_URL"
-      
-      curl -L -o /tmp/brook "$BROOK_URL"
-      if [ $? -ne 0 ]; then
-        printf "${RED}${ERROR_SYMBOL} 下载Brook失败，请检查网络连接或手动安装。${PLAIN}\n"
-        exit 1
-      fi
-      
-      # 检查文件是否正确下载（非空）
-      if [ ! -s /tmp/brook ]; then
-        printf "${RED}${ERROR_SYMBOL} 下载的Brook文件为空，尝试备用版本...${PLAIN}\n"
-        BROOK_VERSION="20230401"
-        BROOK_URL="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_VERSION}_${BROOK_OS}_${BROOK_ARCH}"
-        printf "${CYAN}${INFO_SYMBOL} 正在下载备用版本Brook: %s${PLAIN}\n" "$BROOK_URL"
+      # 再次检查nami是否可用
+      if ! command -v nami &>/dev/null; then
+        printf "${YELLOW}${WARN_SYMBOL} nami安装成功但命令不可用，尝试直接使用nami的路径...${PLAIN}\n"
+        # 直接使用nami的路径安装brook
+        $HOME/.nami/bin/nami install brook || {
+          printf "${RED}${ERROR_SYMBOL} 使用nami安装brook失败，尝试手动下载...${PLAIN}\n"
+          install_brook_binary
+          return
+        }
         
-        curl -L -o /tmp/brook "$BROOK_URL"
-        if [ $? -ne 0 ] || [ ! -s /tmp/brook ]; then
-          printf "${RED}${ERROR_SYMBOL} 下载备用版本Brook失败，请手动安装。${PLAIN}\n"
-          exit 1
-        fi
-      fi
-      
-      # 安装brook
-      $SUDO chmod +x /tmp/brook
-      $SUDO mv /tmp/brook /usr/local/bin/brook
-      
-      # 验证brook是否可执行
-      if ! $SUDO /usr/local/bin/brook --help &>/dev/null; then
-        printf "${RED}${ERROR_SYMBOL} Brook可能无法在当前系统上执行，尝试其他架构版本...${PLAIN}\n"
-        
-        # 如果是amd64，尝试386架构
-        if [ "$BROOK_ARCH" = "amd64" ]; then
-          BROOK_ARCH="386"
-          BROOK_URL="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_VERSION}_${BROOK_OS}_${BROOK_ARCH}"
-          printf "${CYAN}${INFO_SYMBOL} 尝试下载386架构Brook: %s${PLAIN}\n" "$BROOK_URL"
-          
-          curl -L -o /tmp/brook "$BROOK_URL"
-          if [ $? -eq 0 ] && [ -s /tmp/brook ]; then
-            $SUDO chmod +x /tmp/brook
-            $SUDO mv /tmp/brook /usr/local/bin/brook
-            
-            if ! $SUDO /usr/local/bin/brook --help &>/dev/null; then
-              printf "${RED}${ERROR_SYMBOL} Brook依然无法在当前系统上执行，请手动安装。${PLAIN}\n"
-              exit 1
-            fi
-          else
-            printf "${RED}${ERROR_SYMBOL} 下载386架构Brook失败，请手动安装。${PLAIN}\n"
-            exit 1
-          fi
+        # 创建brook的符号链接
+        if [ -f "$HOME/.nami/bin/brook" ]; then
+          $SUDO ln -sf $HOME/.nami/bin/brook /usr/local/bin/brook
+          printf "${GREEN}${SUCCESS_SYMBOL} 已创建brook的符号链接到/usr/local/bin/brook${PLAIN}\n"
         else
-          printf "${RED}${ERROR_SYMBOL} Brook无法在当前系统上执行，请手动安装。${PLAIN}\n"
-          exit 1
+          printf "${RED}${ERROR_SYMBOL} 找不到nami安装的brook文件${PLAIN}\n"
+          install_brook_binary
+          return
         fi
+      else
+        # 使用nami安装brook
+        nami install brook || {
+          printf "${RED}${ERROR_SYMBOL} 使用nami安装brook失败，尝试手动下载...${PLAIN}\n"
+          install_brook_binary
+          return
+        }
       fi
-      
-      printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功。${PLAIN}\n"
+    else
+      # nami已安装，使用它安装brook
+      nami install brook || {
+        printf "${RED}${ERROR_SYMBOL} 使用nami安装brook失败，尝试手动下载...${PLAIN}\n"
+        install_brook_binary
+        return
+      }
     fi
     
-    # 再次检查是否成功安装
-    if ! command -v brook &>/dev/null; then
-      printf "${RED}${ERROR_SYMBOL} Brook安装失败。请手动安装。${PLAIN}\n"
-      exit 1
+    # 检查brook是否已安装并可执行
+    if command -v brook &>/dev/null; then
+      if brook --help &>/dev/null; then
+        printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功并可正常执行。${PLAIN}\n"
+      else
+        printf "${RED}${ERROR_SYMBOL} Brook已安装但不可执行，尝试创建符号链接...${PLAIN}\n"
+        # 尝试查找nami安装的brook位置
+        if [ -f "$HOME/.nami/bin/brook" ]; then
+          $SUDO ln -sf $HOME/.nami/bin/brook /usr/local/bin/brook
+          printf "${GREEN}${SUCCESS_SYMBOL} 已创建brook的符号链接到/usr/local/bin/brook${PLAIN}\n"
+          
+          # 再次检查brook是否可执行
+          if brook --help &>/dev/null; then
+            printf "${GREEN}${SUCCESS_SYMBOL} Brook现在可以正常执行。${PLAIN}\n"
+          else
+            printf "${RED}${ERROR_SYMBOL} Brook仍然不可执行，尝试手动下载...${PLAIN}\n"
+            install_brook_binary
+          fi
+        else
+          printf "${RED}${ERROR_SYMBOL} 找不到nami安装的brook文件，尝试手动下载...${PLAIN}\n"
+          install_brook_binary
+        fi
+      fi
+    else
+      printf "${RED}${ERROR_SYMBOL} Brook安装失败，尝试手动下载...${PLAIN}\n"
+      install_brook_binary
     fi
   else
     printf "${GREEN}${SUCCESS_SYMBOL} Brook已安装。${PLAIN}\n"
+    # 验证brook是否可正常执行
+    if brook --help &>/dev/null; then
+      printf "${GREEN}${SUCCESS_SYMBOL} Brook可正常执行。${PLAIN}\n"
+    else
+      printf "${RED}${ERROR_SYMBOL} Brook已安装但不可执行，尝试重新安装...${PLAIN}\n"
+      $SUDO rm -f $(which brook)
+      printf "${CYAN}${INFO_SYMBOL} 已删除不可执行的brook，重新安装...${PLAIN}\n"
+      check_and_install_dependencies
+    fi
   fi
+}
+
+# 手动下载安装brook二进制文件
+install_brook_binary() {
+  printf "${CYAN}${INFO_SYMBOL} 尝试手动下载Brook二进制文件...${PLAIN}\n"
+  
+  # 检测系统架构
+  ARCH=$(uname -m)
+  case $ARCH in
+    x86_64|amd64)
+      BROOK_ARCH="amd64"
+      ;;
+    aarch64|arm64)
+      BROOK_ARCH="arm64"
+      ;;
+    i386|i686)
+      BROOK_ARCH="386"
+      ;;
+    *)
+      printf "${RED}${ERROR_SYMBOL} 不支持的系统架构: %s${PLAIN}\n" "$ARCH"
+      exit 1
+      ;;
+  esac
+  
+  # 检测操作系统类型
+  OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+  case $OS in
+    linux)
+      BROOK_OS="linux"
+      ;;
+    darwin)
+      BROOK_OS="darwin"
+      ;;
+    *)
+      printf "${RED}${ERROR_SYMBOL} 不支持的操作系统: %s${PLAIN}\n" "$OS"
+      exit 1
+      ;;
+  esac
+  
+  # 获取最新版本
+  BROOK_VERSION=$(curl -s https://api.github.com/repos/txthinking/brook/releases/latest | grep -o '"tag_name": "v[^"]*' | sed 's/"tag_name": "v//g')
+  if [ -z "$BROOK_VERSION" ]; then
+    BROOK_VERSION="20230401" # 设置一个默认版本
+    printf "${YELLOW}${WARN_SYMBOL} 无法获取最新版本，使用默认版本: %s${PLAIN}\n" "$BROOK_VERSION"
+  else
+    printf "${GREEN}${SUCCESS_SYMBOL} 检测到最新版本: %s${PLAIN}\n" "$BROOK_VERSION"
+  fi
+  
+  # 下载brook
+  BROOK_URL="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_VERSION}_${BROOK_OS}_${BROOK_ARCH}"
+  printf "${CYAN}${INFO_SYMBOL} 正在下载Brook: %s${PLAIN}\n" "$BROOK_URL"
+  
+  curl -L -o /tmp/brook "$BROOK_URL"
+  if [ $? -ne 0 ]; then
+    printf "${RED}${ERROR_SYMBOL} 下载Brook失败，请检查网络连接或手动安装。${PLAIN}\n"
+    exit 1
+  fi
+  
+  # 检查文件是否正确下载（非空）
+  if [ ! -s /tmp/brook ]; then
+    printf "${RED}${ERROR_SYMBOL} 下载的Brook文件为空，尝试备用版本...${PLAIN}\n"
+    BROOK_VERSION="20230401"
+    BROOK_URL="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_VERSION}_${BROOK_OS}_${BROOK_ARCH}"
+    printf "${CYAN}${INFO_SYMBOL} 正在下载备用版本Brook: %s${PLAIN}\n" "$BROOK_URL"
+    
+    curl -L -o /tmp/brook "$BROOK_URL"
+    if [ $? -ne 0 ] || [ ! -s /tmp/brook ]; then
+      printf "${RED}${ERROR_SYMBOL} 下载备用版本Brook失败，请手动安装。${PLAIN}\n"
+      exit 1
+    fi
+  fi
+  
+  # 安装brook
+  $SUDO chmod +x /tmp/brook
+  $SUDO mv /tmp/brook /usr/local/bin/brook
+  
+  # 验证brook是否可执行
+  if ! $SUDO /usr/local/bin/brook --help &>/dev/null; then
+    printf "${RED}${ERROR_SYMBOL} Brook可能无法在当前系统上执行，尝试其他架构版本...${PLAIN}\n"
+    
+    # 如果是amd64，尝试386架构
+    if [ "$BROOK_ARCH" = "amd64" ]; then
+      BROOK_ARCH="386"
+      BROOK_URL="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_VERSION}_${BROOK_OS}_${BROOK_ARCH}"
+      printf "${CYAN}${INFO_SYMBOL} 尝试下载386架构Brook: %s${PLAIN}\n" "$BROOK_URL"
+      
+      curl -L -o /tmp/brook "$BROOK_URL"
+      if [ $? -eq 0 ] && [ -s /tmp/brook ]; then
+        $SUDO chmod +x /tmp/brook
+        $SUDO mv /tmp/brook /usr/local/bin/brook
+        
+        if ! $SUDO /usr/local/bin/brook --help &>/dev/null; then
+          printf "${RED}${ERROR_SYMBOL} Brook依然无法在当前系统上执行，请手动安装。${PLAIN}\n"
+          exit 1
+        fi
+      else
+        printf "${RED}${ERROR_SYMBOL} 下载386架构Brook失败，请手动安装。${PLAIN}\n"
+        exit 1
+      fi
+    else
+      printf "${RED}${ERROR_SYMBOL} Brook无法在当前系统上执行，请手动安装。${PLAIN}\n"
+      exit 1
+    fi
+  fi
+  
+  printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功。${PLAIN}\n"
 }
 
 # 设置配置目录
