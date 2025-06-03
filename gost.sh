@@ -271,23 +271,23 @@ add_forward_to_config() {
     local tcp_service_name="${name_arg}-tcp"
     local udp_service_name="${name_arg}-udp"
 
-    jq --arg tcp_name "$tcp_service_name" \\\
-       --arg udp_name "$udp_service_name" \\\
-       --arg common_addr "$listen_addr" \\\
-       --arg node0_addr "$node0_addr_str" \\\
+    jq --arg tcp_name "$tcp_service_name" \
+       --arg udp_name "$udp_service_name" \
+       --arg common_addr "$listen_addr" \
+       --arg node0_addr "$node0_addr_str" \
        '.services += [
-         {name: $tcp_name, addr: $common_addr, handler: {type: "tcp"}, listener: {type: "tcp"}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}] }},\
-         {name: $udp_name, addr: $common_addr, handler: {type: "udp"}, listener: {type: "udp"}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}] }}\
+         {name: $tcp_name, addr: $common_addr, handler: {type: "tcp"}, listener: {type: "tcp"}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}] }},
+         {name: $udp_name, addr: $common_addr, handler: {type: "udp"}, listener: {type: "udp"}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}] }}
        ]' "$CONFIG_FILE" > "$temp_file"
   else 
     # This path is for single protocol services (proto is "tcp" or "udp").
     # This includes Option 1, Option 2, and each leg of Option 4 (Split TCP/UDP).
     # name_arg is already the final, suffixed service name (e.g., "forward-...-tcp").
-    jq --arg service_name "$name_arg" \\\
-       --arg service_addr "$listen_addr" \\\
-       --arg service_proto "$proto" \\\
-       --arg node0_addr "$node0_addr_str" \\\
-       '.services += [{name: $service_name, addr: $service_addr, handler: {type: $service_proto}, listener: {type: $service_proto}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}] }}]' \\\
+    jq --arg service_name "$name_arg" \
+       --arg service_addr "$listen_addr" \
+       --arg service_proto "$proto" \
+       --arg node0_addr "$node0_addr_str" \
+       '.services += [{name: $service_name, addr: $service_addr, handler: {type: $service_proto}, listener: {type: $service_proto}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}] }}]' \
        "$CONFIG_FILE" > "$temp_file"
   fi
   
