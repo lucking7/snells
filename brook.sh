@@ -2,7 +2,7 @@
 
 # Brook端口转发统一管理脚本
 # 支持功能: TCP转发、UDP转发、TCP+UDP转发、TCP和UDP分别转发到不同地址
-# 版本: 1.1
+# 版本: 1.2
 
 # 颜色定义
 RED='\033[0;31m'
@@ -163,9 +163,52 @@ check_and_install_dependencies() {
         exit 1
       fi
       
+      # 检查文件是否正确下载（非空）
+      if [ ! -s /tmp/brook ]; then
+        printf "${RED}${ERROR_SYMBOL} 下载的Brook文件为空，尝试备用版本...${PLAIN}\n"
+        BROOK_VERSION="20230401"
+        BROOK_URL="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_VERSION}_${BROOK_OS}_${BROOK_ARCH}"
+        printf "${CYAN}${INFO_SYMBOL} 正在下载备用版本Brook: %s${PLAIN}\n" "$BROOK_URL"
+        
+        curl -L -o /tmp/brook "$BROOK_URL"
+        if [ $? -ne 0 ] || [ ! -s /tmp/brook ]; then
+          printf "${RED}${ERROR_SYMBOL} 下载备用版本Brook失败，请手动安装。${PLAIN}\n"
+          exit 1
+        fi
+      fi
+      
       # 安装brook
       $SUDO chmod +x /tmp/brook
       $SUDO mv /tmp/brook /usr/local/bin/brook
+      
+      # 验证brook是否可执行
+      if ! $SUDO /usr/local/bin/brook --help &>/dev/null; then
+        printf "${RED}${ERROR_SYMBOL} Brook可能无法在当前系统上执行，尝试其他架构版本...${PLAIN}\n"
+        
+        # 如果是amd64，尝试386架构
+        if [ "$BROOK_ARCH" = "amd64" ]; then
+          BROOK_ARCH="386"
+          BROOK_URL="https://github.com/txthinking/brook/releases/download/v${BROOK_VERSION}/brook_${BROOK_VERSION}_${BROOK_OS}_${BROOK_ARCH}"
+          printf "${CYAN}${INFO_SYMBOL} 尝试下载386架构Brook: %s${PLAIN}\n" "$BROOK_URL"
+          
+          curl -L -o /tmp/brook "$BROOK_URL"
+          if [ $? -eq 0 ] && [ -s /tmp/brook ]; then
+            $SUDO chmod +x /tmp/brook
+            $SUDO mv /tmp/brook /usr/local/bin/brook
+            
+            if ! $SUDO /usr/local/bin/brook --help &>/dev/null; then
+              printf "${RED}${ERROR_SYMBOL} Brook依然无法在当前系统上执行，请手动安装。${PLAIN}\n"
+              exit 1
+            fi
+          else
+            printf "${RED}${ERROR_SYMBOL} 下载386架构Brook失败，请手动安装。${PLAIN}\n"
+            exit 1
+          fi
+        else
+          printf "${RED}${ERROR_SYMBOL} Brook无法在当前系统上执行，请手动安装。${PLAIN}\n"
+          exit 1
+        fi
+      fi
       
       printf "${GREEN}${SUCCESS_SYMBOL} Brook安装成功。${PLAIN}\n"
     fi
@@ -274,8 +317,9 @@ Type=simple
 ExecStart=${brook_cmd}
 Restart=always
 RestartSec=5
-User=nobody
-Group=nogroup
+# 使用root用户运行服务，避免nobody用户导致的权限问题
+User=root
+Group=root
 
 [Install]
 WantedBy=multi-user.target"
@@ -580,6 +624,28 @@ uninstall_brook() {
   printf "${GREEN}${SUCCESS_SYMBOL} Brook已完全卸载${PLAIN}\n"
 }
 
+# 显示IP信息
+show_ip_info() {
+  printf "${CYAN}${BOLD}获取IP地址信息...${PLAIN}\n"
+  
+  if ! command -v curl &>/dev/null; then
+    printf "${RED}${ERROR_SYMBOL} 未找到curl命令，无法获取IP信息${PLAIN}\n"
+    return 1
+  fi
+  
+  printf "${CYAN}${INFO_SYMBOL} IPv4地址信息:${PLAIN}\n"
+  if ! curl -s4 https://ipinfo.io/json | jq . 2>/dev/null; then
+    curl -s4 https://ipinfo.io/json | grep -E '("ip"|"country"|"city"|"region"|"org"|"loc")'
+  fi
+  
+  printf "\n${CYAN}${INFO_SYMBOL} IPv6地址信息 (如果支持):${PLAIN}\n"
+  if ! curl -s6 https://ipinfo.io/json | jq . 2>/dev/null; then
+    curl -s6 https://ipinfo.io/json | grep -E '("ip"|"country"|"city"|"region"|"org"|"loc")' || printf "${YELLOW}${WARN_SYMBOL} 没有检测到IPv6连接${PLAIN}\n"
+  fi
+  
+  printf "\n"
+}
+
 # 显示菜单
 show_menu() {
   printf "\n${PURPLE}${BOLD}========== Brook 端口转发管理 ==========${PLAIN}\n"
@@ -589,6 +655,7 @@ show_menu() {
   printf "  ${GREEN}4.${PLAIN} 重启所有服务\n"
   printf "  ${GREEN}5.${PLAIN} 查看服务日志\n"
   printf "  ${GREEN}6.${PLAIN} 卸载Brook\n"
+  printf "  ${GREEN}7.${PLAIN} 显示本机IP信息\n"
   printf "  ${GREEN}0.${PLAIN} 退出\n"
   printf "${PURPLE}${BOLD}=======================================${PLAIN}\n"
 }
@@ -651,7 +718,7 @@ main() {
   # 主循环
   while true; do
     show_menu
-    read -p "请选择操作 [0-6]: " choice
+    read -p "请选择操作 [0-7]: " choice
     
     case $choice in
       1) add_forward ;;
@@ -660,6 +727,7 @@ main() {
       4) restart_all_services ;;
       5) view_service_logs ;;
       6) uninstall_brook; break ;;
+      7) show_ip_info ;;
       0) 
         printf "${GREEN}${SUCCESS_SYMBOL} 感谢使用，再见！${PLAIN}\n"
         break 
