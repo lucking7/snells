@@ -15,3 +15,9 @@ bash <(curl -Ls https://raw.githubusercontent.com/ilychi/snells/main/gost.sh)
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/ilychi/snells/main/realm.sh)
 ```
+
+### brook
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/ilychi/snells/main/brook.sh)
+```
