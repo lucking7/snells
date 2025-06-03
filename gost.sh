@@ -246,73 +246,67 @@ ensure_config_dir() {
 }
 
 add_forward_to_config() {
-  local name=$1
+  local name_arg=$1          # For proto="tcp" or "udp", this is the final service name (e.g., ...-tcp).
+                             # For proto="tcp-udp", this is a base name (e.g., forward-local-to-target).
   local listen_addr=$2
-  local nodes_json_array_string=$3 # JSON string for the "nodes" array
-  local proto=$4
+  local node0_addr_str=$3 # Raw address string, e.g., "hkt-01.hkg.rere.ws:45036"
+  local proto=$4          # Expected to be "tcp", "udp", or "tcp-udp" (for option 3).
 
   ensure_config_dir
   local temp_file=$(mktemp)
-  
-  if [ "$proto" = "tcp-udp" ]; then
-    # For tcp-udp, we create two services, each with the same multi-target forwarder
-    # Ensure names are distinct if the base name was already specific
-    local base_name_for_pair="$name"
-    # If name already ends with -tcp or -udp (e.g. from single proto converted to tcp-udp), strip it for base.
-    if [[ "$name" == *-tcp || "$name" == *-udp ]]; then
-        base_name_for_pair="${name%-*}"
-    fi
 
-    local tcp_service_template='{
-      "name": "%s-tcp",
-      "addr": "%s",
-      "handler": { "type": "tcp" },
-      "listener": { "type": "tcp" },
-      "forwarder": { "nodes": %s }
-    }'
-    local udp_service_template='{
-      "name": "%s-udp",
-      "addr": "%s",
-      "handler": { "type": "udp" },
-      "listener": { "type": "udp" },
-      "forwarder": { "nodes": %s }
-    }'
-    local tcp_service_json
-    printf -v tcp_service_json "$tcp_service_template" "$base_name_for_pair" "$listen_addr" "$nodes_json_array_string"
-    local udp_service_json
-    printf -v udp_service_json "$udp_service_template" "$base_name_for_pair" "$listen_addr" "$nodes_json_array_string"
+  if [ "$proto" = "tcp-udp" ]; then # This case is for option 3 (Both TCP & UDP to SAME single target)
+    # name_arg is base name like "forward-localport-to-targetport"
+    local tcp_service_name="${name_arg}-tcp"
+    local udp_service_name="${name_arg}-udp"
 
-    jq ".services += [${tcp_service_json}, ${udp_service_json}]" "$CONFIG_FILE" > "$temp_file"
+    jq --arg tcp_name "$tcp_service_name" \\\
+       --arg udp_name "$udp_service_name" \\\
+       --arg common_addr "$listen_addr" \\\
+       --arg node0_addr "$node0_addr_str" \\\
+       '.services += [
+         {name: $tcp_name, addr: $common_addr, handler: {type: "tcp"}, listener: {type: "tcp"}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}] }},\
+         {name: $udp_name, addr: $common_addr, handler: {type: "udp"}, listener: {type: "udp"}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}] }}\
+       ]' "$CONFIG_FILE" > "$temp_file"
   else 
-    local service_template='{
-      "name": "%s",
-      "addr": "%s",
-      "handler": { "type": "%s" },
-      "listener": { "type": "%s" },
-      "forwarder": { "nodes": %s }
-    }'
-    local service_json
-    printf -v service_json "$service_template" "$name" "$listen_addr" "$proto" "$proto" "$nodes_json_array_string"
-    jq ".services += [${service_json}]" "$CONFIG_FILE" > "$temp_file"
+    # This path is for single protocol services (proto is "tcp" or "udp").
+    # This includes Option 1, Option 2, and each leg of Option 4 (Split TCP/UDP).
+    # name_arg is already the final, suffixed service name (e.g., "forward-...-tcp").
+    jq --arg service_name "$name_arg" \\\
+       --arg service_addr "$listen_addr" \\\
+       --arg service_proto "$proto" \\\
+       --arg node0_addr "$node0_addr_str" \\\
+       '.services += [{name: $service_name, addr: $service_addr, handler: {type: $service_proto}, listener: {type: $service_proto}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}] }}]' \\\
+       "$CONFIG_FILE" > "$temp_file"
   fi
   
-  if [ $? -eq 0 ]; then
+  local jq_exit_code=$?
+  if [ $jq_exit_code -eq 0 ]; then
+    if ! jq empty "$temp_file" >/dev/null 2>&1; then
+      printf "${RED} ${ERROR_SYMBOL}Error: jq produced an invalid JSON in temp file. Config not updated.${PLAIN}\\\n"
+      cat "$temp_file" 
+      rm -f "$temp_file"
+      return 1
+    fi
+
     if [[ "$CONFIG_FILE" == "/etc/gost/"* ]]; then
         sudo mv "$temp_file" "$CONFIG_FILE"
-        sudo chown root:root "$CONFIG_FILE" # Ensure correct ownership
-        sudo chmod 644 "$CONFIG_FILE"      # Ensure correct permissions
+        sudo chown root:root "$CONFIG_FILE"
+        sudo chmod 644 "$CONFIG_FILE"
     else
         mv "$temp_file" "$CONFIG_FILE"
-        chmod 644 "$CONFIG_FILE" # Ensure correct permissions for non-sudo
+        chmod 644 "$CONFIG_FILE"
     fi
   else
-    printf "${RED} ${ERROR_SYMBOL}Error adding service(s) to config file using jq.${PLAIN}\\n"
+    printf "${RED} ${ERROR_SYMBOL}Error (jq exit code: %s) adding service(s) to config file using jq.${PLAIN}\\\n" "$jq_exit_code"
+    if [ -s "$temp_file" ]; then 
+        printf "${YELLOW} ${WARN_SYMBOL}jq failed. Content of temporary file (may be incomplete or invalid):${PLAIN}\\\n"
+        cat "$temp_file"
+    fi
     rm -f "$temp_file"
     return 1
   fi
-  # If mv failed above, temp_file would still exist unless caught by jq error.
-  # If mv succeeded, temp_file is gone. No explicit rm needed here if logic is correct.
-  printf "${GREEN} ${SUCCESS_SYMBOL}Added forwarding to config file.${PLAIN}\\n"
+  printf "${GREEN} ${SUCCESS_SYMBOL}Added forwarding to config file.${PLAIN}\\\n"
 }
 
 apply_config() {
@@ -509,7 +503,7 @@ find_free_port() {
 }
 
 create_forward_service() {
-  printf "${CYAN}${INFO_SYMBOL}=== Create a new port forwarding ===${PLAIN}\\\n"
+  printf "${CYAN}${INFO_SYMBOL}=== Create a new port forwarding ===${PLAIN}\\\\\n"
   read -p "Local port (default: random available port): " local_port
   if [ -n "$local_port" ]; then
     if ! validate_input "$local_port" "port"; then
@@ -518,119 +512,86 @@ create_forward_service() {
     fi
   else
     local_port=$(find_free_port)
-    printf "${YELLOW} ${INFO_SYMBOL}Selected available local port: ${BOLD}%s${PLAIN}${YELLOW}\\\n" "$local_port" # Ensure PLAIN is reset
+    printf "${YELLOW} ${INFO_SYMBOL}Selected available local port: ${BOLD}%s${PLAIN}${YELLOW}\\\\\n" "$local_port"
   fi
 
-  printf "${CYAN}${INFO_SYMBOL}Select protocol:${PLAIN}\\\n"
-  printf "${GREEN}1.${PLAIN} TCP (to a single target)\\\n"
-  printf "${GREEN}2.${PLAIN} UDP (to a single target)\\\n"
-  printf "${GREEN}3.${PLAIN} Both TCP & UDP (to the SAME single target) ${YELLOW}(default)${PLAIN}\\\n"
-  printf "${GREEN}4.${PLAIN} Split: TCP to one target, UDP to a DIFFERENT target (same local port)\\\n"
+  printf "${CYAN}${INFO_SYMBOL}Select protocol:${PLAIN}\\\\\n"
+  printf "${GREEN}1.${PLAIN} TCP (to a single target)\\\\\n"
+  printf "${GREEN}2.${PLAIN} UDP (to a single target)\\\\\n"
+  printf "${GREEN}3.${PLAIN} Both TCP & UDP (to the SAME single target) ${YELLOW}(default)${PLAIN}\\\\\n"
+  printf "${GREEN}4.${PLAIN} Split: TCP to one target, UDP to a DIFFERENT target (same local port)\\\\\n"
   read -p "Select [1-4] (default: 3): " protocol_choice
 
-  local proto_selected # Can be "tcp", "udp", "tcp-udp" (for same targets), or "tcp-udp-split"
+  local what_to_do_next # Can be "tcp_leg", "udp_leg", "tcp_udp_same_target_leg", "split_tcp_first"
 
   case $protocol_choice in
-  1) proto_selected="tcp" ;;
-  2) proto_selected="udp" ;;
-  4) proto_selected="tcp-udp-split" ;;
-  *) proto_selected="tcp-udp" ;; # Default is 3, or any other input
+  1) what_to_do_next="tcp_leg" ;;\
+  2) what_to_do_next="udp_leg" ;;\
+  4) what_to_do_next="split_tcp_first" ;;\
+  *) what_to_do_next="tcp_udp_same_target_leg" ;; # Default is 3
   esac
 
-  if [ "$proto_selected" = "tcp-udp-split" ]; then
-    # --- Handle TCP-UDP Split to Different Targets (remains unchanged) ---
-    printf "\\n${CYAN}${INFO_SYMBOL}Configuring TCP forwarding leg:${PLAIN}\\\n"
+  if [ "$what_to_do_next" = "split_tcp_first" ]; then
+    printf "\\\\n${CYAN}${INFO_SYMBOL}Configuring TCP forwarding leg:${PLAIN}\\\\\n"
     local tcp_target_ip tcp_target_port
-    while true; do
-      read -p "TCP Target IP or hostname: " tcp_target_ip
-      if [ -z "$tcp_target_ip" ]; then
-        printf "${RED} ${ERROR_SYMBOL}TCP Target IP or hostname cannot be empty.${PLAIN}\\\n"
-        read -n1 -r -p "Press any key to try again..."
-        continue
-      fi
-      break
-    done
-    while true; do
-      read -p "TCP Target port: " tcp_target_port
-      if ! validate_input "$tcp_target_port" "port"; then
-        read -n1 -r -p "Press any key to try again..."
-        continue
-      fi
-      break
-    done
+    while true; do read -p "TCP Target IP or hostname: " tcp_target_ip; if [ -n "$tcp_target_ip" ]; then break; else printf "${RED} ${ERROR_SYMBOL}TCP Target IP cannot be empty.${PLAIN}\\\\\n"; fi; done
+    while true; do read -p "TCP Target port: " tcp_target_port; if validate_input "$tcp_target_port" "port"; then break; fi; done
+    if [[ $tcp_target_ip == *:* ]] && [[ $tcp_target_ip != \\\\\\[*\\\\\\] ]]; then tcp_target_ip="[$tcp_target_ip]"; fi
+    local tcp_addr_val="${tcp_target_ip}:${tcp_target_port}"
+    local tcp_service_name="forward-$local_port-to-$tcp_target_port-tcp" # Final service name
 
-    if [[ $tcp_target_ip == *:* ]] && [[ $tcp_target_ip != \\\\[*\\] ]]; then # Check for IPv6 and ensure brackets
-        tcp_target_ip="[$tcp_target_ip]"
-    fi
-    local tcp_nodes_json_array_string=\'[{\"name\":\"target-0\",\"addr\":\"\'"${tcp_target_ip}:${tcp_target_port}"\'\"}]\'
-    local tcp_service_name="forward-$local_port-to-$tcp_target_port-tcp"
-
-    printf "\\n${CYAN}${INFO_SYMBOL}Configuring UDP forwarding leg:${PLAIN}\\\n"
+    printf "\\\\n${CYAN}${INFO_SYMBOL}Configuring UDP forwarding leg:${PLAIN}\\\\\n"
     local udp_target_ip udp_target_port
-    while true; do
-      read -p "UDP Target IP or hostname: " udp_target_ip
-      if [ -z "$udp_target_ip" ]; then
-        printf "${RED} ${ERROR_SYMBOL}UDP Target IP or hostname cannot be empty.${PLAIN}\\\n"
-        read -n1 -r -p "Press any key to try again..."
-        continue
-      fi
-      break
-    done
-    while true; do
-      read -p "UDP Target port: " udp_target_port
-      if ! validate_input "$udp_target_port" "port"; then
-        read -n1 -r -p "Press any key to try again..."
-        continue
-      fi
-      break
-    done
-    if [[ $udp_target_ip == *:* ]] && [[ $udp_target_ip != \\\\[*\\] ]]; then # Check for IPv6 and ensure brackets
-      udp_target_ip="[$udp_target_ip]"
-    fi
-    local udp_nodes_json_array_string=\'[{\"name\":\"target-0\",\"addr\":\"\'"${udp_target_ip}:${udp_target_port}"\'\"}]\'
-    local udp_service_name="forward-$local_port-to-$udp_target_port-udp"
+    while true; do read -p "UDP Target IP or hostname: " udp_target_ip; if [ -n "$udp_target_ip" ]; then break; else printf "${RED} ${ERROR_SYMBOL}UDP Target IP cannot be empty.${PLAIN}\\\\\n"; fi; done
+    while true; do read -p "UDP Target port: " udp_target_port; if validate_input "$udp_target_port" "port"; then break; fi; done
+    if [[ $udp_target_ip == *:* ]] && [[ $udp_target_ip != \\\\\\[*\\\\\\] ]]; then udp_target_ip="[$udp_target_ip]"; fi
+    local udp_addr_val="${udp_target_ip}:${udp_target_port}"
+    local udp_service_name="forward-$local_port-to-$udp_target_port-udp" # Final service name
 
-    add_forward_to_config "$tcp_service_name" ":$local_port" "$tcp_nodes_json_array_string" "tcp"
+    add_forward_to_config "$tcp_service_name" ":$local_port" "$tcp_addr_val" "tcp" # Pass "tcp" as proto
     local add_tcp_rc=$?
-    add_forward_to_config "$udp_service_name" ":$local_port" "$udp_nodes_json_array_string" "udp"
+    add_forward_to_config "$udp_service_name" ":$local_port" "$udp_addr_val" "udp" # Pass "udp" as proto
     local add_udp_rc=$?
 
     if [ $add_tcp_rc -ne 0 ] || [ $add_udp_rc -ne 0 ]; then
-      printf "${RED} ${ERROR_SYMBOL}Failed to add one or both forwarding legs for split configuration.${PLAIN}\\\n"
+      printf "${RED} ${ERROR_SYMBOL}Failed to add one or both forwarding legs for split configuration.${PLAIN}\\\\\n"
     fi
-
   else
-    # --- Handle TCP, UDP, or TCP-UDP to a SINGLE Target ---
-    printf "\\n${CYAN}${INFO_SYMBOL}Enter details for the Target (for %s traffic):${PLAIN}\\\n" "$proto_selected"
+    # Handles TCP_LEG (Opt 1), UDP_LEG (Opt 2), TCP_UDP_SAME_TARGET_LEG (Opt 3)
     local target_ip target_port
+    local descriptive_proto_for_prompt
+    local proto_for_add_func # This will be "tcp", "udp", or "tcp-udp"
 
-    while true; do
-      read -p "Target IP or hostname: " target_ip
-      if [ -z "$target_ip" ]; then
-        printf "${RED} ${ERROR_SYMBOL}Target IP or hostname cannot be empty.${PLAIN}\\\n"
-        read -n1 -r -p "Press any key to try again..."
-        continue
-      fi
-      break
-    done
-
-    while true; do
-      read -p "Target port: " target_port
-      if ! validate_input "$target_port" "port"; then
-        read -n1 -r -p "Press any key to try again..."
-        continue
-      fi
-      break
-    done
-
-    if [[ $target_ip == *:* ]] && [[ $target_ip != \\\\[*\\] ]]; then # Check for IPv6 and ensure brackets
-      target_ip="[$target_ip]"
+    if [ "$what_to_do_next" = "tcp_leg" ]; then
+        descriptive_proto_for_prompt="TCP"
+        proto_for_add_func="tcp"
+    elif [ "$what_to_do_next" = "udp_leg" ]; then
+        descriptive_proto_for_prompt="UDP"
+        proto_for_add_func="udp"
+    else # tcp_udp_same_target_leg
+        descriptive_proto_for_prompt="TCP & UDP (same target)"
+        proto_for_add_func="tcp-udp" # Special proto for add_forward_to_config
     fi
     
-    local nodes_json_array_string=\'[{\"name\":\"target-0\",\"addr\":\"\'"${target_ip}:${target_port}"\'\"}]\'
-    local service_name="forward-$local_port-to-$target_port"
-        
-    add_forward_to_config "$service_name" ":$local_port" "$nodes_json_array_string" "$proto_selected"
+    printf "\\\\n${CYAN}${INFO_SYMBOL}Enter details for the Target (for %s traffic):${PLAIN}\\\\\n" "$descriptive_proto_for_prompt"
+    while true; do read -p "Target IP or hostname: " target_ip; if [ -n "$target_ip" ]; then break; else printf "${RED} ${ERROR_SYMBOL}Target IP cannot be empty.${PLAIN}\\\\\n"; fi; done
+    while true; do read -p "Target port: " target_port; if validate_input "$target_port" "port"; then break; fi; done
+    if [[ $target_ip == *:* ]] && [[ $target_ip != \\\\\\[*\\\\\\] ]]; then target_ip="[$target_ip]"; fi
+    local target_addr_val="${target_ip}:${target_port}"
+    
+    # Service name generation:
+    # For proto="tcp" or "udp" (Options 1,2), the name is final and includes -tcp or -udp.
+    # For proto="tcp-udp" (Option 3), this is a base name; add_forward_to_config appends -tcp/-udp.
+    local service_name_to_pass
+    if [ "$proto_for_add_func" = "tcp" ]; then
+        service_name_to_pass="forward-$local_port-to-$target_port-tcp"
+    elif [ "$proto_for_add_func" = "udp" ]; then
+        service_name_to_pass="forward-$local_port-to-$target_port-udp"
+    else # "tcp-udp"
+        service_name_to_pass="forward-$local_port-to-$target_port" # Base name
+    fi
+            
+    add_forward_to_config "$service_name_to_pass" ":$local_port" "$target_addr_val" "$proto_for_add_func"
   fi
   
   read -p "Apply config file now? (Y/n): " apply_now
@@ -1000,6 +961,7 @@ delete_config_forward() {
   fi
 
   local target_name=${entries[$entry_number - 1]}
+  # 使用 printf 来确保颜色代码被正确解释
   printf "Are you sure you want to delete the forwarding entry ${BOLD}%s${PLAIN}? (${GREEN}Y${PLAIN}/${RED}N${PLAIN}): " "$target_name"
   read confirm
   if [[ $confirm != [Yy]* ]]; then
