@@ -9,6 +9,7 @@ set -o pipefail # 管道中任何命令失败即视为失败
 GREEN="\033[0;32m"
 RED="\033[0;31m"
 YELLOW="\033[0;33m"
+BLUE="\033[0;34m"
 BOLD="\033[1m" 
 NC="\033[0m" # 无颜色
 
@@ -38,12 +39,50 @@ if command -v jq &> /dev/null; then
     use_jq=true
 fi
 
+# 验证端口号函数
+validate_port() {
+    local port=$1
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        return 1
+    fi
+    return 0
+}
+
+# 验证IP地址函数
+validate_ip() {
+    local ip=$1
+    # 简单的IPv4验证
+    if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        return 0
+    fi
+    # 简单的IPv6验证
+    if [[ $ip =~ : ]]; then
+        return 0
+    fi
+    # 域名验证
+    if [[ $ip =~ ^[a-zA-Z0-9.-]+$ ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# 检查端口是否被占用
+is_port_in_use() {
+    local port=$1
+    if lsof -i :"$port" > /dev/null 2>&1; then
+        return 0  # 端口被占用
+    fi
+    return 1  # 端口未被占用
+}
+
 # 部署 Realm
 deploy_realm() {
-    mkdir -p "$REALM_DIR" && cd "$REALM_DIR" || { echo -e "${RED}Failed to access $REALM_DIR directory.${NC}"; exit 1; }
+    echo -e "${YELLOW}Starting Realm deployment...${NC}"
+    mkdir -p "$REALM_DIR" && cd "$REALM_DIR" || { echo -e "${RED}Failed to access directory $REALM_DIR${NC}"; exit 1; }
     
     # 从GitHub API获取最新版本
     local api_response
+    echo -e "${YELLOW}Fetching latest version information...${NC}"
     api_response=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest)
 
     if $use_jq && command -v jq &> /dev/null; then
@@ -54,7 +93,7 @@ deploy_realm() {
     
     if [ -z "$_version" ]; then
         echo -e "${RED}Failed to get version number. Please check if you can connect to GitHub API.${NC}"
-        echo -e "${YELLOW}Falling back to a default known version v2.6.2 for download.${NC}"
+        echo -e "${YELLOW}Falling back to default version v2.6.2${NC}"
         _version="v2.6.2" # 回退版本
     else
         echo -e "${GREEN}Latest version: ${_version}${NC}"
@@ -77,20 +116,27 @@ deploy_realm() {
             download_url="https://github.com/zhboner/realm/releases/download/${_version}/realm-arm-unknown-linux-gnueabi.tar.gz"
             ;;
         *)
-            echo -e "${RED}Unsupported architecture or OS: $arch-$os_type. Attempting x86_64-linux-gnu as a default.${NC}"
+            echo -e "${YELLOW}Unsupported architecture or OS: $arch-$os_type. Attempting x86_64-linux-gnu as default.${NC}"
             download_url="https://github.com/zhboner/realm/releases/download/${_version}/realm-x86_64-unknown-linux-gnu.tar.gz"
             ;;
     esac
     
     echo -e "${YELLOW}Downloading Realm from: $download_url ${NC}"
-    wget -qO realm.tar.gz "$download_url"
-    if [ ! -f realm.tar.gz ] || [ ! -s realm.tar.gz ]; then
-        echo -e "${RED}Download realm.tar.gz failed. Please check network or URL: $download_url ${NC}"
-        # 失败时清理
+    if ! wget -qO realm.tar.gz "$download_url"; then
+        echo -e "${RED}Download failed. Please check your network connection.${NC}"
         rm -f realm.tar.gz
         cd .. && rm -rf "$REALM_DIR"
         exit 1
     fi
+    
+    if [ ! -f realm.tar.gz ] || [ ! -s realm.tar.gz ]; then
+        echo -e "${RED}Downloaded file is invalid.${NC}"
+        rm -f realm.tar.gz
+        cd .. && rm -rf "$REALM_DIR"
+        exit 1
+    fi
+    
+    echo -e "${YELLOW}Extracting files...${NC}"
     tar -xzf realm.tar.gz && chmod +x realm
     rm -f realm.tar.gz
 
@@ -98,6 +144,7 @@ deploy_realm() {
     mkdir -p "$REALM_CONFIG_DIR"
     
     # 创建服务文件
+    echo -e "${YELLOW}Creating system service...${NC}"
     cat <<EOF >/etc/systemd/system/realm.service
 [Unit]
 Description=Realm Service
@@ -120,25 +167,26 @@ EOF
     # 初始化配置文件（如果不存在）
     if [ ! -f "$CONFIG_PATH" ]; then
         cat <<EONET >"$CONFIG_PATH"
-# 全局网络设置
+# Global network settings
 [network]
-# no_tcp = true 表示全局禁用TCP，除非端点明确启用
-# use_udp = true 表示全局启用UDP，除非端点明确禁用
+# no_tcp = true means globally disable TCP unless explicitly enabled by endpoints
+# use_udp = true means globally enable UDP unless explicitly disabled by endpoints
 no_tcp = false 
 use_udp = true
 ipv6_only = false 
 EONET
-        echo -e "${GREEN}[network] configuration added to ${CONFIG_PATH}.${NC}"
+        echo -e "${GREEN}Configuration file created: ${CONFIG_PATH}${NC}"
     fi
     realm_status="Installed"
     realm_status_color="$GREEN"
-    echo -e "${GREEN}Deployment completed.${NC}"
+    echo -e "${GREEN}Deployment completed${NC}"
 }
 
 # 卸载 Realm
 uninstall_realm() {
-    systemctl stop realm &>/dev/null
-    systemctl disable realm &>/dev/null
+    echo -e "${YELLOW}Uninstalling Realm...${NC}"
+    systemctl stop realm &>/dev/null || true
+    systemctl disable realm &>/dev/null || true
     rm -f /etc/systemd/system/realm.service
     systemctl daemon-reload
     echo -e "${YELLOW}Removing Realm directories...${NC}"
@@ -149,15 +197,15 @@ uninstall_realm() {
     if [ -f "/etc/crontab" ]; then
         if [ -w "/etc/crontab" ] && command -v sed &> /dev/null; then
             sed -i '/realm/d' /etc/crontab
-            echo -e "${YELLOW}Realm cron jobs removed from /etc/crontab.${NC}"
+            echo -e "${YELLOW}Cleaned up realm cron jobs from /etc/crontab${NC}"
         else
-            echo -e "${YELLOW}Warning: /etc/crontab not writable or sed not found. Skipping crontab cleanup.${NC}"
+            echo -e "${YELLOW}Warning: Cannot write to /etc/crontab or sed command unavailable${NC}"
         fi
     fi
     
     realm_status="Not Installed"
     realm_status_color="$RED"
-    echo -e "${RED}Realm has been uninstalled.${NC}"
+    echo -e "${GREEN}Realm has been completely uninstalled${NC}"
 }
 
 # 检查 Realm 安装状态
@@ -166,11 +214,11 @@ check_realm_installation() {
     if [ -f "${REALM_DIR}/realm" ]; then
         realm_status="Installed"
         realm_status_color="$GREEN"
-        echo -e "${GREEN}Realm is already installed.${NC}"
+        echo -e "${GREEN}Realm is installed${NC}"
     else
         realm_status="Not Installed"
         realm_status_color="$RED"
-        echo -e "${RED}Realm is not installed. Installing now...${NC}"
+        echo -e "${RED}Realm is not installed. Installing automatically...${NC}"
         # 临时禁用严格模式，以防安装失败时退出脚本
         set +e
         deploy_realm
@@ -197,23 +245,23 @@ check_realm_service_status() {
     # 服务未活动，检查配置是否存在
     if [ ! -f "$CONFIG_PATH" ]; then
         echo -e "${RED}Inactive${NC}"
-        echo -e "${YELLOW}Realm configuration file (${CONFIG_PATH}) not found. Cannot start service.${NC}"
+        echo -e "${YELLOW}Configuration file (${CONFIG_PATH}) not found. Cannot start service.${NC}"
         return 1
     fi
     
     # 检查是否有任何端点配置
     if ! grep -q '^\[\[endpoints\]\]' "$CONFIG_PATH"; then
         echo -e "${RED}Inactive${NC}"
-        echo -e "${YELLOW}No forwarding rules configured in ${CONFIG_PATH}. Add rules before starting the service.${NC}"
+        echo -e "${YELLOW}No forwarding rules configured. Please add rules first.${NC}"
         return 0
     fi
 
     echo -e "${RED}Inactive${NC}"
-    echo "Attempting to fix Realm service..."
+    echo -e "${YELLOW}Attempting to fix Realm service...${NC}"
 
     # 清理配置文件中的重复行
     awk '!seen[$0]++' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
-    echo "Cleaned up duplicate lines in ${CONFIG_PATH}"
+    echo -e "${YELLOW}Cleaned up duplicate lines in configuration${NC}"
 
     # 确保 [network] 部分存在
     if ! grep -q '^\[network\]' "$CONFIG_PATH"; then
@@ -223,25 +271,25 @@ no_tcp = false
 use_udp = true
 ipv6_only = false
 EOF
-        echo "Added missing [network] section to ${CONFIG_PATH}"
+        echo -e "${YELLOW}Added missing [network] section${NC}"
     fi
 
     # 检查 realm 可执行文件
     if [ ! -x "${REALM_DIR}/realm" ]; then
-        echo -e "${RED}Error: realm executable not found or not executable at ${REALM_DIR}/realm${NC}"
+        echo -e "${RED}Error: realm executable not found or not executable${NC}"
         return 1
     fi
 
     # 尝试重启服务
-    echo "Attempting to restart Realm service..."
+    echo -e "${YELLOW}Attempting to restart Realm service...${NC}"
     systemctl restart realm
     sleep 2
 
     if systemctl is-active --quiet realm; then
-        echo -e "${GREEN}Realm service successfully restarted${NC}"
+        echo -e "${GREEN}Realm service restarted successfully${NC}"
     else
-        echo -e "${RED}Failed to restart Realm service${NC}"
-        echo "Checking logs for errors:"
+        echo -e "${RED}Realm service failed to restart${NC}"
+        echo -e "${YELLOW}Error logs:${NC}"
         journalctl -u realm.service -n 20 --no-pager
         return 1
     fi
@@ -250,6 +298,7 @@ EOF
 
 # 获取服务器信息
 fetch_server_info() {
+    echo -e "${YELLOW}Fetching server information...${NC}"
     meta_info=$(curl -s https://speed.cloudflare.com/meta)
 
     # 使用 jq 解析 (如果可用)
@@ -259,15 +308,15 @@ fetch_server_info() {
         country=$(echo "$meta_info" | jq -r '.country // "N/A"')
     else
         # 使用 grep 提取
-        asOrganization=$(echo "$meta_info" | grep -oP '(?<="asOrganization":")[^"]*' || echo "N/A")
-        colo=$(echo "$meta_info" | grep -oP '(?<="colo":")[^"]*' || echo "N/A")
-        country=$(echo "$meta_info" | grep -oP '(?<="country":")[^"]*' || echo "N/A")
+        asOrganization=$(echo "$meta_info" | grep -oP '(?<="asOrganization":")[^"]*' 2>/dev/null || echo "N/A")
+        colo=$(echo "$meta_info" | grep -oP '(?<="colo":")[^"]*' 2>/dev/null || echo "N/A")
+        country=$(echo "$meta_info" | grep -oP '(?<="country":")[^"]*' 2>/dev/null || echo "N/A")
         
         # 如果grep -P不可用，回退到普通grep+sed
         if [ "$asOrganization" = "N/A" ] && command -v grep &>/dev/null && command -v sed &>/dev/null; then
-             asOrganization=$(echo "$meta_info" | grep '"asOrganization":"' | sed 's/.*"asOrganization":"\([^"]*\)".*/\1/' || echo "N/A")
-             colo=$(echo "$meta_info" | grep '"colo":"' | sed 's/.*"colo":"\([^"]*\)".*/\1/' || echo "N/A")
-             country=$(echo "$meta_info" | grep '"country":"' | sed 's/.*"country":"\([^"]*\)".*/\1/' || echo "N/A")
+             asOrganization=$(echo "$meta_info" | grep '"asOrganization":"' | sed 's/.*"asOrganization":"\([^"]*\)".*/\1/' 2>/dev/null || echo "N/A")
+             colo=$(echo "$meta_info" | grep '"colo":"' | sed 's/.*"colo":"\([^"]*\)".*/\1/' 2>/dev/null || echo "N/A")
+             country=$(echo "$meta_info" | grep '"country":"' | sed 's/.*"country":"\([^"]*\)".*/\1/' 2>/dev/null || echo "N/A")
         fi
     fi
     
@@ -277,8 +326,8 @@ fetch_server_info() {
     [ -z "$country" ] && country="N/A"
 
     # 获取IP信息
-    ipv4=$(curl -s ipv4.ip.sb || echo "N/A")
-    ipv6=$(curl -s ipv6.ip.sb || echo "N/A")
+    ipv4=$(curl -s --max-time 5 ipv4.ip.sb 2>/dev/null || echo "N/A")
+    ipv6=$(curl -s --max-time 5 ipv6.ip.sb 2>/dev/null || echo "N/A")
 
     # 检查IPv6是否可用
     has_ipv6=false
@@ -289,7 +338,7 @@ fetch_server_info() {
     # 如果单独请求失败，尝试组合API
     if { [ "$ipv4" = "N/A" ] || ! [[ "$ipv4" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; } && \
        { [ "$ipv6" = "N/A" ] || ! [[ "$ipv6" =~ ":" ]]; }; then
-        combined_ip=$(curl -s ip.sb || echo "N/A")
+        combined_ip=$(curl -s --max-time 5 ip.sb 2>/dev/null || echo "N/A")
         if [[ $combined_ip =~ .*:.* ]]; then 
             ipv6=$combined_ip
             has_ipv6=true
@@ -304,11 +353,11 @@ fetch_server_info() {
 show_menu() {
     fetch_server_info
     clear
-    echo -e "${BOLD}=== Realm Relay Management ===${NC}"
+    echo -e "${BOLD}=== Realm Proxy Management Script ===${NC}"
     echo "1. Install/Reinstall Realm"
-    echo "2. Add Realm Forward"
-    echo "3. View Realm Forwards"
-    echo "4. Delete Realm Forward"
+    echo "2. Add Forwarding Rules"
+    echo "3. View All Forwarding Rules"
+    echo "4. Delete Forwarding Rules"
     echo "5. Manage Realm Service"
     echo "6. Uninstall Realm"
     echo "7. Exit"
@@ -335,7 +384,7 @@ find_available_port() {
 
     for ((i=1; i<=max_attempts; i++)); do
         local port=$((RANDOM % range + start_port))
-        if ! lsof -i :"$port" > /dev/null 2>&1; then
+        if ! is_port_in_use "$port"; then
             echo "$port"
             return 0
         fi
@@ -354,23 +403,71 @@ manage_realm_service() {
         echo "2. Stop Realm Service"
         echo "3. Restart Realm Service"
         echo "4. View Realm Service Status"
-        echo "5. Return to Main Menu"
+        echo "5. View Realm Service Logs"
+        echo "6. Return to Main Menu"
         read -rp "Select an option: " service_choice
         case $service_choice in
-            1) systemctl start realm; echo "Realm service started." ;;
-            2) systemctl stop realm; echo "Realm service stopped." ;;
-            3) systemctl restart realm; echo "Realm service restarted." ;;
-            4) systemctl status realm ;;
-            5) return ;;
+            1) 
+                echo -e "${YELLOW}Starting Realm service...${NC}"
+                if systemctl start realm; then
+                    echo -e "${GREEN}Realm service started${NC}"
+                else
+                    echo -e "${RED}Failed to start Realm service${NC}"
+                fi
+                ;;
+            2) 
+                echo -e "${YELLOW}Stopping Realm service...${NC}"
+                if systemctl stop realm; then
+                    echo -e "${GREEN}Realm service stopped${NC}"
+                else
+                    echo -e "${RED}Failed to stop Realm service${NC}"
+                fi
+                ;;
+            3) 
+                echo -e "${YELLOW}Restarting Realm service...${NC}"
+                if systemctl restart realm; then
+                    echo -e "${GREEN}Realm service restarted${NC}"
+                else
+                    echo -e "${RED}Failed to restart Realm service${NC}"
+                fi
+                ;;
+            4) 
+                echo -e "${YELLOW}Realm service status:${NC}"
+                systemctl status realm --no-pager
+                ;;
+            5)
+                echo -e "${YELLOW}Realm service logs (last 20 lines):${NC}"
+                journalctl -u realm.service -n 20 --no-pager
+                ;;
+            6) return ;;
             *) echo -e "${RED}Invalid option${NC}" ;;
         esac
         read -n1 -r -p "Press any key to continue..."
     done
 }
 
-# 添加转发规则
-add_forward() {
-    echo -e "${BOLD}Add New Forwarding Rule${NC}"
+# 转发规则管理菜单
+forwarding_rules_menu() {
+    while true; do
+        clear
+        echo -e "${BOLD}Forwarding Rules Management${NC}"
+        echo "1. Add Standard Forwarding Rule"
+        echo "2. Add TCP/UDP Split Forwarding Rule"
+        echo "3. Return to Main Menu"
+        read -rp "Select an option: " forward_choice
+        case $forward_choice in
+            1) add_standard_forward ;;
+            2) add_split_forward ;;
+            3) return ;;
+            *) echo -e "${RED}Invalid option${NC}" ;;
+        esac
+        read -n1 -r -p "Press any key to continue..."
+    done
+}
+
+# 添加标准转发规则
+add_standard_forward() {
+    echo -e "${BOLD}Add Standard Forwarding Rule${NC}"
 
     # 检查Realm是否已安装
     if [ ! -f "${REALM_DIR}/realm" ]; then
@@ -381,69 +478,84 @@ add_forward() {
     fetch_server_info
 
     # 选择IP版本
-    local listen_ipv6_only_for_endpoint=false
+    local listen_addr="0.0.0.0"
     if [ "$has_ipv6" = true ]; then
-        echo "Choose IP version for this listening endpoint:"
+        echo "Choose IP version for listening:"
         echo "1. IPv4 (0.0.0.0)"
         echo "2. IPv6 ([::])"
-        echo "3. Both IPv4 and IPv6 (Not directly supported by realm listen)"
-        echo "   If you need separate IPv4 and IPv6 listeners, create two rules."
-        read -rp "Choice for listening [1 for IPv4, 2 for IPv6]: " ip_version_choice
+        read -rp "Please select [1]: " ip_version_choice
+        ip_version_choice=${ip_version_choice:-1}
         
         case $ip_version_choice in
             1) listen_addr="0.0.0.0";;
-            2) listen_addr="[::]"; listen_ipv6_only_for_endpoint=true;; 
-            *) echo "Invalid choice. Defaulting to IPv4 (0.0.0.0)."; listen_addr="0.0.0.0";;
+            2) listen_addr="[::]";; 
+            *) echo -e "${YELLOW}Invalid choice. Using default IPv4 (0.0.0.0)${NC}"; listen_addr="0.0.0.0";;
         esac
     else
-        echo "IPv6 is not available on this server. Using IPv4 (0.0.0.0)."
+        echo -e "${YELLOW}IPv6 is not available. Using IPv4 (0.0.0.0)${NC}"
         listen_addr="0.0.0.0"
     fi
 
     # 选择传输协议
-    echo "Choose Transport Protocol:"
-    echo "1. TCP"
-    echo "2. UDP"
-    echo "3. Both TCP and UDP (Default)"
-    read -rp "Choice [3]: " transport_choice
+    echo "Choose transport protocol:"
+    echo "1. TCP only"
+    echo "2. UDP only"
+    echo "3. Both TCP and UDP (default)"
+    read -rp "Please select [3]: " transport_choice
     transport_choice=${transport_choice:-3}
     case $transport_choice in
         1) use_tcp=true; use_udp=false ;;
         2) use_tcp=false; use_udp=true ;;
         3) use_tcp=true; use_udp=true ;;
-        *) echo "Invalid choice. Defaulting to Both."; use_tcp=true; use_udp=true ;;
+        *) echo -e "${YELLOW}Invalid choice. Using default TCP and UDP${NC}"; use_tcp=true; use_udp=true ;;
     esac
 
     # 获取转发详情
-    read -rp "Enter local listening port (leave blank for auto-selection): " local_port
-    if [ -z "$local_port" ]; then
-        local_port=$(find_available_port)
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}Failed to find an available port. Please specify one manually.${NC}"
-            return 1
+    while true; do
+        read -rp "Enter local listening port (leave blank for auto-selection): " local_port
+        if [ -z "$local_port" ]; then
+            local_port=$(find_available_port)
+            if [ $? -ne 0 ]; then
+                echo -e "${RED}Unable to find an available port. Please specify manually.${NC}"
+                continue
+            fi
+            echo -e "${GREEN}Automatically selected available port: $local_port${NC}"
+            break
+        elif validate_port "$local_port"; then
+            if is_port_in_use "$local_port"; then
+                echo -e "${YELLOW}Warning: Port $local_port may already be in use${NC}"
+                read -rp "Continue with this port? (y/N): " confirm
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                    break
+                fi
+            else
+                break
+            fi
+        else
+            echo -e "${RED}Invalid port number. Please enter a number between 1-65535${NC}"
         fi
-        echo -e "${GREEN}Automatically selected available port: $local_port${NC}"
-    fi
-    read -rp "Enter remote IP: " ip
-    read -rp "Enter remote port: " port
-    read -rp "Enter remark: " remark
+    done
 
-    # 验证输入
-    if ! [[ "$local_port" =~ ^[0-9]+$ ]] || [ "$local_port" -lt 1 ] || [ "$local_port" -gt 65535 ]; then
-        echo -e "${RED}Invalid local port number.${NC}"
-        return 1
-    fi
-    
-    # 检查远程IP是否为空
-    if [[ -z "$ip" ]]; then
-        echo -e "${RED}Remote IP cannot be empty.${NC}"
-        return 1
-    fi
+    while true; do
+        read -rp "Enter remote IP address: " remote_ip
+        if [ -n "$remote_ip" ] && validate_ip "$remote_ip"; then
+            break
+        else
+            echo -e "${RED}Invalid IP address or domain name${NC}"
+        fi
+    done
 
-    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-        echo -e "${RED}Invalid remote port number.${NC}"
-        return 1
-    fi
+    while true; do
+        read -rp "Enter remote port: " remote_port
+        if validate_port "$remote_port"; then
+            break
+        else
+            echo -e "${RED}Invalid port number. Please enter a number between 1-65535${NC}"
+        fi
+    done
+
+    read -rp "Enter remark (optional): " remark
+    remark=${remark:-"Standard forwarding rule"}
 
     # 检查并创建 [network] 部分（如果不存在）
     if ! grep -q '^\[network\]' "$CONFIG_PATH"; then
@@ -453,7 +565,7 @@ no_tcp = false
 use_udp = true
 ipv6_only = false 
 EOF
-        echo -e "${YELLOW}Warning: [network] section was missing and has been added to ${CONFIG_PATH}.${NC}"
+        echo -e "${YELLOW}Added missing [network] section${NC}"
     fi
 
     # 添加新的端点配置
@@ -462,7 +574,7 @@ EOF
 [[endpoints]]
 # Remark: $remark
 listen = "${listen_addr}:$local_port"
-remote = "$ip:$port"
+remote = "$remote_ip:$remote_port"
 use_tcp = $use_tcp 
 use_udp = $use_udp
 EOF
@@ -472,8 +584,162 @@ EOF
 
     # 启用并重启服务
     systemctl enable realm
-    systemctl restart realm
-    echo -e "${GREEN}Forwarding rule added and Realm service restarted.${NC}"
+    if systemctl restart realm; then
+        echo -e "${GREEN}Forwarding rule added and Realm service restarted${NC}"
+        echo -e "${BLUE}Forwarding: ${listen_addr}:${local_port} -> ${remote_ip}:${remote_port}${NC}"
+    else
+        echo -e "${RED}Forwarding rule added but Realm service failed to restart${NC}"
+        echo -e "${YELLOW}Please check configuration or service logs${NC}"
+    fi
+}
+
+# 添加TCP/UDP分离转发规则
+add_split_forward() {
+    echo -e "${BOLD}Add TCP/UDP Split Forwarding Rule${NC}"
+    echo -e "${YELLOW}This feature allows TCP and UDP traffic on the same port to be forwarded to different targets${NC}"
+
+    # 检查Realm是否已安装
+    if [ ! -f "${REALM_DIR}/realm" ]; then
+        echo -e "${RED}Realm is not installed. Please install Realm first (option 1).${NC}"
+        return 1
+    fi
+
+    fetch_server_info
+
+    # 选择IP版本
+    local listen_addr="0.0.0.0"
+    if [ "$has_ipv6" = true ]; then
+        echo "Choose IP version for listening:"
+        echo "1. IPv4 (0.0.0.0)"
+        echo "2. IPv6 ([::])"
+        read -rp "Please select [1]: " ip_version_choice
+        ip_version_choice=${ip_version_choice:-1}
+        
+        case $ip_version_choice in
+            1) listen_addr="0.0.0.0";;
+            2) listen_addr="[::]";; 
+            *) echo -e "${YELLOW}Invalid choice. Using default IPv4 (0.0.0.0)${NC}"; listen_addr="0.0.0.0";;
+        esac
+    else
+        echo -e "${YELLOW}IPv6 is not available. Using IPv4 (0.0.0.0)${NC}"
+        listen_addr="0.0.0.0"
+    fi
+
+    # 获取本地监听端口
+    while true; do
+        read -rp "Enter local listening port (leave blank for auto-selection): " local_port
+        if [ -z "$local_port" ]; then
+            local_port=$(find_available_port)
+            if [ $? -ne 0 ]; then
+                echo -e "${RED}Unable to find an available port. Please specify manually.${NC}"
+                continue
+            fi
+            echo -e "${GREEN}Automatically selected available port: $local_port${NC}"
+            break
+        elif validate_port "$local_port"; then
+            if is_port_in_use "$local_port"; then
+                echo -e "${YELLOW}Warning: Port $local_port may already be in use${NC}"
+                read -rp "Continue with this port? (y/N): " confirm
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                    break
+                fi
+            else
+                break
+            fi
+        else
+            echo -e "${RED}Invalid port number. Please enter a number between 1-65535${NC}"
+        fi
+    done
+
+    # 获取TCP转发目标
+    echo -e "${BLUE}Configure TCP forwarding target:${NC}"
+    while true; do
+        read -rp "Enter TCP target IP address: " tcp_ip
+        if [ -n "$tcp_ip" ] && validate_ip "$tcp_ip"; then
+            break
+        else
+            echo -e "${RED}Invalid IP address or domain name${NC}"
+        fi
+    done
+
+    while true; do
+        read -rp "Enter TCP target port: " tcp_port
+        if validate_port "$tcp_port"; then
+            break
+        else
+            echo -e "${RED}Invalid port number. Please enter a number between 1-65535${NC}"
+        fi
+    done
+
+    # 获取UDP转发目标
+    echo -e "${BLUE}Configure UDP forwarding target:${NC}"
+    while true; do
+        read -rp "Enter UDP target IP address: " udp_ip
+        if [ -n "$udp_ip" ] && validate_ip "$udp_ip"; then
+            break
+        else
+            echo -e "${RED}Invalid IP address or domain name${NC}"
+        fi
+    done
+
+    while true; do
+        read -rp "Enter UDP target port: " udp_port
+        if validate_port "$udp_port"; then
+            break
+        else
+            echo -e "${RED}Invalid port number. Please enter a number between 1-65535${NC}"
+        fi
+    done
+
+    read -rp "Enter remark (optional): " remark
+    remark=${remark:-"TCP/UDP split forwarding"}
+
+    # 检查并创建 [network] 部分（如果不存在）
+    if ! grep -q '^\[network\]' "$CONFIG_PATH"; then
+        cat <<EOF >> "$CONFIG_PATH"
+[network]
+no_tcp = false 
+use_udp = true
+ipv6_only = false 
+EOF
+        echo -e "${YELLOW}Added missing [network] section${NC}"
+    fi
+
+    # 添加TCP转发规则
+    cat <<EOF >> "$CONFIG_PATH"
+
+[[endpoints]]
+# Remark: $remark - TCP
+listen = "${listen_addr}:$local_port"
+remote = "$tcp_ip:$tcp_port"
+use_tcp = true
+use_udp = false
+EOF
+
+    # 添加UDP转发规则
+    cat <<EOF >> "$CONFIG_PATH"
+
+[[endpoints]]
+# Remark: $remark - UDP
+listen = "${listen_addr}:$local_port"
+remote = "$udp_ip:$udp_port"
+use_tcp = false
+use_udp = true
+EOF
+
+    realm_status="Installed"
+    realm_status_color="$GREEN"
+
+    # 启用并重启服务
+    systemctl enable realm
+    if systemctl restart realm; then
+        echo -e "${GREEN}TCP/UDP split forwarding rules added and Realm service restarted${NC}"
+        echo -e "${BLUE}TCP forwarding: ${listen_addr}:${local_port} -> ${tcp_ip}:${tcp_port}${NC}"
+        echo -e "${BLUE}UDP forwarding: ${listen_addr}:${local_port} -> ${udp_ip}:${udp_port}${NC}"
+    else
+        echo -e "${RED}Forwarding rules added but Realm service failed to restart${NC}"
+        echo -e "${YELLOW}Please check configuration or service logs${NC}"
+    fi
 }
 
 # 显示所有转发规则
@@ -486,49 +752,89 @@ show_all_conf() {
     
     # 使用awk解析配置文件中的端点
     awk '
-    BEGIN { endpoint_idx = 0; in_endpoint = 0; }
-    /^# Remark: / { if (in_endpoint) remark = substr($0, index($0, ":") + 2); }
-    /listen = "/ { if (in_endpoint) listen = substr($0, index($0, "=") + 2); }
-    /remote = "/ { if (in_endpoint) remote = substr($0, index($0, "=") + 2); }
-    /use_tcp =/ { if (in_endpoint) use_tcp = substr($0, index($0, "=") + 2); }
-    /use_udp =/ { 
+    BEGIN { 
+        endpoint_idx = 0; 
+        in_endpoint = 0; 
+        remark="None"; 
+        listen="N/A"; 
+        remote="N/A"; 
+        use_tcp="N/A"; 
+        use_udp="N/A"; 
+    }
+    /^# Remark: / { 
+        if (in_endpoint) {
+            remark = substr($0, index($0, ":") + 2); 
+            gsub(/^[ \t]+|[ \t]+$/, "", remark);
+        }
+    }
+    /^listen = / { 
+        if (in_endpoint) {
+            listen = substr($0, index($0, "=") + 2); 
+            gsub(/^[ \t"]+|[ \t"]+$/, "", listen);
+        }
+    }
+    /^remote = / { 
+        if (in_endpoint) {
+            remote = substr($0, index($0, "=") + 2); 
+            gsub(/^[ \t"]+|[ \t"]+$/, "", remote);
+        }
+    }
+    /^use_tcp =/ { 
+        if (in_endpoint) {
+            use_tcp = substr($0, index($0, "=") + 2); 
+            gsub(/^[ \t]+|[ \t]+$/, "", use_tcp);
+        }
+    }
+    /^use_udp =/ { 
         if (in_endpoint) {
             use_udp = substr($0, index($0, "=") + 2);
+            gsub(/^[ \t]+|[ \t]+$/, "", use_udp);
             endpoint_idx++;
             printf "%d. Remark: %s\n", endpoint_idx, remark;
-            printf "   Listen: %s, Remote: %s\n", listen, remote;
-            printf "   TCP: %s, UDP: %s\n", use_tcp, use_udp;
+            printf "   Listen: %s -> Remote: %s\n", listen, remote;
+            printf "   TCP: %s, UDP: %s\n\n", use_tcp, use_udp;
             # 重置变量
             remark="None"; listen="N/A"; remote="N/A"; use_tcp="N/A"; use_udp="N/A";
         }
     }
-    /^\[\[endpoints\]\]/ { in_endpoint = 1; remark="None"; listen="N/A"; remote="N/A"; use_tcp="N/A"; use_udp="N/A"; }
-    END { if (endpoint_idx == 0) print "No forwarding rules found."; }
+    /^\[\[endpoints\]\]/ { 
+        in_endpoint = 1; 
+        remark="None"; 
+        listen="N/A"; 
+        remote="N/A"; 
+        use_tcp="N/A"; 
+        use_udp="N/A"; 
+    }
+    /^\[/ && !/^\[\[endpoints\]\]/ {
+        in_endpoint = 0;
+    }
+    END { 
+        if (endpoint_idx == 0) 
+            print "No forwarding rules found."; 
+    }
     ' "$CONFIG_PATH"
 }
 
 # 删除转发规则
 delete_forward() {
-    echo -e "${BOLD}Delete Forwarding Rule${NC}"
+    echo -e "${BOLD}Delete Forwarding Rules${NC}"
     if [ ! -f "$CONFIG_PATH" ]; then
         echo -e "${RED}Configuration file ${CONFIG_PATH} not found.${NC}"
         return
     fi
 
-    # 使用awk解析配置文件并显示规则供用户选择
-    # rule_details 数组存储每个规则的起始行号、结束行号和描述
+    # 首先显示所有规则
+    show_all_conf
+
+    # 使用更可靠的方法解析和删除规则
     declare -a rule_details_list=()
     local rule_idx=0
     local current_block_start_line=0
     local line_num=0
     local in_block=0
-    local remark listen remote
+    local remark_val listen_val remote_val
 
-    # 读取整个文件内容进行处理，以正确识别多行块
-    # 先用awk提取每个endpoint块，然后逐个处理
-    # 这种方法比逐行sed更健壮
-
-    # 将整个文件读入一个变量，然后用awk处理
+    # 读取整个文件内容进行处理
     mapfile -t config_lines < "$CONFIG_PATH"
     local total_lines=${#config_lines[@]}
 
@@ -554,12 +860,12 @@ delete_forward() {
             remote_val="N/A"
         elif [ "$in_block" -eq 1 ]; then
             # 在块内部查找remark, listen, remote
-            if [[ "$current_line_content" =~ ^#\s*Remark:\s*(.*) ]]; then
-                remark_val="${BASH_REMATCH[1]}"
-            elif [[ "$current_line_content" =~ ^listen\s*=\s*\"(.*)\" ]]; then
-                listen_val="${BASH_REMATCH[1]}"
-            elif [[ "$current_line_content" =~ ^remote\s*=\s*\"(.*)\" ]]; then
-                remote_val="${BASH_REMATCH[1]}"
+            if [[ "$current_line_content" =~ ^#.*Remark:.*(.*)$ ]]; then
+                remark_val=$(echo "$current_line_content" | sed 's/^#.*Remark: *//')
+            elif [[ "$current_line_content" =~ ^listen.*=.*\"(.*)\" ]]; then
+                listen_val=$(echo "$current_line_content" | sed 's/^listen.*= *"\([^"]*\)".*/\1/')
+            elif [[ "$current_line_content" =~ ^remote.*=.*\"(.*)\" ]]; then
+                remote_val=$(echo "$current_line_content" | sed 's/^remote.*= *"\([^"]*\)".*/\1/')
             elif [[ "$current_line_content" =~ ^\[[a-zA-Z_]+\]$ ]] && [ "$current_block_start_line" -ne 0 ]; then
                  # 新的非endpoint节开始，表示当前endpoints块结束
                 rule_details_list+=("${current_block_start_line}|${i}|${remark_val}|${listen_val}|${remote_val}")
@@ -575,64 +881,52 @@ delete_forward() {
     fi
 
     if [ ${#rule_details_list[@]} -eq 0 ]; then
-        echo "No forwarding rules found to delete."
+        echo -e "${YELLOW}No forwarding rules found to delete.${NC}"
         return
     fi
 
-    echo "Available forwarding rules:"
+    echo -e "${YELLOW}Available forwarding rules to delete:${NC}"
     for i in "${!rule_details_list[@]}"; do
         IFS='|' read -r start_line end_line r l rem <<< "${rule_details_list[$i]}"
-        printf "%d. Remark: %s (Listen: %s, Remote: %s)\n" "$((i + 1))" "$r" "$l" "$rem"
+        printf "%d. Remark: %s (Listen: %s -> Remote: %s)\n" "$((i + 1))" "$r" "$l" "$rem"
     done
 
     read -rp "Enter the number of the rule to delete (or press Enter to cancel): " choice
 
     if [ -z "$choice" ]; then
-        echo "Deletion cancelled."
+        echo -e "${YELLOW}Deletion cancelled.${NC}"
         return
     fi
 
     if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#rule_details_list[@]} ]; then
-        echo "Invalid choice."
+        echo -e "${RED}Invalid choice.${NC}"
         return
     fi
 
-    IFS='|' read -r chosen_start_line chosen_end_line _ _ _ <<< "${rule_details_list[$((choice - 1))]}"
+    IFS='|' read -r chosen_start_line chosen_end_line chosen_remark _ _ <<< "${rule_details_list[$((choice - 1))]}"
 
     # 创建备份
-    cp "$CONFIG_PATH" "${CONFIG_PATH}.bak"
-    echo "Original config backed up to ${CONFIG_PATH}.bak"
+    cp "$CONFIG_PATH" "${CONFIG_PATH}.bak.$(date +%Y%m%d_%H%M%S)"
+    echo -e "${YELLOW}Configuration file backed up.${NC}"
 
     # 使用sed删除选定的规则块
     sed -i "${chosen_start_line},${chosen_end_line}d" "$CONFIG_PATH"
     
-    # 清理配置文件中可能的多余空行（可选，但保持整洁）
-    # 这个awk命令会移除所有完全是空行的行
-    awk 'NF > 0 || /^$/ { if (NF > 0) prev_nf=1; else if (prev_nf == 1) { print; prev_nf=0; } else prev_nf=0; } NF>0 {print}' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp_clean" && mv "${CONFIG_PATH}.tmp_clean" "$CONFIG_PATH"
-    # 更简单的清理：移除所有连续的空行，只保留最多一个空行
-    # awk '{ if (NF > 0) { print } else if (prev_blank == 0) { print; prev_blank=1 } } NF>0 {prev_blank=0}' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp_clean" && mv "${CONFIG_PATH}.tmp_clean" "$CONFIG_PATH"
-    # 最简单的清理：删除所有空行（如果这是期望的）
-    # awk 'NF' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp_clean" && mv "${CONFIG_PATH}.tmp_clean" "$CONFIG_PATH"
-    # 鉴于TOML的结构，保留一些空行可能更好，我们用sed删除规则后，后续的cat EOF追加新规则时会自行处理空行。
-    # 暂时只执行规则删除，避免过度处理空行。
-
-    echo "Forwarding rule $choice deleted."
+    echo -e "${GREEN}Forwarding rule '$chosen_remark' deleted.${NC}"
 
     # 规则删除后管理服务
     if ! grep -q '^\[\[endpoints\]\]' "$CONFIG_PATH"; then
-        systemctl stop realm &>/dev/null
-        systemctl disable realm &>/dev/null
-        realm_status="Installed (No Forwards)"
+        systemctl stop realm &>/dev/null || true
+        systemctl disable realm &>/dev/null || true
+        realm_status="Installed (No Rules)"
         realm_status_color="$YELLOW"
-        echo -e "${YELLOW}No forwarding rules left. Realm service has been stopped and disabled.${NC}"
+        echo -e "${YELLOW}No forwarding rules left. Realm service stopped and disabled.${NC}"
     else
-        echo "Restarting Realm service due to configuration change..."
-        systemctl restart realm
-        sleep 1
-        if systemctl is-active --quiet realm; then
+        echo -e "${YELLOW}Restarting Realm service...${NC}"
+        if systemctl restart realm; then
             echo -e "${GREEN}Realm service restarted successfully.${NC}"
         else
-            echo -e "${RED}Realm service failed to restart after rule deletion. Check logs.${NC}"
+            echo -e "${RED}Realm service failed to restart. Please check logs.${NC}"
             journalctl -u realm.service -n 10 --no-pager
         fi
     fi
@@ -662,13 +956,14 @@ while true; do
                 realm_status_color="$RED"
             fi
             ;;
-        2) add_forward ;;
+        2) forwarding_rules_menu ;;
         3) show_all_conf ;;
         4) delete_forward ;;
         5) manage_realm_service ;;
         6) uninstall_realm ;;
-        7) echo "Exiting script."; exit 0 ;;
+        7) echo -e "${GREEN}Exiting script.${NC}"; exit 0 ;;
         *) echo -e "${RED}Invalid option: $choice${NC}" ;;
     esac
     read -n1 -r -p "Press any key to continue..."
 done
+
