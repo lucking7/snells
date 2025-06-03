@@ -392,17 +392,21 @@ add_forward() {
   case $forward_type in
     1) # 仅TCP
       while true; do
-        read -p "请输入目标地址 (IP:端口): " remote_addr
-        if [[ "$remote_addr" =~ ^[^:]+:[0-9]+$ ]]; then
-          remote_ip=$(echo "$remote_addr" | cut -d: -f1)
-          remote_port=$(echo "$remote_addr" | cut -d: -f2)
-          if (validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname") && validate_input "$remote_port" "port"; then
-            break
-          fi
-        else
-          printf "${RED}${ERROR_SYMBOL} 格式错误，请使用 IP:端口 格式${PLAIN}\n"
+        read -p "请输入目标IP地址或域名: " remote_ip
+        if validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname"; then
+          break
         fi
       done
+      
+      while true; do
+        read -p "请输入目标端口 [1-65535]: " remote_port
+        if validate_input "$remote_port" "port"; then
+          break
+        fi
+      done
+      
+      remote_addr="${remote_ip}:${remote_port}"
+      printf "${CYAN}${INFO_SYMBOL} 目标地址: ${remote_addr}${PLAIN}\n"
       
       service_name=$(generate_service_name "$local_port" "tcp")
       create_systemd_service "$service_name" "$local_port" "$remote_addr" "tcp"
@@ -411,17 +415,21 @@ add_forward() {
       
     2) # 仅UDP
       while true; do
-        read -p "请输入目标地址 (IP:端口): " remote_addr
-        if [[ "$remote_addr" =~ ^[^:]+:[0-9]+$ ]]; then
-          remote_ip=$(echo "$remote_addr" | cut -d: -f1)
-          remote_port=$(echo "$remote_addr" | cut -d: -f2)
-          if (validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname") && validate_input "$remote_port" "port"; then
-            break
-          fi
-        else
-          printf "${RED}${ERROR_SYMBOL} 格式错误，请使用 IP:端口 格式${PLAIN}\n"
+        read -p "请输入目标IP地址或域名: " remote_ip
+        if validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname"; then
+          break
         fi
       done
+      
+      while true; do
+        read -p "请输入目标端口 [1-65535]: " remote_port
+        if validate_input "$remote_port" "port"; then
+          break
+        fi
+      done
+      
+      remote_addr="${remote_ip}:${remote_port}"
+      printf "${CYAN}${INFO_SYMBOL} 目标地址: ${remote_addr}${PLAIN}\n"
       
       service_name=$(generate_service_name "$local_port" "udp")
       create_systemd_service "$service_name" "$local_port" "$remote_addr" "udp"
@@ -430,17 +438,21 @@ add_forward() {
       
     3) # TCP+UDP到相同地址
       while true; do
-        read -p "请输入目标地址 (IP:端口): " remote_addr
-        if [[ "$remote_addr" =~ ^[^:]+:[0-9]+$ ]]; then
-          remote_ip=$(echo "$remote_addr" | cut -d: -f1)
-          remote_port=$(echo "$remote_addr" | cut -d: -f2)
-          if (validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname") && validate_input "$remote_port" "port"; then
-            break
-          fi
-        else
-          printf "${RED}${ERROR_SYMBOL} 格式错误，请使用 IP:端口 格式${PLAIN}\n"
+        read -p "请输入目标IP地址或域名: " remote_ip
+        if validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname"; then
+          break
         fi
       done
+      
+      while true; do
+        read -p "请输入目标端口 [1-65535]: " remote_port
+        if validate_input "$remote_port" "port"; then
+          break
+        fi
+      done
+      
+      remote_addr="${remote_ip}:${remote_port}"
+      printf "${CYAN}${INFO_SYMBOL} 目标地址: ${remote_addr}${PLAIN}\n"
       
       service_name=$(generate_service_name "$local_port" "both")
       create_systemd_service "$service_name" "$local_port" "$remote_addr" "both"
@@ -449,32 +461,42 @@ add_forward() {
       
     4) # TCP和UDP分别转发
       # TCP目标地址
+      printf "${CYAN}${BOLD}TCP转发设置:${PLAIN}\n"
       while true; do
-        read -p "请输入TCP目标地址 (IP:端口): " tcp_remote_addr
-        if [[ "$tcp_remote_addr" =~ ^[^:]+:[0-9]+$ ]]; then
-          tcp_remote_ip=$(echo "$tcp_remote_addr" | cut -d: -f1)
-          tcp_remote_port=$(echo "$tcp_remote_addr" | cut -d: -f2)
-          if (validate_input "$tcp_remote_ip" "ip" || validate_input "$tcp_remote_ip" "hostname") && validate_input "$tcp_remote_port" "port"; then
-            break
-          fi
-        else
-          printf "${RED}${ERROR_SYMBOL} 格式错误，请使用 IP:端口 格式${PLAIN}\n"
+        read -p "请输入TCP目标IP地址或域名: " tcp_remote_ip
+        if validate_input "$tcp_remote_ip" "ip" || validate_input "$tcp_remote_ip" "hostname"; then
+          break
         fi
       done
       
-      # UDP目标地址
       while true; do
-        read -p "请输入UDP目标地址 (IP:端口): " udp_remote_addr
-        if [[ "$udp_remote_addr" =~ ^[^:]+:[0-9]+$ ]]; then
-          udp_remote_ip=$(echo "$udp_remote_addr" | cut -d: -f1)
-          udp_remote_port=$(echo "$udp_remote_addr" | cut -d: -f2)
-          if (validate_input "$udp_remote_ip" "ip" || validate_input "$udp_remote_ip" "hostname") && validate_input "$udp_remote_port" "port"; then
-            break
-          fi
-        else
-          printf "${RED}${ERROR_SYMBOL} 格式错误，请使用 IP:端口 格式${PLAIN}\n"
+        read -p "请输入TCP目标端口 [1-65535]: " tcp_remote_port
+        if validate_input "$tcp_remote_port" "port"; then
+          break
         fi
       done
+      
+      tcp_remote_addr="${tcp_remote_ip}:${tcp_remote_port}"
+      printf "${CYAN}${INFO_SYMBOL} TCP目标地址: ${tcp_remote_addr}${PLAIN}\n"
+      
+      # UDP目标地址
+      printf "\n${CYAN}${BOLD}UDP转发设置:${PLAIN}\n"
+      while true; do
+        read -p "请输入UDP目标IP地址或域名: " udp_remote_ip
+        if validate_input "$udp_remote_ip" "ip" || validate_input "$udp_remote_ip" "hostname"; then
+          break
+        fi
+      done
+      
+      while true; do
+        read -p "请输入UDP目标端口 [1-65535]: " udp_remote_port
+        if validate_input "$udp_remote_port" "port"; then
+          break
+        fi
+      done
+      
+      udp_remote_addr="${udp_remote_ip}:${udp_remote_port}"
+      printf "${CYAN}${INFO_SYMBOL} UDP目标地址: ${udp_remote_addr}${PLAIN}\n"
       
       # 创建TCP服务
       tcp_service_name=$(generate_service_name "$local_port" "tcp")
