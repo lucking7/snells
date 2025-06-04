@@ -452,9 +452,10 @@ add_forward_rule_interactive() {
     echo -e "${PRIMARY}选择协议类型:${NC}"
     echo -e "${PRIMARY}1${NC} TCP"
     echo -e "${PRIMARY}2${NC} UDP"
-    echo -e "${PRIMARY}3${NC} TCP + UDP"
-    echo -ne "${PRIMARY}请选择 [1-3]: ${NC}"
+    echo -e "${PRIMARY}3${NC} TCP + UDP (推荐)"
+    echo -ne "${PRIMARY}请选择 [1-3] (默认: 3): ${NC}"
     read -r proto_choice
+    [[ -z "$proto_choice" ]] && proto_choice="3"
     
     local protocol=""
     case "$proto_choice" in
@@ -471,34 +472,22 @@ add_forward_rule_interactive() {
     
     # 外部端口
     echo -e "${PRIMARY}外部端口设置:${NC}"
-    echo -e "${PRIMARY}1${NC} 指定端口号"
-    echo -e "${PRIMARY}2${NC} 随机端口 (1024-65535)"
-    echo -ne "${PRIMARY}请选择 [1-2] (默认: 1): ${NC}"
-    read -r port_choice
-    [[ -z "$port_choice" ]] && port_choice="1"
+    echo -e "${SECONDARY_LIGHT}直接输入端口号或回车使用随机端口${NC}"
+    echo -ne "${PRIMARY}端口号 (1-65535，回车=随机): ${NC}"
+    read -r external_port
     
-    case "$port_choice" in
-        1)
-            echo -ne "${PRIMARY}请输入端口号 (1-65535): ${NC}"
-            read -r external_port
-            if ! [[ "$external_port" =~ ^[0-9]+$ ]] || [[ "$external_port" -lt 1 || "$external_port" -gt 65535 ]]; then
-                print_error "端口号无效"
-                wait_enter
-                show_forward_menu
-                return
-            fi
-            ;;
-        2)
-            external_port=$(generate_random_port)
-            echo -e "${PRIMARY}已生成随机端口: ${ACCENT_SUCCESS}$external_port${NC}"
-            ;;
-        *)
-            print_error "无效选择"
-            wait_enter
-            show_forward_menu
-            return
-            ;;
-    esac
+    if [[ -z "$external_port" ]]; then
+        # 回车使用随机端口
+        external_port=$(generate_random_port)
+        echo -e "${PRIMARY}已生成随机端口: ${ACCENT_SUCCESS}$external_port${NC}"
+    elif [[ "$external_port" =~ ^[0-9]+$ ]] && [[ "$external_port" -ge 1 && "$external_port" -le 65535 ]]; then
+        echo -e "${PRIMARY}使用指定端口: ${ACCENT_SUCCESS}$external_port${NC}"
+    else
+        print_error "端口号无效"
+        wait_enter
+        show_forward_menu
+        return
+    fi
     
     # 目标服务器IP
     echo -ne "${PRIMARY}目标服务器IP地址: ${NC}"
@@ -600,10 +589,10 @@ add_forward_rule_interactive() {
     echo -e "${PRIMARY}转发路径: ${NC}${SECONDARY_LIGHT}外部客户端 → 本地$listen_protocol:$external_port → 目标$target_ip_type:$internal_ip:$internal_port${NC}"
     echo -e "${ACCENT_SUCCESS}协议自动匹配，最佳兼容性${NC}"
     echo
-    echo -ne "${ACCENT_WARNING}确认添加此规则? [y/N]: ${NC}"
+    echo -ne "${PRIMARY}确认添加此规则? [Y/n] (回车=确认): ${NC}"
     read -r confirm
     
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    if [[ -z "$confirm" || "$confirm" =~ ^[Yy]$ ]]; then
         if add_forward_rule_core "$protocol" "$external_port" "$internal_ip" "$internal_port" "$source_ip" "$rule_name" "$listen_protocol"; then
             print_success "转发规则添加成功！"
         else
@@ -861,6 +850,52 @@ show_status_menu() {
     else
         echo -e "${SECONDARY_LIGHT}IPv6转发: ${ACCENT_ERROR}禁用${NC}"
     fi
+    echo
+    
+    # 系统转发日志
+    print_section "系统转发日志"
+    echo -e "${SECONDARY_LIGHT}最近的NFTables相关日志:${NC}"
+    journalctl -u nftables.service --no-pager -n 5 2>/dev/null || echo -e "${SECONDARY_LIGHT}  无可用日志${NC}"
+    echo
+    
+    # 检查内核连接跟踪
+    print_section "连接跟踪状态"
+    if [[ -f /proc/sys/net/netfilter/nf_conntrack_count ]]; then
+        local current_conn=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo "0")
+        local max_conn=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo "0")
+        echo -e "${SECONDARY_LIGHT}当前连接数: $current_conn / $max_conn${NC}"
+        
+        # 计算连接使用率
+        if [[ "$max_conn" -gt 0 ]]; then
+            local usage=$((current_conn * 100 / max_conn))
+            if [[ "$usage" -lt 70 ]]; then
+                echo -e "${SECONDARY_LIGHT}使用率: ${ACCENT_SUCCESS}$usage%${NC}"
+            elif [[ "$usage" -lt 90 ]]; then
+                echo -e "${SECONDARY_LIGHT}使用率: ${ACCENT_WARNING}$usage%${NC}"
+            else
+                echo -e "${SECONDARY_LIGHT}使用率: ${ACCENT_ERROR}$usage%${NC}"
+            fi
+        fi
+    else
+        echo -e "${SECONDARY_LIGHT}连接跟踪: ${ACCENT_WARNING}未启用${NC}"
+    fi
+    echo
+    
+    # 进程状态检查
+    print_section "相关进程状态"
+    echo -e "${SECONDARY_LIGHT}nftables 进程:${NC}"
+    if pgrep -f nft > /dev/null; then
+        echo -e "${SECONDARY_LIGHT}  ${ACCENT_SUCCESS}运行中${NC}"
+    else
+        echo -e "${SECONDARY_LIGHT}  ${ACCENT_WARNING}未运行${NC}"
+    fi
+    
+    echo -e "${SECONDARY_LIGHT}systemd-networkd 状态:${NC}"
+    if systemctl is-active systemd-networkd >/dev/null 2>&1; then
+        echo -e "${SECONDARY_LIGHT}  ${ACCENT_SUCCESS}活跃${NC}"
+    else
+        echo -e "${SECONDARY_LIGHT}  ${ACCENT_WARNING}非活跃${NC}"
+    fi
     
     wait_enter
     show_main_menu
@@ -903,16 +938,18 @@ show_advanced_menu() {
     draw_menu_item "1" "初始化配置" "重新初始化nftables"
     draw_menu_item "2" "保存当前规则" "手动保存规则"
     draw_menu_item "3" "重新加载规则" "从配置文件重新加载"
+    draw_menu_item "4" "查看详细日志" "显示转发和错误日志"
     draw_menu_item "9" "返回主菜单" ""
     
     draw_line 40
-    echo -ne "${PRIMARY}请选择功能 [1-3,9]: ${NC}"
+    echo -ne "${PRIMARY}请选择功能 [1-4,9]: ${NC}"
     
     read -r choice
     case "$choice" in
         1) init_nftables_interactive ;;
         2) save_rules_interactive ;;
         3) reload_rules_interactive ;;
+        4) show_detailed_logs_interactive ;;
         9) show_main_menu ;;
         *) 
             print_error "无效选择"
@@ -1064,7 +1101,7 @@ flush_all_rules_interactive() {
     print_header
     print_section "清空所有规则"
     
-    echo -ne "${ACCENT_WARNING}确定要删除所有转发规则吗? [y/N]: ${NC}"
+    echo -ne "${ACCENT_WARNING}确定要删除所有转发规则吗? [y/N] (谨慎操作): ${NC}"
     read -r confirm
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -1446,7 +1483,7 @@ init_nftables_interactive() {
     print_header
     print_section "初始化NFTables配置"
     
-    echo -ne "${ACCENT_WARNING}确定要重新初始化配置吗? [y/N]: ${NC}"
+    echo -ne "${ACCENT_WARNING}确定要重新初始化配置吗? [y/N] (将清空现有规则): ${NC}"
     read -r confirm
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -1506,12 +1543,79 @@ reload_rules_interactive() {
     show_advanced_menu
 }
 
+# 查看详细日志
+show_detailed_logs_interactive() {
+    print_header
+    print_section "系统详细日志"
+    
+    echo -e "${PRIMARY}选择日志类型:${NC}"
+    echo -e "${PRIMARY}1${NC} NFTables 服务日志"
+    echo -e "${PRIMARY}2${NC} 内核防火墙日志"
+    echo -e "${PRIMARY}3${NC} 网络连接日志"
+    echo -e "${PRIMARY}4${NC} 系统错误日志"
+    echo -e "${PRIMARY}5${NC} 全部日志概览"
+    echo -ne "${PRIMARY}请选择 [1-5] (默认: 5): ${NC}"
+    read -r log_choice
+    [[ -z "$log_choice" ]] && log_choice="5"
+    
+    echo
+    case "$log_choice" in
+        1)
+            print_section "NFTables 服务日志"
+            journalctl -u nftables.service --no-pager -n 20 2>/dev/null || echo -e "${SECONDARY_LIGHT}无可用日志${NC}"
+            ;;
+        2)
+            print_section "内核防火墙日志"
+            dmesg | grep -i -E "(nf_|netfilter|iptables|nftables)" | tail -20 || echo -e "${SECONDARY_LIGHT}无相关内核日志${NC}"
+            ;;
+        3)
+            print_section "网络连接日志"
+            echo -e "${SECONDARY_LIGHT}当前活跃连接:${NC}"
+            ss -tuln | head -20
+            echo
+            echo -e "${SECONDARY_LIGHT}连接统计:${NC}"
+            ss -s
+            ;;
+        4)
+            print_section "系统错误日志"
+            journalctl --priority=err --no-pager -n 10 2>/dev/null || echo -e "${SECONDARY_LIGHT}无错误日志${NC}"
+            ;;
+        5)
+            print_section "全部日志概览"
+            
+            echo -e "${PRIMARY}> NFTables服务状态:${NC}"
+            systemctl status nftables.service --no-pager -l | head -10
+            echo
+            
+            echo -e "${PRIMARY}> 最近错误日志:${NC}"
+            journalctl --priority=err --no-pager -n 3 2>/dev/null || echo -e "${SECONDARY_LIGHT}无错误${NC}"
+            echo
+            
+            echo -e "${PRIMARY}> 连接跟踪摘要:${NC}"
+            if [[ -f /proc/sys/net/netfilter/nf_conntrack_count ]]; then
+                local current_conn=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo "0")
+                local max_conn=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo "0")
+                echo -e "${SECONDARY_LIGHT}连接数: $current_conn / $max_conn${NC}"
+            fi
+            
+            echo -e "${PRIMARY}> 网络接口状态:${NC}"
+            ip link show | grep -E "(UP|DOWN)" | head -5
+            ;;
+        *)
+            print_error "无效选择"
+            ;;
+    esac
+    
+    wait_enter
+    show_advanced_menu
+}
+
 # 安全退出
 exit_program() {
     print_header
     print_section "退出程序"
     
-    echo -ne "${ACCENT_WARNING}确定要退出程序吗? [y/N]: ${NC}"
+    echo -ne "${PRIMARY}确定要退出程序吗? [y/N] (回车=取消): ${NC}"
     read -r confirm
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
