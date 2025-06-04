@@ -316,7 +316,7 @@ table ip nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-        masquerade
+        oifname $WAN_IF masquerade
     }
 }
 EOF
@@ -349,7 +349,7 @@ table ip6 nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-        masquerade
+        oifname $WAN_IF masquerade
     }
 }
 EOF
@@ -383,7 +383,7 @@ table ip nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-        masquerade
+        oifname $WAN_IF masquerade
     }
 }
 
@@ -395,7 +395,7 @@ table ip6 nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-        masquerade
+        oifname $WAN_IF masquerade
     }
 }
 EOF
@@ -647,9 +647,14 @@ add_forward_rule_core() {
     local internal_port="$4"
     local external_ip="${5:-any}"
     local rule_name="${6:-rule_$(date +%s)}"
-    local listen_protocol="${7:-ipv4}"
+    local listen_protocol="$7"
     
-    print_debug "添加规则: $protocol $external_port -> $internal_ip:$internal_port (监听: $listen_protocol)"
+    if [[ -z "$listen_protocol" ]]; then
+        print_error "内部错误: add_forward_rule_core 未能获取 listen_protocol。"
+        return 1
+    fi
+    
+    print_debug "添加规则: $protocol $external_port -> $internal_ip:$internal_port (监听: $listen_protocol, 名称: $rule_name)"
     
     # 检测目标IP类型
     local target_ip_type="ipv4"
@@ -697,26 +702,26 @@ add_forward_rule_core() {
     local error_msg=""
     
     if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
-        local tcp_rule="${src_condition}tcp dport $external_port dnat to $internal_ip:$internal_port"
+        local tcp_rule="${src_condition}tcp dport $external_port dnat to $internal_ip:$internal_port comment \"$rule_name\""
         error_msg=$(nft add rule $table_family nat prerouting $tcp_rule 2>&1)
         if [[ $? -ne 0 ]]; then
             print_error "TCP转发规则添加失败: $error_msg"
             success=false
         else
             print_success "TCP转发规则添加成功"
-            echo "tcp|$external_port|$internal_ip|$internal_port|$external_ip|$rule_name|$(date)" >> "${FORWARD_RULES_FILE}"
+            echo "tcp|$external_port|$internal_ip|$internal_port|$external_ip|$rule_name|$(date)|$listen_protocol" >> "${FORWARD_RULES_FILE}"
         fi
     fi
     
     if [[ "$protocol" == "udp" || "$protocol" == "both" ]]; then
-        local udp_rule="${src_condition}udp dport $external_port dnat to $internal_ip:$internal_port"
+        local udp_rule="${src_condition}udp dport $external_port dnat to $internal_ip:$internal_port comment \"$rule_name\""
         error_msg=$(nft add rule $table_family nat prerouting $udp_rule 2>&1)
         if [[ $? -ne 0 ]]; then
             print_error "UDP转发规则添加失败: $error_msg"
             success=false
         else
             print_success "UDP转发规则添加成功"
-            echo "udp|$external_port|$internal_ip|$internal_port|$external_ip|$rule_name|$(date)" >> "${FORWARD_RULES_FILE}"
+            echo "udp|$external_port|$internal_ip|$internal_port|$external_ip|$rule_name|$(date)|$listen_protocol" >> "${FORWARD_RULES_FILE}"
         fi
     fi
     
@@ -1020,7 +1025,7 @@ list_forward_rules_core() {
     fi
     
     local count=1
-    while IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp; do
+    while IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp listen_protocol; do
         # 检测IP版本
         local ip_version="IPv4"
         if [[ "$internal_ip" =~ : ]]; then
@@ -1049,25 +1054,43 @@ delete_forward_rule_core() {
     
     # 获取要删除的规则信息
     local rule_line=$(sed -n "${rule_number}p" "${FORWARD_RULES_FILE}")
-    IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp <<< "$rule_line"
+    IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp listen_protocol <<< "$rule_line"
     
-    # 检测IP版本
+    # 检测IP版本 (用于显示信息)
     local target_ip_type="ipv4"
     if [[ "$internal_ip" =~ : ]]; then
         target_ip_type="ipv6"
     fi
     
-    # 从NFTables中删除具体规则
-    local success=true
-    if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
-        # 尝试从IPv4和IPv6表中删除（因为我们不知道原始监听协议）
-        delete_nft_rule "ip" "tcp" "$external_port" "$internal_ip" "$internal_port" "$external_ip" || true
-        delete_nft_rule "ip6" "tcp" "$external_port" "$internal_ip" "$internal_port" "$external_ip" || true
+    # 根据存储的 listen_protocol 确定 table_family
+    local table_family_to_delete=""
+    if [[ "$listen_protocol" == "ipv4" ]]; then
+        table_family_to_delete="ip"
+    elif [[ "$listen_protocol" == "ipv6" ]]; then
+        table_family_to_delete="ip6"
+    else
+        # 处理旧格式规则文件 (listen_protocol 可能为空)
+        print_warning "规则文件中缺少 listen_protocol，尝试从目标IP推断..."
+        if [[ "$internal_ip" =~ : ]]; then
+            table_family_to_delete="ip6"
+            print_info "推断表簇为 ip6 (目标IP: $internal_ip)"
+        else
+            table_family_to_delete="ip"
+            print_info "推断表簇为 ip (目标IP: $internal_ip)"
+        fi
     fi
     
-    if [[ "$protocol" == "udp" || "$protocol" == "both" ]]; then
-        delete_nft_rule "ip" "udp" "$external_port" "$internal_ip" "$internal_port" "$external_ip" || true
-        delete_nft_rule "ip6" "udp" "$external_port" "$internal_ip" "$internal_port" "$external_ip" || true
+    # 从NFTables中删除具体规则
+    if [[ -n "$table_family_to_delete" ]]; then
+        if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
+            delete_nft_rule "$table_family_to_delete" "tcp" "$external_port" "$internal_ip" "$internal_port" "$external_ip"
+        fi
+        
+        if [[ "$protocol" == "udp" || "$protocol" == "both" ]]; then
+            delete_nft_rule "$table_family_to_delete" "udp" "$external_port" "$internal_ip" "$internal_port" "$external_ip"
+        fi
+    else
+        print_error "无法确定用于删除规则的表簇。NFTables规则可能未被删除。"
     fi
     
     # 从文件中删除规则
@@ -1217,24 +1240,29 @@ import_rules_core() {
     local import_file="$1"
     local imported=0
     
-    while IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp; do
+    while IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp listen_protocol; do
         # 跳过注释行
         [[ "$protocol" =~ ^#.*$ ]] && continue
         [[ -z "$protocol" ]] && continue
         
         # 验证IP地址格式
         if ! validate_ip_format "$internal_ip"; then
-            print_warning "跳过无效IP地址的规则: $internal_ip"
+            print_warning "跳过无效IP地址的规则: $internal_ip (规则名: $rule_name)"
             continue
         fi
         
-        # 自动匹配监听协议与目标IP协议
-        local listen_protocol="ipv4"
-        if [[ "$internal_ip" =~ : ]]; then
-            listen_protocol="ipv6"
+        # 处理 listen_protocol (如果从文件读取为空，则根据 internal_ip 推断)
+        local effective_listen_protocol="$listen_protocol"
+        if [[ -z "$effective_listen_protocol" ]]; then
+            if [[ "$internal_ip" =~ : ]]; then # IPv6
+                effective_listen_protocol="ipv6"
+            else # IPv4
+                effective_listen_protocol="ipv4"
+            fi
+            print_info "导入规则 '$rule_name': 文件中缺少 listen_protocol, 已推断为 '$effective_listen_protocol' (基于目标IP $internal_ip)"
         fi
         
-        if add_forward_rule_core "$protocol" "$external_port" "$internal_ip" "$internal_port" "$external_ip" "$rule_name" "$listen_protocol"; then
+        if add_forward_rule_core "$protocol" "$external_port" "$internal_ip" "$internal_port" "$external_ip" "$rule_name" "$effective_listen_protocol"; then
             ((imported++))
         fi
     done < "$import_file"
@@ -1439,7 +1467,7 @@ test_forwarding_rule_interactive() {
     
     # 获取规则信息
     local rule_line=$(sed -n "${rule_number}p" "${FORWARD_RULES_FILE}")
-    IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp <<< "$rule_line"
+    IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp listen_protocol <<< "$rule_line"
     
     echo
     print_section "转发规则测试"
