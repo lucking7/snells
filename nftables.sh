@@ -306,7 +306,7 @@ EOF
 
 create_mixed_tables() {
     cat >> "${NFTABLES_CONF}" << 'EOF'
-# 混合IPv4/IPv6表结构
+# 混合IPv4/IPv6表结构 - 使用inet filter + 双NAT表
 table inet filter {
     chain input {
         type filter hook input priority 0; policy accept;
@@ -324,6 +324,7 @@ table inet filter {
     }
 }
 
+# IPv4 NAT表
 table ip nat {
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
@@ -334,6 +335,7 @@ table ip nat {
     }
 }
 
+# IPv6 NAT表  
 table ip6 nat {
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
@@ -421,6 +423,7 @@ add_forward_rule_interactive() {
     echo -e "${SECONDARY_LIGHT}1. 外部客户端连接到本地服务器的指定端口${NC}"
     echo -e "${SECONDARY_LIGHT}2. NFTables将流量转发到目标服务器的指定端口${NC}"
     echo -e "${SECONDARY_LIGHT}3. 支持TCP/UDP协议区分和IPv4/IPv6双栈${NC}"
+    echo -e "${SECONDARY_LIGHT}4. 系统自动检测目标IP版本并选择合适的表${NC}"
     echo
     
     # 协议选择
@@ -474,12 +477,19 @@ add_forward_rule_interactive() {
     read -r rule_name
     [[ -z "$rule_name" ]] && rule_name="rule_$(date +%s)"
     
+    # IP版本检测
+    local ip_version="IPv4"
+    if [[ "$internal_ip" =~ : ]]; then
+        ip_version="IPv6"
+    fi
+    
     # 确认添加
     echo
     print_section "规则确认 - 转发路径说明"
     echo -e "${SECONDARY_LIGHT}协议类型: $protocol${NC}"
     echo -e "${SECONDARY_LIGHT}本地监听端口: $external_port${NC}"
     echo -e "${SECONDARY_LIGHT}转发目标: $internal_ip:$internal_port${NC}"
+    echo -e "${SECONDARY_LIGHT}IP版本: $ip_version (自动检测)${NC}"
     echo -e "${SECONDARY_LIGHT}源IP限制: $source_ip${NC}"
     echo -e "${SECONDARY_LIGHT}规则名称: $rule_name${NC}"
     echo
@@ -513,18 +523,47 @@ add_forward_rule_core() {
     
     print_debug "添加规则: $protocol $external_port -> $internal_ip:$internal_port"
     
-    # 根据IP模式选择表
+    # 检测目标IP类型（IPv4 or IPv6）
+    local target_ip_type="ipv4"
+    if [[ "$internal_ip" =~ : ]]; then
+        target_ip_type="ipv6"
+    fi
+    
+    # 根据IP模式和目标IP类型选择表
     local table_family=""
     case "$IP_MODE" in
-        "ipv4") table_family="ip" ;;
-        "ipv6") table_family="ip6" ;;
-        "mix") table_family="ip" ;;
+        "ipv4") 
+            table_family="ip"
+            if [[ "$target_ip_type" == "ipv6" ]]; then
+                print_error "IPv4模式不支持IPv6目标地址"
+                return 1
+            fi
+            ;;
+        "ipv6") 
+            table_family="ip6"
+            if [[ "$target_ip_type" == "ipv4" ]]; then
+                print_error "IPv6模式不支持IPv4目标地址"
+                return 1
+            fi
+            ;;
+        "mix") 
+            # 混合模式根据目标IP类型选择相应的NAT表
+            if [[ "$target_ip_type" == "ipv4" ]]; then
+                table_family="ip"
+            else
+                table_family="ip6"
+            fi
+            ;;
     esac
     
-    # 构建规则
+    # 构建规则条件
     local src_condition=""
     if [[ "$external_ip" != "any" ]]; then
-        src_condition="ip saddr $external_ip "
+        if [[ "$target_ip_type" == "ipv4" ]]; then
+            src_condition="ip saddr $external_ip "
+        else
+            src_condition="ip6 saddr $external_ip "
+        fi
     fi
     
     # 检查表是否存在，如果不存在则先初始化
@@ -908,11 +947,16 @@ flush_all_rules_interactive() {
 flush_all_rules_core() {
     # 清空NFTables规则
     case "$IP_MODE" in
-        "ipv4") nft flush table ip nat ;;
-        "ipv6") nft flush table ip6 nat ;;
+        "ipv4") 
+            nft flush table ip nat 2>/dev/null || true
+            ;;
+        "ipv6") 
+            nft flush table ip6 nat 2>/dev/null || true
+            ;;
         "mix") 
-            nft flush table ip nat
-            nft flush table ip6 nat
+            # 混合模式清空两个NAT表
+            nft flush table ip nat 2>/dev/null || true
+            nft flush table ip6 nat 2>/dev/null || true
             ;;
     esac
     
