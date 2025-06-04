@@ -343,14 +343,15 @@ show_main_menu() {
     draw_line 60
     
     draw_menu_item "1" "转发规则管理" "添加、删除、查看转发规则"
-    draw_menu_item "2" "系统配置" "IP模式、接口配置等"
+    draw_menu_item "2" "系统配置" "网络接口配置等"
     draw_menu_item "3" "系统状态" "查看服务状态和统计"
     draw_menu_item "4" "批量管理" "导入导出规则配置"
     draw_menu_item "5" "系统管理" "初始化、保存、重载配置"
+    draw_menu_item "6" "端口测试" "测试转发规则连通性"
     draw_menu_item "0" "退出程序" "安全退出脚本"
     
     draw_line 60
-    echo -ne "${PRIMARY}请选择功能 [0-5]: ${NC}"
+    echo -ne "${PRIMARY}请选择功能 [0-6]: ${NC}"
     
     read -r choice
     handle_main_menu "$choice"
@@ -363,6 +364,7 @@ handle_main_menu() {
         3) show_status_menu ;;
         4) show_batch_menu ;;
         5) show_advanced_menu ;;
+        6) show_test_menu ;;
         0) exit_program ;;
         *) 
             print_error "无效选择，请重新输入"
@@ -1051,7 +1053,210 @@ restore_config_interactive() {
     show_batch_menu
 }
 
-# 未实现功能已删除
+# 端口测试菜单
+show_test_menu() {
+    print_header
+    print_section "端口测试"
+    
+    draw_menu_item "1" "测试本地端口" "检查本地端口监听状态"
+    draw_menu_item "2" "测试目标连通性" "检查到目标服务器的连通性"
+    draw_menu_item "3" "测试转发规则" "验证端口转发是否工作"
+    draw_menu_item "9" "返回主菜单" ""
+    
+    draw_line 40
+    echo -ne "${PRIMARY}请选择测试类型 [1-3,9]: ${NC}"
+    
+    read -r choice
+    case "$choice" in
+        1) test_local_port_interactive ;;
+        2) test_target_connectivity_interactive ;;
+        3) test_forwarding_rule_interactive ;;
+        9) show_main_menu ;;
+        *) 
+            print_error "无效选择"
+            wait_enter
+            show_test_menu
+            ;;
+    esac
+}
+
+# 测试本地端口
+test_local_port_interactive() {
+    print_header
+    print_section "测试本地端口"
+    
+    echo -ne "${PRIMARY}请输入要测试的端口: ${NC}"
+    read -r test_port
+    
+    if ! [[ "$test_port" =~ ^[0-9]+$ ]] || [[ "$test_port" -lt 1 || "$test_port" -gt 65535 ]]; then
+        print_error "端口号无效"
+        wait_enter
+        show_test_menu
+        return
+    fi
+    
+    echo
+    print_section "端口监听状态检查"
+    
+    # 检查IPv4监听
+    local ipv4_listen=$(ss -tlnp | grep ":$test_port " | head -1)
+    if [[ -n "$ipv4_listen" ]]; then
+        print_success "IPv4端口 $test_port 正在监听"
+        echo -e "${SECONDARY_LIGHT}$ipv4_listen${NC}"
+    else
+        print_warning "IPv4端口 $test_port 未在监听"
+    fi
+    
+    # 检查IPv6监听
+    local ipv6_listen=$(ss -tlnp | grep "::.*:$test_port " | head -1)
+    if [[ -n "$ipv6_listen" ]]; then
+        print_success "IPv6端口 $test_port 正在监听"
+        echo -e "${SECONDARY_LIGHT}$ipv6_listen${NC}"
+    else
+        print_warning "IPv6端口 $test_port 未在监听"
+    fi
+    
+    wait_enter
+    show_test_menu
+}
+
+# 测试目标连通性
+test_target_connectivity_interactive() {
+    print_header
+    print_section "测试目标连通性"
+    
+    echo -ne "${PRIMARY}目标IP地址: ${NC}"
+    read -r target_ip
+    
+    echo -ne "${PRIMARY}目标端口: ${NC}"
+    read -r target_port
+    
+    if ! [[ "$target_port" =~ ^[0-9]+$ ]] || [[ "$target_port" -lt 1 || "$target_port" -gt 65535 ]]; then
+        print_error "端口号无效"
+        wait_enter
+        show_test_menu
+        return
+    fi
+    
+    echo
+    print_section "连通性测试结果"
+    
+    # 检测IP版本
+    local ip_version="IPv4"
+    if [[ "$target_ip" =~ : ]]; then
+        ip_version="IPv6"
+    fi
+    
+    echo -e "${SECONDARY_LIGHT}测试目标: $target_ip:$target_port ($ip_version)${NC}"
+    echo
+    
+    # 使用nc测试连通性
+    if command -v nc &> /dev/null; then
+        if timeout 5 nc -z "$target_ip" "$target_port" 2>/dev/null; then
+            print_success "目标端口 $target_ip:$target_port 连通正常"
+        else
+            print_error "目标端口 $target_ip:$target_port 连接失败"
+        fi
+    else
+        print_warning "nc命令未安装，无法进行连通性测试"
+        print_info "建议安装: apt install netcat-openbsd"
+    fi
+    
+    wait_enter
+    show_test_menu
+}
+
+# 测试转发规则
+test_forwarding_rule_interactive() {
+    print_header
+    print_section "测试转发规则"
+    
+    # 显示现有规则
+    if [[ ! -f "${FORWARD_RULES_FILE}" || ! -s "${FORWARD_RULES_FILE}" ]]; then
+        print_warning "没有转发规则可测试"
+        wait_enter
+        show_test_menu
+        return
+    fi
+    
+    echo -e "${PRIMARY}现有转发规则:${NC}"
+    list_forward_rules_core
+    echo
+    
+    echo -ne "${PRIMARY}请输入要测试的规则编号: ${NC}"
+    read -r rule_number
+    
+    if ! [[ "$rule_number" =~ ^[0-9]+$ ]]; then
+        print_error "无效的规则编号"
+        wait_enter
+        show_test_menu
+        return
+    fi
+    
+    local total_rules=$(wc -l < "${FORWARD_RULES_FILE}" 2>/dev/null || echo "0")
+    if [[ "$rule_number" -lt 1 || "$rule_number" -gt "$total_rules" ]]; then
+        print_error "规则编号超出范围"
+        wait_enter
+        show_test_menu
+        return
+    fi
+    
+    # 获取规则信息
+    local rule_line=$(sed -n "${rule_number}p" "${FORWARD_RULES_FILE}")
+    IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp <<< "$rule_line"
+    
+    echo
+    print_section "转发规则测试"
+    echo -e "${SECONDARY_LIGHT}规则: $protocol $external_port -> $internal_ip:$internal_port${NC}"
+    echo
+    
+    # 检测IP版本
+    local ip_version="IPv4"
+    if [[ "$internal_ip" =~ : ]]; then
+        ip_version="IPv6"
+    fi
+    
+    # 测试本地端口监听
+    echo -e "${PRIMARY}1. 检查本地端口监听状态:${NC}"
+    local local_listen=$(ss -tlnp | grep ":$external_port ")
+    if [[ -n "$local_listen" ]]; then
+        print_success "本地端口 $external_port 有服务监听"
+    else
+        print_warning "本地端口 $external_port 没有直接监听服务（通过NFTables转发）"
+    fi
+    
+    # 测试目标连通性
+    echo
+    echo -e "${PRIMARY}2. 检查目标服务器连通性:${NC}"
+    if command -v nc &> /dev/null; then
+        if timeout 5 nc -z "$internal_ip" "$internal_port" 2>/dev/null; then
+            print_success "目标服务器 $internal_ip:$internal_port 连通正常"
+        else
+            print_error "目标服务器 $internal_ip:$internal_port 连接失败"
+        fi
+    else
+        print_warning "nc命令未安装，无法测试目标连通性"
+    fi
+    
+    # 检查NFTables规则
+    echo
+    echo -e "${PRIMARY}3. 检查NFTables规则状态:${NC}"
+    local table_family="ip"
+    if [[ "$ip_version" == "IPv6" ]]; then
+        table_family="ip6"
+    fi
+    
+    local nft_rule=$(nft list table $table_family nat 2>/dev/null | grep -E "$protocol.*dport $external_port.*dnat.*$internal_ip")
+    if [[ -n "$nft_rule" ]]; then
+        print_success "NFTables转发规则存在且正确"
+        echo -e "${SECONDARY_LIGHT}规则: $nft_rule${NC}"
+    else
+        print_error "NFTables转发规则缺失或不正确"
+    fi
+    
+    wait_enter
+    show_test_menu
+}
 
 init_nftables_interactive() {
     print_header
