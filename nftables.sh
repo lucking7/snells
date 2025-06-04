@@ -190,6 +190,12 @@ install_nftables() {
     systemctl enable nftables.service > /dev/null 2>&1
     systemctl start nftables.service > /dev/null 2>&1
     print_success "nftables 服务已启用"
+    
+    # 启用IP转发
+    echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-ip-forward.conf
+    echo 'net.ipv6.conf.all.forwarding=1' >> /etc/sysctl.d/99-ip-forward.conf
+    sysctl -p /etc/sysctl.d/99-ip-forward.conf > /dev/null 2>&1
+    print_success "IP转发已启用"
 }
 
 # 初始化nftables配置
@@ -351,7 +357,7 @@ show_main_menu() {
     draw_menu_item "2" "系统配置" "IP模式、接口配置等"
     draw_menu_item "3" "系统状态" "查看服务状态和统计"
     draw_menu_item "4" "批量管理" "导入导出规则配置"
-    draw_menu_item "5" "高级功能" "高级转发、测试等"
+    draw_menu_item "5" "系统管理" "初始化、保存、重载配置"
     draw_menu_item "0" "退出程序" "安全退出脚本"
     
     draw_line 60
@@ -521,13 +527,21 @@ add_forward_rule_core() {
         src_condition="ip saddr $external_ip "
     fi
     
+    # 检查表是否存在，如果不存在则先初始化
+    if ! nft list table $table_family nat &>/dev/null; then
+        print_warning "NFTables表不存在，正在初始化..."
+        init_nftables
+    fi
+    
     # 添加转发规则到nftables
     local success=true
+    local error_msg=""
     
     if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
         local tcp_rule="${src_condition}tcp dport $external_port dnat to $internal_ip:$internal_port"
-        if ! nft add rule $table_family nat prerouting $tcp_rule 2>/dev/null; then
-            print_error "TCP转发规则添加失败"
+        error_msg=$(nft add rule $table_family nat prerouting $tcp_rule 2>&1)
+        if [[ $? -ne 0 ]]; then
+            print_error "TCP转发规则添加失败: $error_msg"
             success=false
         else
             print_success "TCP转发规则添加成功"
@@ -537,8 +551,9 @@ add_forward_rule_core() {
     
     if [[ "$protocol" == "udp" || "$protocol" == "both" ]]; then
         local udp_rule="${src_condition}udp dport $external_port dnat to $internal_ip:$internal_port"
-        if ! nft add rule $table_family nat prerouting $udp_rule 2>/dev/null; then
-            print_error "UDP转发规则添加失败"
+        error_msg=$(nft add rule $table_family nat prerouting $udp_rule 2>&1)
+        if [[ $? -ne 0 ]]; then
+            print_error "UDP转发规则添加失败: $error_msg"
             success=false
         else
             print_success "UDP转发规则添加成功"
@@ -759,28 +774,24 @@ show_batch_menu() {
     esac
 }
 
-# 高级功能菜单
+# 系统管理菜单
 show_advanced_menu() {
     print_header
-    print_section "高级功能"
+    print_section "系统管理"
     
-    draw_menu_item "1" "高级端口转发" "同端口不同协议转发"
-    draw_menu_item "2" "测试转发规则" "测试端口连通性"
-    draw_menu_item "3" "初始化配置" "重新初始化nftables"
-    draw_menu_item "4" "保存当前规则" "手动保存规则"
-    draw_menu_item "5" "重新加载规则" "从配置文件重新加载"
+    draw_menu_item "1" "初始化配置" "重新初始化nftables"
+    draw_menu_item "2" "保存当前规则" "手动保存规则"
+    draw_menu_item "3" "重新加载规则" "从配置文件重新加载"
     draw_menu_item "9" "返回主菜单" ""
     
     draw_line 40
-    echo -ne "${PRIMARY}请选择功能 [1-5,9]: ${NC}"
+    echo -ne "${PRIMARY}请选择功能 [1-3,9]: ${NC}"
     
     read -r choice
     case "$choice" in
-        1) add_advanced_forward_interactive ;;
-        2) test_forward_rule_interactive ;;
-        3) init_nftables_interactive ;;
-        4) save_rules_interactive ;;
-        5) reload_rules_interactive ;;
+        1) init_nftables_interactive ;;
+        2) save_rules_interactive ;;
+        3) reload_rules_interactive ;;
         9) show_main_menu ;;
         *) 
             print_error "无效选择"
@@ -1042,18 +1053,7 @@ restore_config_interactive() {
     show_batch_menu
 }
 
-# 高级功能占位函数
-add_advanced_forward_interactive() {
-    print_info "高级端口转发功能开发中..."
-    wait_enter
-    show_advanced_menu
-}
-
-test_forward_rule_interactive() {
-    print_info "转发规则测试功能开发中..."
-    wait_enter
-    show_advanced_menu
-}
+# 未实现功能已删除
 
 init_nftables_interactive() {
     print_header
