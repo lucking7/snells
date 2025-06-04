@@ -31,7 +31,6 @@ CONFIG_FILE="/etc/nftables_forward_config.conf"
 SCRIPT_VERSION="2.0.0"
 
 # 默认配置
-DEFAULT_IP_MODE="mix"
 DEFAULT_INTERFACE_WAN="eth0"
 DEFAULT_INTERFACE_LAN="eth1"
 
@@ -48,7 +47,6 @@ load_config() {
 create_default_config() {
     cat > "$CONFIG_FILE" << EOF
 # NFTables转发脚本配置文件
-IP_MODE="$DEFAULT_IP_MODE"
 WAN_INTERFACE="$DEFAULT_INTERFACE_WAN"
 LAN_INTERFACE="$DEFAULT_INTERFACE_LAN"
 AUTO_SAVE="true"
@@ -60,7 +58,6 @@ EOF
 save_config() {
     cat > "$CONFIG_FILE" << EOF
 # NFTables转发脚本配置文件
-IP_MODE="$IP_MODE"
 WAN_INTERFACE="$WAN_INTERFACE"
 LAN_INTERFACE="$LAN_INTERFACE"
 AUTO_SAVE="$AUTO_SAVE"
@@ -98,7 +95,7 @@ print_header() {
     fi
     echo -e "${SECONDARY}${ipv6_info}${NC}"
     
-    echo -e "${SECONDARY}模式: ${IP_MODE^^} | 系统: $(lsb_release -si 2>/dev/null || echo 'Linux') | 时间: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
+    echo -e "${SECONDARY}系统: $(lsb_release -si 2>/dev/null || echo 'Linux') | 时间: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
     echo
 }
 
@@ -200,7 +197,7 @@ install_nftables() {
 
 # 初始化nftables配置
 init_nftables() {
-    print_section "初始化 nftables 配置" "IP模式: $IP_MODE"
+    print_section "初始化 nftables 配置" "双栈IPv4/IPv6支持"
     
     # 创建配置文件
     cat > "${NFTABLES_CONF}" << EOF
@@ -214,22 +211,12 @@ define LAN_IF = "$LAN_INTERFACE"
 
 EOF
 
-    # 根据IP模式创建不同的表结构
-    case "$IP_MODE" in
-        "ipv4")
-            create_ipv4_tables
-            ;;
-        "ipv6")
-            create_ipv6_tables
-            ;;
-        "mix")
-            create_mixed_tables
-            ;;
-    esac
+    # 创建双栈表结构（IPv4 + IPv6）
+    create_mixed_tables
     
     # 加载配置
     if nft -f "${NFTABLES_CONF}"; then
-        print_success "nftables 配置初始化成功 (模式: $IP_MODE)"
+        print_success "nftables 双栈配置初始化成功"
     else
         print_error "nftables 配置初始化失败"
         return 1
@@ -529,32 +516,13 @@ add_forward_rule_core() {
         target_ip_type="ipv6"
     fi
     
-    # 根据IP模式和目标IP类型选择表
+    # 根据目标IP类型自动选择合适的NAT表
     local table_family=""
-    case "$IP_MODE" in
-        "ipv4") 
-            table_family="ip"
-            if [[ "$target_ip_type" == "ipv6" ]]; then
-                print_error "IPv4模式不支持IPv6目标地址"
-                return 1
-            fi
-            ;;
-        "ipv6") 
-            table_family="ip6"
-            if [[ "$target_ip_type" == "ipv4" ]]; then
-                print_error "IPv6模式不支持IPv4目标地址"
-                return 1
-            fi
-            ;;
-        "mix") 
-            # 混合模式根据目标IP类型选择相应的NAT表
-            if [[ "$target_ip_type" == "ipv4" ]]; then
-                table_family="ip"
-            else
-                table_family="ip6"
-            fi
-            ;;
-    esac
+    if [[ "$target_ip_type" == "ipv4" ]]; then
+        table_family="ip"
+    else
+        table_family="ip6"
+    fi
     
     # 构建规则条件
     local src_condition=""
@@ -613,19 +581,17 @@ show_config_menu() {
     print_header
     print_section "系统配置"
     
-    draw_menu_item "1" "IP协议模式" "当前: $IP_MODE"
-    draw_menu_item "2" "网络接口配置" "WAN: $WAN_INTERFACE | LAN: $LAN_INTERFACE"
-    draw_menu_item "3" "其他设置" "自动保存等"
+    draw_menu_item "1" "网络接口配置" "WAN: $WAN_INTERFACE | LAN: $LAN_INTERFACE"
+    draw_menu_item "2" "其他设置" "自动保存等"
     draw_menu_item "9" "返回主菜单" ""
     
     draw_line 40
-    echo -ne "${PRIMARY}请选择配置项 [1-3,9]: ${NC}"
+    echo -ne "${PRIMARY}请选择配置项 [1-2,9]: ${NC}"
     
     read -r choice
     case "$choice" in
-        1) config_ip_mode ;;
-        2) config_interfaces ;;
-        3) config_other_settings ;;
+        1) config_interfaces ;;
+        2) config_other_settings ;;
         9) show_main_menu ;;
         *) 
             print_error "无效选择"
@@ -635,46 +601,7 @@ show_config_menu() {
     esac
 }
 
-config_ip_mode() {
-    print_header
-    print_section "IP协议模式配置"
-    
-    echo -e "${PRIMARY}当前模式: ${BOLD}$IP_MODE${NC}"
-    echo
-    echo -e "${PRIMARY}可选模式:${NC}"
-    echo -e "${PRIMARY}1${NC} IPv4 Only - 仅支持IPv4转发"
-    echo -e "${PRIMARY}2${NC} IPv6 Only - 仅支持IPv6转发"
-    echo -e "${PRIMARY}3${NC} Mixed Mode - 同时支持IPv4和IPv6"
-    echo
-    echo -ne "${PRIMARY}请选择新模式 [1-3]: ${NC}"
-    
-    read -r mode_choice
-    local new_mode=""
-    
-    case "$mode_choice" in
-        1) new_mode="ipv4" ;;
-        2) new_mode="ipv6" ;;
-        3) new_mode="mix" ;;
-        *) 
-            print_error "无效选择"
-            wait_enter
-            show_config_menu
-            return
-            ;;
-    esac
-    
-    if [[ "$new_mode" != "$IP_MODE" ]]; then
-        IP_MODE="$new_mode"
-        save_config
-        print_success "IP模式已更改为: $IP_MODE"
-        print_warning "请重新初始化nftables配置以应用更改"
-    else
-        print_info "模式未更改"
-    fi
-    
-    wait_enter
-    show_config_menu
-}
+# IP模式配置功能已移除 - 系统自动检测IP版本
 
 # 配置网络接口
 config_interfaces() {
@@ -704,7 +631,6 @@ config_interfaces() {
     
     save_config
     print_success "网络接口配置已更新"
-    print_warning "请重新初始化nftables配置以应用更改"
     
     wait_enter
     show_config_menu
@@ -766,7 +692,8 @@ show_status_menu() {
     print_section "规则统计"
     local rule_count=$(wc -l < "${FORWARD_RULES_FILE}" 2>/dev/null || echo "0")
     echo -e "${SECONDARY_LIGHT}总转发规则数: $rule_count${NC}"
-    echo -e "${SECONDARY_LIGHT}当前IP模式: $IP_MODE${NC}"
+    echo -e "${SECONDARY_LIGHT}IPv4转发支持: 启用${NC}"
+    echo -e "${SECONDARY_LIGHT}IPv6转发支持: 启用${NC}"
     echo -e "${SECONDARY_LIGHT}WAN接口: $WAN_INTERFACE${NC}"
     echo -e "${SECONDARY_LIGHT}LAN接口: $LAN_INTERFACE${NC}"
     echo
@@ -779,6 +706,31 @@ show_status_menu() {
     # 网络接口状态
     print_section "网络接口状态"
     ip addr show | grep -E "(inet |inet6 )" | grep -v "127.0.0.1"
+    echo
+    
+    # NFTables实际规则状态
+    print_section "NFTables规则状态"
+    echo -e "${SECONDARY_LIGHT}IPv4 NAT规则:${NC}"
+    nft list table ip nat 2>/dev/null | grep -E "(dnat|tcp dport|udp dport)" || echo -e "${SECONDARY_LIGHT}  无IPv4转发规则${NC}"
+    echo
+    echo -e "${SECONDARY_LIGHT}IPv6 NAT规则:${NC}"
+    nft list table ip6 nat 2>/dev/null | grep -E "(dnat|tcp dport|udp dport)" || echo -e "${SECONDARY_LIGHT}  无IPv6转发规则${NC}"
+    echo
+    
+    # IP转发状态
+    print_section "系统转发状态"
+    local ipv4_forward=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
+    local ipv6_forward=$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null || echo "0")
+    if [[ "$ipv4_forward" == "1" ]]; then
+        echo -e "${SECONDARY_LIGHT}IPv4转发: ${ACCENT_SUCCESS}启用${NC}"
+    else
+        echo -e "${SECONDARY_LIGHT}IPv4转发: ${ACCENT_ERROR}禁用${NC}"
+    fi
+    if [[ "$ipv6_forward" == "1" ]]; then
+        echo -e "${SECONDARY_LIGHT}IPv6转发: ${ACCENT_SUCCESS}启用${NC}"
+    else
+        echo -e "${SECONDARY_LIGHT}IPv6转发: ${ACCENT_ERROR}禁用${NC}"
+    fi
     
     wait_enter
     show_main_menu
@@ -887,7 +839,13 @@ list_forward_rules_core() {
     
     local count=1
     while IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp; do
-        echo -e "${PRIMARY}[$count]${NC} ${SECONDARY_LIGHT}$protocol $external_port -> $internal_ip:$internal_port ($rule_name)${NC}"
+        # 检测IP版本
+        local ip_version="IPv4"
+        if [[ "$internal_ip" =~ : ]]; then
+            ip_version="IPv6"
+        fi
+        
+        echo -e "${PRIMARY}[$count]${NC} ${SECONDARY_LIGHT}$protocol $external_port -> $internal_ip:$internal_port${NC} ${ACCENT_SUCCESS}($ip_version)${NC} ${SECONDARY_LIGHT}($rule_name)${NC}"
         ((count++))
     done < "${FORWARD_RULES_FILE}"
 }
@@ -917,7 +875,13 @@ delete_forward_rule_core() {
     # 从文件中删除规则
     sed -i "${rule_number}d" "${FORWARD_RULES_FILE}"
     
-    print_success "规则已从记录中删除: $protocol $external_port -> $internal_ip:$internal_port"
+    # 检测IP版本
+    local ip_version="IPv4"
+    if [[ "$internal_ip" =~ : ]]; then
+        ip_version="IPv6"
+    fi
+    
+    print_success "规则已从记录中删除: $protocol $external_port -> $internal_ip:$internal_port ($ip_version)"
     return 0
 }
 
@@ -945,24 +909,14 @@ flush_all_rules_interactive() {
 
 # 核心清空规则函数
 flush_all_rules_core() {
-    # 清空NFTables规则
-    case "$IP_MODE" in
-        "ipv4") 
-            nft flush table ip nat 2>/dev/null || true
-            ;;
-        "ipv6") 
-            nft flush table ip6 nat 2>/dev/null || true
-            ;;
-        "mix") 
-            # 混合模式清空两个NAT表
-            nft flush table ip nat 2>/dev/null || true
-            nft flush table ip6 nat 2>/dev/null || true
-            ;;
-    esac
+    # 清空所有NAT表（IPv4和IPv6）
+    nft flush table ip nat 2>/dev/null || true
+    nft flush table ip6 nat 2>/dev/null || true
     
     # 清空规则文件
     > "${FORWARD_RULES_FILE}"
     
+    print_success "已清空IPv4和IPv6 NAT规则"
     return 0
 }
 
