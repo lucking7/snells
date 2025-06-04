@@ -411,6 +411,12 @@ add_forward_rule_interactive() {
     print_header
     print_section "添加转发规则"
     
+    echo -e "${PRIMARY}NAT转发原理说明:${NC}"
+    echo -e "${SECONDARY_LIGHT}1. 外部客户端连接到本地服务器的指定端口${NC}"
+    echo -e "${SECONDARY_LIGHT}2. NFTables将流量转发到目标服务器的指定端口${NC}"
+    echo -e "${SECONDARY_LIGHT}3. 支持TCP/UDP协议区分和IPv4/IPv6双栈${NC}"
+    echo
+    
     # 协议选择
     echo -e "${PRIMARY}选择协议类型:${NC}"
     echo -e "${PRIMARY}1${NC} TCP"
@@ -443,12 +449,12 @@ add_forward_rule_interactive() {
         return
     fi
     
-    # 内网IP
-    echo -ne "${PRIMARY}内网IP地址: ${NC}"
+    # 目标服务器IP
+    echo -ne "${PRIMARY}目标服务器IP地址: ${NC}"
     read -r internal_ip
     
-    # 内网端口
-    echo -ne "${PRIMARY}内网端口 (默认: $external_port): ${NC}"
+    # 目标服务器端口
+    echo -ne "${PRIMARY}目标服务器端口 (默认: $external_port): ${NC}"
     read -r internal_port
     [[ -z "$internal_port" ]] && internal_port="$external_port"
     
@@ -464,12 +470,14 @@ add_forward_rule_interactive() {
     
     # 确认添加
     echo
-    print_section "规则确认"
-    echo -e "${SECONDARY_LIGHT}协议: $protocol${NC}"
-    echo -e "${SECONDARY_LIGHT}外部端口: $external_port${NC}"
-    echo -e "${SECONDARY_LIGHT}内网地址: $internal_ip:$internal_port${NC}"
+    print_section "规则确认 - 转发路径说明"
+    echo -e "${SECONDARY_LIGHT}协议类型: $protocol${NC}"
+    echo -e "${SECONDARY_LIGHT}本地监听端口: $external_port${NC}"
+    echo -e "${SECONDARY_LIGHT}转发目标: $internal_ip:$internal_port${NC}"
     echo -e "${SECONDARY_LIGHT}源IP限制: $source_ip${NC}"
     echo -e "${SECONDARY_LIGHT}规则名称: $rule_name${NC}"
+    echo
+    echo -e "${PRIMARY}转发路径: ${NC}${SECONDARY_LIGHT}外部客户端 → 本地:$external_port → 目标服务器:$internal_ip:$internal_port${NC}"
     echo
     echo -ne "${ACCENT_WARNING}确认添加此规则? [y/N]: ${NC}"
     read -r confirm
