@@ -445,7 +445,7 @@ add_forward_rule_interactive() {
     echo -e "${SECONDARY_LIGHT}1. 外部客户端连接到本地服务器的指定端口${NC}"
     echo -e "${SECONDARY_LIGHT}2. NFTables将流量转发到目标服务器的指定端口${NC}"
     echo -e "${SECONDARY_LIGHT}3. 支持TCP/UDP协议区分和IPv4/IPv6双栈${NC}"
-    echo -e "${SECONDARY_LIGHT}4. 系统自动检测目标IP版本并选择合适的表${NC}"
+    echo -e "${SECONDARY_LIGHT}4. 自动匹配监听协议与目标IP版本确保兼容性${NC}"
     echo
     
     # 协议选择
@@ -512,39 +512,17 @@ add_forward_rule_interactive() {
         return
     fi
     
-    # 检测目标IP版本并询问监听协议
+    # 自动检测目标IP版本并设置相同的监听协议
     local target_ip_type="ipv4"
+    local listen_protocol="ipv4"
     if [[ "$internal_ip" =~ : ]]; then
         target_ip_type="ipv6"
+        listen_protocol="ipv6"
     fi
     
-    echo -e "${PRIMARY}检测到目标服务器为: ${ACCENT_SUCCESS}$target_ip_type${NC}"
-    echo -e "${SECONDARY_LIGHT}推荐使用相同协议监听以获得最佳兼容性${NC}"
-    echo
-    echo -e "${PRIMARY}选择本地监听协议:${NC}"
-    echo -e "${PRIMARY}1${NC} IPv4监听 (推荐用于IPv4目标)"
-    echo -e "${PRIMARY}2${NC} IPv6监听 (推荐用于IPv6目标)"
-    if [[ "$target_ip_type" == "ipv4" ]]; then
-        echo -ne "${PRIMARY}请选择 [1-2] (默认: 1): ${NC}"
-        read -r listen_choice
-        [[ -z "$listen_choice" ]] && listen_choice="1"
-    else
-        echo -ne "${PRIMARY}请选择 [1-2] (默认: 2): ${NC}"
-        read -r listen_choice
-        [[ -z "$listen_choice" ]] && listen_choice="2"
-    fi
-    
-    local listen_protocol=""
-    case "$listen_choice" in
-        1) listen_protocol="ipv4" ;;
-        2) listen_protocol="ipv6" ;;
-        *) 
-            print_error "无效选择"
-            wait_enter
-            show_forward_menu
-            return
-            ;;
-    esac
+    echo -e "${PRIMARY}检测到目标服务器: ${ACCENT_SUCCESS}$target_ip_type${NC}"
+    echo -e "${PRIMARY}自动设置监听协议: ${ACCENT_SUCCESS}$listen_protocol${NC}"
+    echo -e "${SECONDARY_LIGHT}使用相同协议确保最佳兼容性${NC}"
     
     # 目标服务器端口
     echo -ne "${PRIMARY}目标服务器端口 (默认: $external_port): ${NC}"
@@ -619,13 +597,8 @@ add_forward_rule_interactive() {
     echo -e "${SECONDARY_LIGHT}源IP限制: $source_ip${NC}"
     echo -e "${SECONDARY_LIGHT}规则名称: $rule_name${NC}"
     echo
-    if [[ "$listen_protocol" == "$target_ip_type" ]]; then
-        echo -e "${PRIMARY}转发路径: ${NC}${SECONDARY_LIGHT}外部客户端 → 本地$listen_protocol:$external_port → 目标$target_ip_type:$internal_ip:$internal_port${NC}"
-        echo -e "${ACCENT_SUCCESS}协议匹配，推荐配置${NC}"
-    else
-        echo -e "${PRIMARY}转发路径: ${NC}${SECONDARY_LIGHT}外部客户端 → 本地$listen_protocol:$external_port → 目标$target_ip_type:$internal_ip:$internal_port${NC}"
-        echo -e "${ACCENT_WARNING}跨协议转发，可能需要额外配置${NC}"
-    fi
+    echo -e "${PRIMARY}转发路径: ${NC}${SECONDARY_LIGHT}外部客户端 → 本地$listen_protocol:$external_port → 目标$target_ip_type:$internal_ip:$internal_port${NC}"
+    echo -e "${ACCENT_SUCCESS}协议自动匹配，最佳兼容性${NC}"
     echo
     echo -ne "${ACCENT_WARNING}确认添加此规则? [y/N]: ${NC}"
     read -r confirm
@@ -673,14 +646,14 @@ add_forward_rule_core() {
     # 构建规则条件（根据监听协议）
     local src_condition=""
     if [[ "$external_ip" != "any" ]]; then
-        # 验证源IP与监听协议匹配
+        # 验证源IP与监听协议匹配（现在监听协议总是与目标IP匹配）
         local source_ip_type="ipv4"
         if [[ "$external_ip" =~ : ]]; then
             source_ip_type="ipv6"
         fi
         
         if [[ "$source_ip_type" != "$listen_protocol" ]]; then
-            print_error "源IP协议版本与监听协议不匹配"
+            print_error "源IP协议版本必须与目标IP协议版本相同 ($listen_protocol)"
             return 1
         fi
         
@@ -1203,7 +1176,7 @@ import_rules_core() {
             continue
         fi
         
-        # 自动检测监听协议（导入时使用目标IP类型作为监听协议）
+        # 自动匹配监听协议与目标IP协议
         local listen_protocol="ipv4"
         if [[ "$internal_ip" =~ : ]]; then
             listen_protocol="ipv6"
