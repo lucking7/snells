@@ -69,11 +69,11 @@ EOF
 print_header() {
     clear
     echo -e "${PRIMARY_BOLD}NFTables 转发管理系统 v${SCRIPT_VERSION}${NC}"
-    echo -e "${SECONDARY}Enhanced Multi-Protocol Support${NC}"
+    echo -e "${SECONDARY}双栈协议转发 | 自动SNAT配置${NC}"
     echo
 
     # 获取IPv4信息
-    local ipv4_info="IPv4: Not Available"
+    local ipv4_info="IPv4: 未检测到"
     local public_ipv4=$(curl -s -4 https://ipapi.co/ip 2>/dev/null)
     if [[ -n "$public_ipv4" ]]; then
         local ipv4_data=$(curl -s -4 "https://ipapi.co/${public_ipv4}/json" 2>/dev/null)
@@ -88,10 +88,17 @@ print_header() {
     echo -e "${SECONDARY}${ipv4_info}${NC}"
 
     # 获取IPv6信息
-    local ipv6_info="IPv6: Not Available"
+    local ipv6_info="IPv6: 未检测到"
     local public_ipv6=$(curl -s -6 https://ipapi.co/ip 2>/dev/null)
     if [[ -n "$public_ipv6" ]]; then
-        ipv6_info="IPv6: ${public_ipv6}"
+        local ipv6_data=$(curl -s -6 "https://ipapi.co/${public_ipv6}/json" 2>/dev/null)
+        if [[ -n "$ipv6_data" ]] && echo "$ipv6_data" | jq -e . >/dev/null 2>&1; then
+            local country=$(echo "$ipv6_data" | jq -r '.country_name // "N/A"')
+            local city=$(echo "$ipv6_data" | jq -r '.city // "N/A"')
+            ipv6_info="IPv6: ${public_ipv6} (${country}/${city})"
+        else
+            ipv6_info="IPv6: ${public_ipv6}"
+        fi 
     fi
     echo -e "${SECONDARY}${ipv6_info}${NC}"
     
@@ -105,7 +112,7 @@ print_section() {
 }
 
 print_success() {
-    echo -e "${ACCENT_SUCCESS}[成功] $1${NC}"
+    echo -e "${ACCENT_SUCCESS}[OK] $1${NC}"
 }
 
 print_error() {
@@ -145,7 +152,7 @@ draw_menu_item() {
 # 等待用户输入
 wait_enter() {
     echo
-    echo -e "${SECONDARY}按 Enter 键继续...${NC}"
+    echo -e "${SECONDARY_LIGHT}按 Enter 键继续...${NC}"
     read -r
 }
 
@@ -158,18 +165,27 @@ validate_ip_format() {
         local IFS='.'
         local -a octets=($ip)
         for octet in "${octets[@]}"; do
-            if [[ "$octet" -gt 255 ]]; then
+            if ! [[ "$octet" -ge 0 && "$octet" -le 255 ]]; then
                 return 1
             fi
         done
         return 0
     fi
     
-    # IPv6格式验证（简单检查）
+    # IPv6格式验证（更完善的检查）
     if [[ "$ip" =~ : ]]; then
-        # 检查是否包含有效的IPv6字符
-        if [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]]; then
-            return 0
+        # 移除可能的CIDR后缀
+        local clean_ip=$(echo "$ip" | sed 's|/.*$||') 
+        # 使用工具进行验证，例如 Python (如果可用)
+        # if python -c "import ipaddress; ipaddress.ip_address('$clean_ip')" > /dev/null 2>&1; then
+        #    return 0
+        # fi
+        # 简单检查：允许字母、数字、冒号，且冒号不能连续超过2个 (::)
+        if [[ "$clean_ip" =~ ^[0-9a-fA-F:]+$ && ! "$clean_ip" =~ ::: ]]; then
+            # 进一步检查双冒号的合法性
+            if [[ $(echo "$clean_ip" | grep -o "::" | wc -l) -le 1 ]]; then
+                return 0
+            fi
         fi
     fi
     
@@ -194,38 +210,51 @@ check_system() {
         exit 1
     fi
     
-    print_success "系统检查通过 - $(lsb_release -ds 2>/dev/null || cat /etc/debian_version)"
+    print_success "系统检查通过: $(lsb_release -ds 2>/dev/null || cat /etc/debian_version)"
 }
 
 # 检查和安装nftables
 install_nftables() {
-    print_section "检查 nftables 安装状态"
+    print_section "检查 NFTables 安装状态"
     
     if ! command -v nft &> /dev/null; then
-        print_warning "nftables 未安装，正在安装..."
+        print_warning "NFTables 未安装，正在安装..."
         
         apt update -qq
         if apt install -y nftables > /dev/null 2>&1; then
-            print_success "nftables 安装成功"
+            print_success "NFTables 安装成功"
         else
-            print_error "nftables 安装失败"
+            print_error "NFTables 安装失败"
             exit 1
         fi
     else
         local version=$(nft --version | head -n1)
-        print_success "nftables 已安装 - $version"
+        print_success "NFTables 已安装: $version"
     fi
     
     # 启用服务
-    systemctl enable nftables.service > /dev/null 2>&1
-    systemctl start nftables.service > /dev/null 2>&1
-    print_success "nftables 服务已启用"
+    if ! systemctl is-enabled nftables.service > /dev/null 2>&1; then
+        systemctl enable nftables.service > /dev/null 2>&1
+        print_info "NFTables 服务已设置为开机启动"
+    fi
+    if ! systemctl is-active nftables.service > /dev/null 2>&1; then
+        systemctl start nftables.service > /dev/null 2>&1
+        print_info "NFTables 服务已启动"
+    fi
+    print_success "NFTables 服务已启用并运行"
     
     # 启用IP转发
-    echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-ip-forward.conf
-    echo 'net.ipv6.conf.all.forwarding=1' >> /etc/sysctl.d/99-ip-forward.conf
-    sysctl -p /etc/sysctl.d/99-ip-forward.conf > /dev/null 2>&1
-    print_success "IP转发已启用"
+    local sysctl_conf="/etc/sysctl.d/99-ip-forward.conf"
+    if ! grep -q "net.ipv4.ip_forward=1" "$sysctl_conf" 2>/dev/null; then
+        echo 'net.ipv4.ip_forward=1' > "$sysctl_conf"
+        print_info "IPv4转发已配置"
+    fi
+    if ! grep -q "net.ipv6.conf.all.forwarding=1" "$sysctl_conf" 2>/dev/null; then
+        echo 'net.ipv6.conf.all.forwarding=1' >> "$sysctl_conf"
+        print_info "IPv6转发已配置"
+    fi
+    sysctl -p "$sysctl_conf" > /dev/null 2>&1
+    print_success "IP转发已启用 (IPv4 和 IPv6)"
 }
 
 # 初始化nftables配置
@@ -287,6 +316,7 @@ table ip nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
+        masquerade
     }
 }
 EOF
@@ -319,6 +349,7 @@ table ip6 nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
+        masquerade
     }
 }
 EOF
@@ -352,6 +383,7 @@ table ip nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
+        masquerade
     }
 }
 
@@ -363,6 +395,7 @@ table ip6 nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
+        masquerade
     }
 }
 EOF
@@ -800,103 +833,85 @@ config_other_settings() {
 # 系统状态菜单
 show_status_menu() {
     print_header
-    print_section "系统状态"
+    print_section "系统状态概览"
     
     # 服务状态
-    echo -e "${PRIMARY}服务状态:${NC}"
-    systemctl status nftables.service --no-pager -l
+    echo -e "${PRIMARY}${BOLD}NFTables 服务状态:${NC}"
+    local nft_service_status=$(systemctl is-active nftables.service 2>/dev/null)
+    local nft_service_enabled=$(systemctl is-enabled nftables.service 2>/dev/null)
+    
+    if [[ "$nft_service_status" == "active" ]]; then
+        echo -e "  ${ACCENT_SUCCESS}运行中 (active)" 
+    else
+        echo -e "  ${ACCENT_ERROR}未运行 ($nft_service_status)"
+    fi
+    echo -e "  开机启动: ${ACCENT_SUCCESS}${nft_service_enabled}${NC}"
     echo
     
     # 规则统计
-    print_section "规则统计"
+    print_section "转发规则统计"
     local rule_count=$(wc -l < "${FORWARD_RULES_FILE}" 2>/dev/null || echo "0")
-    echo -e "${SECONDARY_LIGHT}总转发规则数: $rule_count${NC}"
-    echo -e "${SECONDARY_LIGHT}IPv4转发支持: 启用${NC}"
-    echo -e "${SECONDARY_LIGHT}IPv6转发支持: 启用${NC}"
-    echo -e "${SECONDARY_LIGHT}WAN接口: $WAN_INTERFACE${NC}"
-    echo -e "${SECONDARY_LIGHT}LAN接口: $LAN_INTERFACE${NC}"
+    echo -e "  总转发规则数: ${ACCENT_SUCCESS}$rule_count${NC}"
+    echo -e "  WAN接口: ${SECONDARY_LIGHT}$WAN_INTERFACE${NC} | LAN接口: ${SECONDARY_LIGHT}$LAN_INTERFACE${NC}"
     echo
-    
-    # 内核模块
-    print_section "相关内核模块"
-    lsmod | grep -E "(nf_tables|nf_nat|nf_conntrack)" || echo -e "${ACCENT_WARNING}未加载相关模块${NC}"
-    echo
-    
-    # 网络接口状态
-    print_section "网络接口状态"
-    ip addr show | grep -E "(inet |inet6 )" | grep -v "127.0.0.1"
-    echo
-    
+        
     # NFTables实际规则状态
-    print_section "NFTables规则状态"
-    echo -e "${SECONDARY_LIGHT}IPv4 NAT规则:${NC}"
-    nft list table ip nat 2>/dev/null | grep -E "(dnat|tcp dport|udp dport)" || echo -e "${SECONDARY_LIGHT}  无IPv4转发规则${NC}"
+    print_section "NFTables 规则集摘要"
+    echo -e "  ${SECONDARY_LIGHT}IPv4 NAT规则 (dnat):${NC}"
+    nft list table ip nat 2>/dev/null | grep -E "(dnat|tcp dport|udp dport)" | sed 's/^/    /' || echo -e "    ${SECONDARY_LIGHT}无IPv4转发规则${NC}"
+    echo -e "  ${SECONDARY_LIGHT}IPv4 NAT规则 (snat/masquerade):${NC}"
+    nft list table ip nat 2>/dev/null | grep -E "(snat|masquerade)" | sed 's/^/    /' || echo -e "    ${SECONDARY_LIGHT}无IPv4 SNAT规则${NC}"
     echo
-    echo -e "${SECONDARY_LIGHT}IPv6 NAT规则:${NC}"
-    nft list table ip6 nat 2>/dev/null | grep -E "(dnat|tcp dport|udp dport)" || echo -e "${SECONDARY_LIGHT}  无IPv6转发规则${NC}"
+    echo -e "  ${SECONDARY_LIGHT}IPv6 NAT规则 (dnat):${NC}"
+    nft list table ip6 nat 2>/dev/null | grep -E "(dnat|tcp dport|udp dport)" | sed 's/^/    /' || echo -e "    ${SECONDARY_LIGHT}无IPv6转发规则${NC}"
+    echo -e "  ${SECONDARY_LIGHT}IPv6 NAT规则 (snat/masquerade):${NC}"
+    nft list table ip6 nat 2>/dev/null | grep -E "(snat|masquerade)" | sed 's/^/    /' || echo -e "    ${SECONDARY_LIGHT}无IPv6 SNAT规则${NC}"
     echo
     
     # IP转发状态
-    print_section "系统转发状态"
+    print_section "系统 IP 转发状态"
     local ipv4_forward=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
     local ipv6_forward=$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null || echo "0")
     if [[ "$ipv4_forward" == "1" ]]; then
-        echo -e "${SECONDARY_LIGHT}IPv4转发: ${ACCENT_SUCCESS}启用${NC}"
+        echo -e "  IPv4转发: ${ACCENT_SUCCESS}启用${NC}"
     else
-        echo -e "${SECONDARY_LIGHT}IPv4转发: ${ACCENT_ERROR}禁用${NC}"
+        echo -e "  IPv4转发: ${ACCENT_ERROR}禁用${NC}"
     fi
     if [[ "$ipv6_forward" == "1" ]]; then
-        echo -e "${SECONDARY_LIGHT}IPv6转发: ${ACCENT_SUCCESS}启用${NC}"
+        echo -e "  IPv6转发: ${ACCENT_SUCCESS}启用${NC}"
     else
-        echo -e "${SECONDARY_LIGHT}IPv6转发: ${ACCENT_ERROR}禁用${NC}"
+        echo -e "  IPv6转发: ${ACCENT_ERROR}禁用${NC}"
     fi
     echo
     
-    # 系统转发日志
-    print_section "系统转发日志"
-    echo -e "${SECONDARY_LIGHT}最近的NFTables相关日志:${NC}"
-    journalctl -u nftables.service --no-pager -n 5 2>/dev/null || echo -e "${SECONDARY_LIGHT}  无可用日志${NC}"
+    # 系统转发日志 (最近5条)
+    print_section "NFTables 服务日志 (最近5条)"
+    journalctl -u nftables.service --no-pager -n 5 --quiet 2>/dev/null | sed 's/^/  /' || echo -e "  ${SECONDARY_LIGHT}无可用日志${NC}"
     echo
     
     # 检查内核连接跟踪
     print_section "连接跟踪状态"
-    if [[ -f /proc/sys/net/netfilter/nf_conntrack_count ]]; then
+    if [[ -f /proc/sys/net/netfilter/nf_conntrack_count && -f /proc/sys/net/netfilter/nf_conntrack_max ]]; then
         local current_conn=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo "0")
         local max_conn=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo "0")
-        echo -e "${SECONDARY_LIGHT}当前连接数: $current_conn / $max_conn${NC}"
+        echo -e "  当前连接数: ${ACCENT_SUCCESS}$current_conn${NC} / ${SECONDARY_LIGHT}$max_conn${NC}"
         
         # 计算连接使用率
         if [[ "$max_conn" -gt 0 ]]; then
             local usage=$((current_conn * 100 / max_conn))
-            if [[ "$usage" -lt 70 ]]; then
-                echo -e "${SECONDARY_LIGHT}使用率: ${ACCENT_SUCCESS}$usage%${NC}"
-            elif [[ "$usage" -lt 90 ]]; then
-                echo -e "${SECONDARY_LIGHT}使用率: ${ACCENT_WARNING}$usage%${NC}"
-            else
-                echo -e "${SECONDARY_LIGHT}使用率: ${ACCENT_ERROR}$usage%${NC}"
+            local usage_color="${ACCENT_SUCCESS}"
+            if (( usage > 90 )); then
+                usage_color="${ACCENT_ERROR}"
+            elif (( usage > 70 )); then
+                usage_color="${ACCENT_WARNING}"
             fi
+            echo -e "  使用率: ${usage_color}$usage%${NC}"
         fi
     else
-        echo -e "${SECONDARY_LIGHT}连接跟踪: ${ACCENT_WARNING}未启用${NC}"
+        echo -e "  连接跟踪模块: ${ACCENT_WARNING}状态未知或未启用${NC}"
     fi
     echo
-    
-    # 进程状态检查
-    print_section "相关进程状态"
-    echo -e "${SECONDARY_LIGHT}nftables 进程:${NC}"
-    if pgrep -f nft > /dev/null; then
-        echo -e "${SECONDARY_LIGHT}  ${ACCENT_SUCCESS}运行中${NC}"
-    else
-        echo -e "${SECONDARY_LIGHT}  ${ACCENT_WARNING}未运行${NC}"
-    fi
-    
-    echo -e "${SECONDARY_LIGHT}systemd-networkd 状态:${NC}"
-    if systemctl is-active systemd-networkd >/dev/null 2>&1; then
-        echo -e "${SECONDARY_LIGHT}  ${ACCENT_SUCCESS}活跃${NC}"
-    else
-        echo -e "${SECONDARY_LIGHT}  ${ACCENT_WARNING}非活跃${NC}"
-    fi
-    
+        
     wait_enter
     show_main_menu
 }
