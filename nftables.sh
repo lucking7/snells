@@ -149,6 +149,39 @@ wait_enter() {
     read -r
 }
 
+# IP地址格式验证
+validate_ip_format() {
+    local ip="$1"
+    
+    # IPv4格式验证
+    if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        local IFS='.'
+        local -a octets=($ip)
+        for octet in "${octets[@]}"; do
+            if [[ "$octet" -gt 255 ]]; then
+                return 1
+            fi
+        done
+        return 0
+    fi
+    
+    # IPv6格式验证（简单检查）
+    if [[ "$ip" =~ : ]]; then
+        # 检查是否包含有效的IPv6字符
+        if [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]]; then
+            return 0
+        fi
+    fi
+    
+    return 1
+}
+
+# 生成随机端口
+generate_random_port() {
+    # 生成1024-65535范围内的随机端口
+    echo $((1024 + RANDOM % (65535 - 1024 + 1)))
+}
+
 # 检查系统权限和兼容性
 check_system() {
     if [[ $EUID -ne 0 ]]; then
@@ -437,19 +470,81 @@ add_forward_rule_interactive() {
     esac
     
     # 外部端口
-    echo -ne "${PRIMARY}外部端口 (1-65535): ${NC}"
-    read -r external_port
+    echo -e "${PRIMARY}外部端口设置:${NC}"
+    echo -e "${PRIMARY}1${NC} 指定端口号"
+    echo -e "${PRIMARY}2${NC} 随机端口 (1024-65535)"
+    echo -ne "${PRIMARY}请选择 [1-2] (默认: 1): ${NC}"
+    read -r port_choice
+    [[ -z "$port_choice" ]] && port_choice="1"
     
-    if ! [[ "$external_port" =~ ^[0-9]+$ ]] || [[ "$external_port" -lt 1 || "$external_port" -gt 65535 ]]; then
-        print_error "端口号无效"
+    case "$port_choice" in
+        1)
+            echo -ne "${PRIMARY}请输入端口号 (1-65535): ${NC}"
+            read -r external_port
+            if ! [[ "$external_port" =~ ^[0-9]+$ ]] || [[ "$external_port" -lt 1 || "$external_port" -gt 65535 ]]; then
+                print_error "端口号无效"
+                wait_enter
+                show_forward_menu
+                return
+            fi
+            ;;
+        2)
+            external_port=$(generate_random_port)
+            echo -e "${PRIMARY}已生成随机端口: ${ACCENT_SUCCESS}$external_port${NC}"
+            ;;
+        *)
+            print_error "无效选择"
+            wait_enter
+            show_forward_menu
+            return
+            ;;
+    esac
+    
+    # 目标服务器IP
+    echo -ne "${PRIMARY}目标服务器IP地址: ${NC}"
+    read -r internal_ip
+    
+    # 验证IP地址格式
+    if ! validate_ip_format "$internal_ip"; then
+        print_error "IP地址格式无效"
         wait_enter
         show_forward_menu
         return
     fi
     
-    # 目标服务器IP
-    echo -ne "${PRIMARY}目标服务器IP地址: ${NC}"
-    read -r internal_ip
+    # 检测目标IP版本并询问监听协议
+    local target_ip_type="ipv4"
+    if [[ "$internal_ip" =~ : ]]; then
+        target_ip_type="ipv6"
+    fi
+    
+    echo -e "${PRIMARY}检测到目标服务器为: ${ACCENT_SUCCESS}$target_ip_type${NC}"
+    echo -e "${SECONDARY_LIGHT}推荐使用相同协议监听以获得最佳兼容性${NC}"
+    echo
+    echo -e "${PRIMARY}选择本地监听协议:${NC}"
+    echo -e "${PRIMARY}1${NC} IPv4监听 (推荐用于IPv4目标)"
+    echo -e "${PRIMARY}2${NC} IPv6监听 (推荐用于IPv6目标)"
+    if [[ "$target_ip_type" == "ipv4" ]]; then
+        echo -ne "${PRIMARY}请选择 [1-2] (默认: 1): ${NC}"
+        read -r listen_choice
+        [[ -z "$listen_choice" ]] && listen_choice="1"
+    else
+        echo -ne "${PRIMARY}请选择 [1-2] (默认: 2): ${NC}"
+        read -r listen_choice
+        [[ -z "$listen_choice" ]] && listen_choice="2"
+    fi
+    
+    local listen_protocol=""
+    case "$listen_choice" in
+        1) listen_protocol="ipv4" ;;
+        2) listen_protocol="ipv6" ;;
+        *) 
+            print_error "无效选择"
+            wait_enter
+            show_forward_menu
+            return
+            ;;
+    esac
     
     # 目标服务器端口
     echo -ne "${PRIMARY}目标服务器端口 (默认: $external_port): ${NC}"
@@ -457,38 +552,86 @@ add_forward_rule_interactive() {
     [[ -z "$internal_port" ]] && internal_port="$external_port"
     
     # 源IP限制
-    echo -ne "${PRIMARY}源IP限制 (留空表示不限制): ${NC}"
-    read -r source_ip
-    [[ -z "$source_ip" ]] && source_ip="any"
+    echo -e "${PRIMARY}源IP访问限制:${NC}"
+    echo -e "${PRIMARY}1${NC} 不限制源IP (推荐)"
+    echo -e "${PRIMARY}2${NC} 限制特定源IP"
+    echo -ne "${PRIMARY}请选择 [1-2] (默认: 1): ${NC}"
+    read -r source_choice
+    [[ -z "$source_choice" ]] && source_choice="1"
+    
+    local source_ip="any"
+    case "$source_choice" in
+        1)
+            source_ip="any"
+            ;;
+        2)
+            echo -ne "${PRIMARY}请输入允许的源IP地址: ${NC}"
+            read -r source_ip
+            if [[ -n "$source_ip" ]] && ! validate_ip_format "$source_ip"; then
+                print_error "源IP地址格式无效"
+                wait_enter
+                show_forward_menu
+                return
+            fi
+            [[ -z "$source_ip" ]] && source_ip="any"
+            ;;
+        *)
+            print_error "无效选择"
+            wait_enter
+            show_forward_menu
+            return
+            ;;
+    esac
     
     # 规则名称
-    echo -ne "${PRIMARY}规则名称 (可选): ${NC}"
-    read -r rule_name
-    [[ -z "$rule_name" ]] && rule_name="rule_$(date +%s)"
+    echo -e "${PRIMARY}规则名称设置:${NC}"
+    echo -e "${PRIMARY}1${NC} 自动生成名称 (推荐)"
+    echo -e "${PRIMARY}2${NC} 自定义名称"
+    echo -ne "${PRIMARY}请选择 [1-2] (默认: 1): ${NC}"
+    read -r name_choice
+    [[ -z "$name_choice" ]] && name_choice="1"
     
-    # IP版本检测
-    local ip_version="IPv4"
-    if [[ "$internal_ip" =~ : ]]; then
-        ip_version="IPv6"
-    fi
+    local rule_name=""
+    case "$name_choice" in
+        1)
+            rule_name="forward_${external_port}_$(date +%s)"
+            echo -e "${PRIMARY}已生成规则名称: ${ACCENT_SUCCESS}$rule_name${NC}"
+            ;;
+        2)
+            echo -ne "${PRIMARY}请输入规则名称: ${NC}"
+            read -r rule_name
+            [[ -z "$rule_name" ]] && rule_name="forward_${external_port}_$(date +%s)"
+            ;;
+        *)
+            print_error "无效选择"
+            wait_enter
+            show_forward_menu
+            return
+            ;;
+    esac
     
     # 确认添加
     echo
     print_section "规则确认 - 转发路径说明"
     echo -e "${SECONDARY_LIGHT}协议类型: $protocol${NC}"
-    echo -e "${SECONDARY_LIGHT}本地监听端口: $external_port${NC}"
-    echo -e "${SECONDARY_LIGHT}转发目标: $internal_ip:$internal_port${NC}"
-    echo -e "${SECONDARY_LIGHT}IP版本: $ip_version (自动检测)${NC}"
+    echo -e "${SECONDARY_LIGHT}本地监听: $listen_protocol 端口 $external_port${NC}"
+    echo -e "${SECONDARY_LIGHT}转发目标: $internal_ip:$internal_port ($target_ip_type)${NC}"
     echo -e "${SECONDARY_LIGHT}源IP限制: $source_ip${NC}"
     echo -e "${SECONDARY_LIGHT}规则名称: $rule_name${NC}"
     echo
-    echo -e "${PRIMARY}转发路径: ${NC}${SECONDARY_LIGHT}外部客户端 → 本地:$external_port → 目标服务器:$internal_ip:$internal_port${NC}"
+    if [[ "$listen_protocol" == "$target_ip_type" ]]; then
+        echo -e "${PRIMARY}转发路径: ${NC}${SECONDARY_LIGHT}外部客户端 → 本地$listen_protocol:$external_port → 目标$target_ip_type:$internal_ip:$internal_port${NC}"
+        echo -e "${ACCENT_SUCCESS}协议匹配，推荐配置${NC}"
+    else
+        echo -e "${PRIMARY}转发路径: ${NC}${SECONDARY_LIGHT}外部客户端 → 本地$listen_protocol:$external_port → 目标$target_ip_type:$internal_ip:$internal_port${NC}"
+        echo -e "${ACCENT_WARNING}跨协议转发，可能需要额外配置${NC}"
+    fi
     echo
     echo -ne "${ACCENT_WARNING}确认添加此规则? [y/N]: ${NC}"
     read -r confirm
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        if add_forward_rule_core "$protocol" "$external_port" "$internal_ip" "$internal_port" "$source_ip" "$rule_name"; then
+        if add_forward_rule_core "$protocol" "$external_port" "$internal_ip" "$internal_port" "$source_ip" "$rule_name" "$listen_protocol"; then
             print_success "转发规则添加成功！"
         else
             print_error "转发规则添加失败！"
@@ -509,27 +652,39 @@ add_forward_rule_core() {
     local internal_port="$4"
     local external_ip="${5:-any}"
     local rule_name="${6:-rule_$(date +%s)}"
+    local listen_protocol="${7:-ipv4}"
     
-    print_debug "添加规则: $protocol $external_port -> $internal_ip:$internal_port"
+    print_debug "添加规则: $protocol $external_port -> $internal_ip:$internal_port (监听: $listen_protocol)"
     
-    # 检测目标IP类型（IPv4 or IPv6）
+    # 检测目标IP类型
     local target_ip_type="ipv4"
     if [[ "$internal_ip" =~ : ]]; then
         target_ip_type="ipv6"
     fi
     
-    # 根据目标IP类型自动选择合适的NAT表
+    # 根据监听协议选择NAT表
     local table_family=""
-    if [[ "$target_ip_type" == "ipv4" ]]; then
+    if [[ "$listen_protocol" == "ipv4" ]]; then
         table_family="ip"
     else
         table_family="ip6"
     fi
     
-    # 构建规则条件
+    # 构建规则条件（根据监听协议）
     local src_condition=""
     if [[ "$external_ip" != "any" ]]; then
-        if [[ "$target_ip_type" == "ipv4" ]]; then
+        # 验证源IP与监听协议匹配
+        local source_ip_type="ipv4"
+        if [[ "$external_ip" =~ : ]]; then
+            source_ip_type="ipv6"
+        fi
+        
+        if [[ "$source_ip_type" != "$listen_protocol" ]]; then
+            print_error "源IP协议版本与监听协议不匹配"
+            return 1
+        fi
+        
+        if [[ "$listen_protocol" == "ipv4" ]]; then
             src_condition="ip saddr $external_ip "
         else
             src_condition="ip6 saddr $external_ip "
@@ -871,20 +1026,64 @@ delete_forward_rule_core() {
     local rule_line=$(sed -n "${rule_number}p" "${FORWARD_RULES_FILE}")
     IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp <<< "$rule_line"
     
-    # 从nftables中删除规则（这里需要更复杂的逻辑来匹配和删除具体规则）
-    print_warning "从NFTables中删除规则需要重新加载配置"
+    # 检测IP版本
+    local target_ip_type="ipv4"
+    if [[ "$internal_ip" =~ : ]]; then
+        target_ip_type="ipv6"
+    fi
+    
+    # 从NFTables中删除具体规则
+    local success=true
+    if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
+        # 尝试从IPv4和IPv6表中删除（因为我们不知道原始监听协议）
+        delete_nft_rule "ip" "tcp" "$external_port" "$internal_ip" "$internal_port" "$external_ip" || true
+        delete_nft_rule "ip6" "tcp" "$external_port" "$internal_ip" "$internal_port" "$external_ip" || true
+    fi
+    
+    if [[ "$protocol" == "udp" || "$protocol" == "both" ]]; then
+        delete_nft_rule "ip" "udp" "$external_port" "$internal_ip" "$internal_port" "$external_ip" || true
+        delete_nft_rule "ip6" "udp" "$external_port" "$internal_ip" "$internal_port" "$external_ip" || true
+    fi
     
     # 从文件中删除规则
     sed -i "${rule_number}d" "${FORWARD_RULES_FILE}"
     
-    # 检测IP版本
-    local ip_version="IPv4"
-    if [[ "$internal_ip" =~ : ]]; then
-        ip_version="IPv6"
+    print_success "规则已删除: $protocol $external_port -> $internal_ip:$internal_port ($target_ip_type)"
+    print_info "如删除不完整，请使用系统管理->重新加载规则"
+    return 0
+}
+
+# 删除NFTables中的具体规则
+delete_nft_rule() {
+    local table_family="$1"
+    local protocol="$2"
+    local external_port="$3"
+    local internal_ip="$4"
+    local internal_port="$5"
+    local external_ip="$6"
+    
+    # 构建规则匹配条件
+    local rule_pattern=""
+    if [[ "$external_ip" != "any" ]]; then
+        if [[ "$table_family" == "ip" ]]; then
+            rule_pattern="ip saddr $external_ip $protocol dport $external_port dnat to $internal_ip:$internal_port"
+        else
+            rule_pattern="ip6 saddr $external_ip $protocol dport $external_port dnat to $internal_ip:$internal_port"
+        fi
+    else
+        rule_pattern="$protocol dport $external_port dnat to $internal_ip:$internal_port"
     fi
     
-    print_success "规则已从记录中删除: $protocol $external_port -> $internal_ip:$internal_port ($ip_version)"
-    return 0
+    # 获取规则句柄并删除
+    local handle=$(nft -a list table $table_family nat 2>/dev/null | grep "$rule_pattern" | grep -o "handle [0-9]*" | awk '{print $2}' | head -1)
+    
+    if [[ -n "$handle" ]]; then
+        nft delete rule $table_family nat prerouting handle "$handle" 2>/dev/null
+        print_debug "已删除NFTables规则: $table_family nat handle $handle"
+        return 0
+    fi
+    
+    return 1
 }
 
 # 清空所有规则交互函数
@@ -998,7 +1197,19 @@ import_rules_core() {
         [[ "$protocol" =~ ^#.*$ ]] && continue
         [[ -z "$protocol" ]] && continue
         
-        if add_forward_rule_core "$protocol" "$external_port" "$internal_ip" "$internal_port" "$external_ip" "$rule_name"; then
+        # 验证IP地址格式
+        if ! validate_ip_format "$internal_ip"; then
+            print_warning "跳过无效IP地址的规则: $internal_ip"
+            continue
+        fi
+        
+        # 自动检测监听协议（导入时使用目标IP类型作为监听协议）
+        local listen_protocol="ipv4"
+        if [[ "$internal_ip" =~ : ]]; then
+            listen_protocol="ipv6"
+        fi
+        
+        if add_forward_rule_core "$protocol" "$external_port" "$internal_ip" "$internal_port" "$external_ip" "$rule_name" "$listen_protocol"; then
             ((imported++))
         fi
     done < "$import_file"
