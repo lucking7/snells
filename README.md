@@ -177,3 +177,9 @@ bash <(curl -Ls https://raw.githubusercontent.com/ilychi/snells/main/realm.sh)
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/ilychi/snells/main/brook.sh)
 ```
+
+### wstunnel
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/ilychi/snells/main/wstunnel.sh)
+```
