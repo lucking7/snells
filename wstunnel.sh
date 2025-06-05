@@ -1,16 +1,12 @@
 #!/bin/bash
 
-# wstunnel管理脚本
+# wstunnel管理脚本 - 简洁版
 # 功能：新建、删除、管理wstunnel转发规则
 
-# 颜色定义
+# 颜色定义 - 只使用三种颜色
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-WHITE='\033[1;37m'
 NC='\033[0m' # No Color
 
 # 配置文件路径
@@ -35,35 +31,42 @@ init_config() {
     fi
 }
 
-# 获取本机IP信息
+# 获取本机IP信息 - 使用单一API
 get_ip_info() {
-    local ipv4=""
-    local ipv6=""
-    local ip_info=""
+    local ip_data=$(curl -s "http://ip-api.com/json/?fields=status,country,regionName,city,isp,org,as,query" 2>/dev/null)
     
-    # 获取IPv4地址
-    ipv4=$(curl -s -4 http://ip.sb 2>/dev/null || echo "")
-    
-    # 获取IPv6地址
-    ipv6=$(curl -s -6 http://ip.sb 2>/dev/null || echo "")
-    
-    # 获取IP详细信息（ASN/ORG）
-    if [ -n "$ipv4" ]; then
-        ip_info=$(curl -s "http://ip-api.com/json/$ipv4" 2>/dev/null || echo "{}")
-        local asn=$(echo "$ip_info" | grep -oP '"as":\s*"[^"]*"' | cut -d'"' -f4)
-        local org=$(echo "$ip_info" | grep -oP '"org":\s*"[^"]*"' | cut -d'"' -f4)
-        local country=$(echo "$ip_info" | grep -oP '"country":\s*"[^"]*"' | cut -d'"' -f4)
+    if [ -n "$ip_data" ] && echo "$ip_data" | grep -q '"status":"success"'; then
+        local ipv4=$(echo "$ip_data" | grep -oP '"query":\s*"[^"]*"' | cut -d'"' -f4)
+        local country=$(echo "$ip_data" | grep -oP '"country":\s*"[^"]*"' | cut -d'"' -f4)
+        local city=$(echo "$ip_data" | grep -oP '"city":\s*"[^"]*"' | cut -d'"' -f4)
+        local isp=$(echo "$ip_data" | grep -oP '"isp":\s*"[^"]*"' | cut -d'"' -f4)
+        local as=$(echo "$ip_data" | grep -oP '"as":\s*"[^"]*"' | cut -d'"' -f4)
         
-        echo -e "${CYAN}本机IP信息：${NC}"
-        echo -e "  IPv4: ${GREEN}$ipv4${NC}"
-        [ -n "$ipv6" ] && echo -e "  IPv6: ${GREEN}$ipv6${NC}"
-        [ -n "$asn" ] && echo -e "  ASN: ${YELLOW}$asn${NC}"
-        [ -n "$org" ] && echo -e "  ORG: ${YELLOW}$org${NC}"
-        [ -n "$country" ] && echo -e "  位置: ${YELLOW}$country${NC}"
+        # 获取IPv6
+        local ipv6=$(curl -s -6 http://ip.sb 2>/dev/null || echo "")
+        
+        echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+        echo -e " IPv4: ${YELLOW}$ipv4${NC}"
+        [ -n "$ipv6" ] && echo -e " IPv6: ${YELLOW}$ipv6${NC}"
+        echo -e " 位置: ${YELLOW}$country, $city${NC}"
+        echo -e " ISP : ${YELLOW}$isp${NC}"
+        echo -e " ASN : ${YELLOW}$as${NC}"
+        echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
     else
-        echo -e "${RED}无法获取IP信息${NC}"
+        echo -e "${YELLOW}IP信息获取中...${NC}"
     fi
-    echo ""
+}
+
+# 获取随机可用端口
+get_random_port() {
+    local port
+    while true; do
+        port=$((RANDOM % 16383 + 49152))  # 49152-65535 动态端口范围
+        if ! ss -tuln | grep -q ":$port "; then
+            echo "$port"
+            return
+        fi
+    done
 }
 
 # 检查是否支持IPv4/IPv6
@@ -71,15 +74,8 @@ check_ip_support() {
     local has_ipv4=false
     local has_ipv6=false
     
-    # 检查IPv4
-    if ip -4 addr show | grep -q "inet "; then
-        has_ipv4=true
-    fi
-    
-    # 检查IPv6
-    if ip -6 addr show | grep -q "inet6 "; then
-        has_ipv6=true
-    fi
+    ip -4 addr show | grep -q "inet " && has_ipv4=true
+    ip -6 addr show | grep -q "inet6 " && has_ipv6=true
     
     echo "$has_ipv4:$has_ipv6"
 }
@@ -87,7 +83,7 @@ check_ip_support() {
 # 安装wstunnel
 install_wstunnel() {
     if [ -f "$WSTUNNEL_BIN" ]; then
-        echo -e "${GREEN}wstunnel已安装${NC}"
+        echo -e "${GREEN}✓ wstunnel已安装${NC}"
         return
     fi
     
@@ -96,191 +92,189 @@ install_wstunnel() {
     # 检测系统架构
     ARCH=$(uname -m)
     case $ARCH in
-        x86_64)
-            ARCH_NAME="x86_64"
-            ;;
-        aarch64)
-            ARCH_NAME="aarch64"
-            ;;
-        armv7l)
-            ARCH_NAME="armv7"
-            ;;
-        *)
-            echo -e "${RED}不支持的架构: $ARCH${NC}"
-            exit 1
-            ;;
+        x86_64) ARCH_NAME="x86_64" ;;
+        aarch64) ARCH_NAME="aarch64" ;;
+        armv7l) ARCH_NAME="armv7" ;;
+        *) echo -e "${RED}不支持的架构: $ARCH${NC}"; exit 1 ;;
     esac
     
     # 获取最新版本
     LATEST_VERSION=$(curl -s https://api.github.com/repos/erebe/wstunnel/releases/latest | grep -oP '"tag_name": "\K[^"]+')
     
     if [ -z "$LATEST_VERSION" ]; then
-        echo -e "${RED}无法获取最新版本信息${NC}"
+        echo -e "${RED}无法获取版本信息${NC}"
         exit 1
     fi
     
     # 下载二进制文件
     DOWNLOAD_URL="https://github.com/erebe/wstunnel/releases/download/${LATEST_VERSION}/wstunnel_${LATEST_VERSION}_linux_${ARCH_NAME}.tar.gz"
     
-    echo -e "${CYAN}下载地址: $DOWNLOAD_URL${NC}"
-    
     cd /tmp
-    wget -q --show-progress "$DOWNLOAD_URL" -O wstunnel.tar.gz
-    
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}下载失败${NC}"
-        exit 1
-    fi
+    wget -q --show-progress "$DOWNLOAD_URL" -O wstunnel.tar.gz || { echo -e "${RED}下载失败${NC}"; exit 1; }
     
     # 解压并安装
     tar -xzf wstunnel.tar.gz
     chmod +x wstunnel
     mv wstunnel "$WSTUNNEL_BIN"
-    
-    # 清理临时文件
     rm -f wstunnel.tar.gz
     
-    echo -e "${GREEN}wstunnel安装成功！${NC}"
+    echo -e "${GREEN}✓ wstunnel安装成功！${NC}"
 }
 
 # 配置服务器信息
 configure_server() {
-    echo -e "${CYAN}配置wstunnel服务器信息${NC}"
+    echo -e "\n${GREEN}配置服务器信息${NC}"
+    echo -e "${GREEN}─────────────────${NC}"
     
     # 读取当前配置
-    local current_url=$(cat "$CONFIG_FILE" | grep -oP '"url":\s*"[^"]*"' | cut -d'"' -f4)
-    local current_secret=$(cat "$CONFIG_FILE" | grep -oP '"secret":\s*"[^"]*"' | cut -d'"' -f4)
+    local current_url=$(cat "$CONFIG_FILE" | jq -r '.server.url' 2>/dev/null)
+    local current_secret=$(cat "$CONFIG_FILE" | jq -r '.server.secret' 2>/dev/null)
     
-    echo -e "当前服务器URL: ${YELLOW}${current_url:-未设置}${NC}"
-    read -p "请输入wstunnel服务器URL (例如: wss://example.com:443): " server_url
+    [ -n "$current_url" ] && [ "$current_url" != "null" ] && echo -e "当前: $current_url"
+    read -p "服务器URL [wss://example.com]: " server_url
+    server_url=${server_url:-$current_url}
     
-    echo -e "当前密钥: ${YELLOW}${current_secret:-未设置}${NC}"
-    read -p "请输入HTTP升级路径前缀密钥 (留空表示不使用): " secret
+    [ -n "$current_secret" ] && [ "$current_secret" != "null" ] && echo -e "当前密钥: ***"
+    read -p "密钥前缀 [留空跳过]: " secret
+    secret=${secret:-$current_secret}
     
     # 更新配置
-    local config=$(cat "$CONFIG_FILE")
-    config=$(echo "$config" | sed "s|\"url\":\s*\"[^\"]*\"|\"url\": \"$server_url\"|")
-    config=$(echo "$config" | sed "s|\"secret\":\s*\"[^\"]*\"|\"secret\": \"$secret\"|")
-    echo "$config" > "$CONFIG_FILE"
+    jq ".server.url = \"$server_url\" | .server.secret = \"$secret\"" "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
     
-    echo -e "${GREEN}服务器配置已更新${NC}"
+    echo -e "${GREEN}✓ 配置已保存${NC}"
 }
 
 # 添加转发规则
 add_tunnel() {
-    echo -e "${CYAN}添加新的转发规则${NC}"
+    echo -e "\n${GREEN}添加转发规则${NC}"
+    echo -e "${GREEN}─────────────${NC}"
     
-    # 选择协议
-    echo "请选择转发协议:"
-    echo "1) TCP"
-    echo "2) UDP"
-    echo "3) SOCKS5"
-    read -p "请选择 [1-3]: " protocol_choice
+    # 选择协议 - 默认TCP
+    echo -e "协议: [1]TCP [2]UDP [3]TCP+UDP [4]SOCKS5"
+    read -p "选择 [默认3]: " protocol_choice
+    protocol_choice=${protocol_choice:-3}
     
     case $protocol_choice in
         1) protocol="tcp" ;;
         2) protocol="udp" ;;
-        3) protocol="socks5" ;;
-        *) echo -e "${RED}无效选择${NC}"; return ;;
+        3) protocol="tcp+udp" ;;
+        4) protocol="socks5" ;;
+        *) protocol="tcp+udp" ;;
     esac
     
-    # 选择监听地址类型
+    # 选择监听地址 - 自动检测
     local ip_support=$(check_ip_support)
     local has_ipv4=$(echo "$ip_support" | cut -d':' -f1)
     local has_ipv6=$(echo "$ip_support" | cut -d':' -f2)
     
-    echo "请选择监听地址类型:"
-    local options=()
-    [ "$has_ipv4" = "true" ] && options+=("1) IPv4 (0.0.0.0)")
-    [ "$has_ipv6" = "true" ] && options+=("2) IPv6 ([::])")
-    options+=("3) 本地回环 (127.0.0.1)")
-    
-    for opt in "${options[@]}"; do
-        echo "$opt"
-    done
-    
-    read -p "请选择: " addr_choice
+    if [ "$has_ipv4" = "true" ] && [ "$has_ipv6" = "true" ]; then
+        echo -e "监听: [1]IPv4 [2]IPv6 [3]本地"
+        read -p "选择 [默认1]: " addr_choice
+        addr_choice=${addr_choice:-1}
+    elif [ "$has_ipv4" = "true" ]; then
+        addr_choice=1
+    elif [ "$has_ipv6" = "true" ]; then
+        addr_choice=2
+    else
+        addr_choice=3
+    fi
     
     case $addr_choice in
-        1) 
-            if [ "$has_ipv4" = "true" ]; then
-                listen_addr="0.0.0.0"
-            else
-                echo -e "${RED}系统不支持IPv4${NC}"
-                return
-            fi
-            ;;
-        2) 
-            if [ "$has_ipv6" = "true" ]; then
-                listen_addr="[::]"
-            else
-                echo -e "${RED}系统不支持IPv6${NC}"
-                return
-            fi
-            ;;
+        1) listen_addr="0.0.0.0" ;;
+        2) listen_addr="[::]" ;;
         3) listen_addr="127.0.0.1" ;;
-        *) echo -e "${RED}无效选择${NC}"; return ;;
+        *) listen_addr="0.0.0.0" ;;
     esac
     
-    # 输入端口
-    read -p "请输入本地监听端口: " local_port
+    # 端口 - 支持随机
+    read -p "本地端口 [回车随机]: " local_port
+    if [ -z "$local_port" ]; then
+        local_port=$(get_random_port)
+        echo -e "已分配端口: ${YELLOW}$local_port${NC}"
+    fi
     
     # SOCKS5不需要远程地址
     if [ "$protocol" != "socks5" ]; then
-        read -p "请输入远程地址 (例如: example.com 或 192.168.1.100): " remote_host
-        read -p "请输入远程端口: " remote_port
+        read -p "目标地址 [必填]: " remote_host
+        if [ -z "$remote_host" ]; then
+            echo -e "${RED}目标地址不能为空${NC}"
+            return
+        fi
         
-        # 对于UDP，询问超时设置
-        if [ "$protocol" = "udp" ]; then
-            read -p "UDP超时时间(秒，0表示不超时) [默认30]: " timeout
-            timeout=${timeout:-30}
+        read -p "目标端口 [默认同本地]: " remote_port
+        remote_port=${remote_port:-$local_port}
+        
+        # UDP超时设置
+        if [[ "$protocol" == *"udp"* ]]; then
+            read -p "UDP超时(秒) [默认0-不超时]: " timeout
+            timeout=${timeout:-0}
         fi
     fi
     
-    # 输入备注
-    read -p "请输入备注说明: " comment
+    # 备注 - 支持自动生成
+    read -p "备注 [回车自动]: " comment
+    if [ -z "$comment" ]; then
+        if [ "$protocol" = "socks5" ]; then
+            comment="SOCKS5-$local_port"
+        else
+            comment="${protocol^^}-${local_port}→${remote_host}:${remote_port}"
+        fi
+    fi
     
     # 生成唯一ID
     local tunnel_id=$(date +%s%N | md5sum | cut -c1-8)
     
-    # 构建转发规则
-    local tunnel_config=""
-    if [ "$protocol" = "socks5" ]; then
-        tunnel_config="$protocol://${listen_addr}:${local_port}"
+    # 处理TCP+UDP
+    if [ "$protocol" = "tcp+udp" ]; then
+        # 添加TCP规则
+        add_single_tunnel "$tunnel_id-tcp" "tcp" "$listen_addr" "$local_port" "$remote_host" "$remote_port" "" "$comment (TCP)"
+        # 添加UDP规则
+        add_single_tunnel "$tunnel_id-udp" "udp" "$listen_addr" "$local_port" "$remote_host" "$remote_port" "$timeout" "$comment (UDP)"
     else
-        tunnel_config="$protocol://${listen_addr}:${local_port}:${remote_host}:${remote_port}"
-        [ "$protocol" = "udp" ] && [ "$timeout" = "0" ] && tunnel_config="${tunnel_config}?timeout_sec=0"
+        add_single_tunnel "$tunnel_id" "$protocol" "$listen_addr" "$local_port" "$remote_host" "$remote_port" "$timeout" "$comment"
     fi
     
-    # 添加到配置文件
-    local new_tunnel="{\"id\": \"$tunnel_id\", \"protocol\": \"$protocol\", \"listen_addr\": \"$listen_addr\", \"local_port\": \"$local_port\""
-    [ "$protocol" != "socks5" ] && new_tunnel="$new_tunnel, \"remote_host\": \"$remote_host\", \"remote_port\": \"$remote_port\""
-    [ "$protocol" = "udp" ] && new_tunnel="$new_tunnel, \"timeout\": \"$timeout\""
-    new_tunnel="$new_tunnel, \"config\": \"$tunnel_config\", \"comment\": \"$comment\", \"enabled\": true}"
-    
-    # 更新配置文件
-    local config=$(cat "$CONFIG_FILE")
-    config=$(echo "$config" | sed 's/"tunnels": \[/"tunnels": ['"$new_tunnel"',/')
-    
-    # 如果是第一个tunnel，需要特殊处理
-    if echo "$config" | grep -q '"tunnels": \[\]'; then
-        config=$(echo "$config" | sed 's/"tunnels": \[\]/"tunnels": ['"$new_tunnel"']/')
-    fi
-    
-    echo "$config" | jq . > "$CONFIG_FILE"
-    
-    echo -e "${GREEN}转发规则添加成功！${NC}"
-    echo -e "ID: ${YELLOW}$tunnel_id${NC}"
-    echo -e "规则: ${YELLOW}$tunnel_config${NC}"
+    echo -e "\n${GREEN}✓ 转发规则添加成功！${NC}"
     
     # 重启服务
     restart_service
 }
 
+# 添加单个转发规则
+add_single_tunnel() {
+    local id=$1
+    local proto=$2
+    local listen=$3
+    local lport=$4
+    local rhost=$5
+    local rport=$6
+    local timeout=$7
+    local comment=$8
+    
+    # 构建配置
+    local tunnel_config=""
+    if [ "$proto" = "socks5" ]; then
+        tunnel_config="$proto://${listen}:${lport}"
+    else
+        tunnel_config="$proto://${listen}:${lport}:${rhost}:${rport}"
+        [ "$proto" = "udp" ] && [ "$timeout" = "0" ] && tunnel_config="${tunnel_config}?timeout_sec=0"
+    fi
+    
+    # 构建JSON对象
+    local new_tunnel="{\"id\": \"$id\", \"protocol\": \"$proto\", \"listen_addr\": \"$listen\", \"local_port\": \"$lport\""
+    [ "$proto" != "socks5" ] && new_tunnel="$new_tunnel, \"remote_host\": \"$rhost\", \"remote_port\": \"$rport\""
+    [ "$proto" = "udp" ] && new_tunnel="$new_tunnel, \"timeout\": \"$timeout\""
+    new_tunnel="$new_tunnel, \"config\": \"$tunnel_config\", \"comment\": \"$comment\", \"enabled\": true}"
+    
+    # 添加到配置
+    local tmp_file="$CONFIG_FILE.tmp"
+    jq ".tunnels += [$new_tunnel]" "$CONFIG_FILE" > "$tmp_file" && mv "$tmp_file" "$CONFIG_FILE"
+}
+
 # 列出所有转发规则
 list_tunnels() {
-    echo -e "${CYAN}当前转发规则列表：${NC}"
-    echo -e "${WHITE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "\n${GREEN}转发规则列表${NC}"
+    echo -e "${GREEN}═════════════════════════════════════════════════════════════${NC}"
     
     local tunnels=$(cat "$CONFIG_FILE" | jq -r '.tunnels[] | @base64')
     local index=1
@@ -296,28 +290,28 @@ list_tunnels() {
         local protocol=$(echo "$tunnel" | jq -r '.protocol')
         local listen_addr=$(echo "$tunnel" | jq -r '.listen_addr')
         local local_port=$(echo "$tunnel" | jq -r '.local_port')
-        local remote_host=$(echo "$tunnel" | jq -r '.remote_host // "N/A"')
-        local remote_port=$(echo "$tunnel" | jq -r '.remote_port // "N/A"')
+        local remote_host=$(echo "$tunnel" | jq -r '.remote_host // ""')
+        local remote_port=$(echo "$tunnel" | jq -r '.remote_port // ""')
         local comment=$(echo "$tunnel" | jq -r '.comment')
         local enabled=$(echo "$tunnel" | jq -r '.enabled')
         
-        # 状态显示
-        local status_color=$GREEN
-        local status_text="启用"
-        if [ "$enabled" = "false" ]; then
-            status_color=$RED
-            status_text="禁用"
+        # 状态标记
+        local status_mark=""
+        if [ "$enabled" = "true" ]; then
+            status_mark="${GREEN}●${NC}"
+        else
+            status_mark="${RED}○${NC}"
         fi
         
-        echo -e "${WHITE}[$index]${NC} ID: ${YELLOW}$id${NC} | 状态: ${status_color}$status_text${NC}"
-        echo -e "    协议: ${CYAN}$protocol${NC} | 监听: ${PURPLE}${listen_addr}:${local_port}${NC}"
+        # 显示规则
+        echo -e "$status_mark [$index] $comment"
+        echo -e "      ${protocol^^} ${listen_addr}:${local_port}"
         
-        if [ "$protocol" != "socks5" ]; then
-            echo -e "    目标: ${BLUE}${remote_host}:${remote_port}${NC}"
+        if [ -n "$remote_host" ]; then
+            echo -e "      → ${remote_host}:${remote_port}"
         fi
         
-        echo -e "    备注: ${WHITE}$comment${NC}"
-        echo -e "${WHITE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN}─────────────────────────────────────────────────────────────${NC}"
         
         ((index++))
     done
@@ -333,7 +327,11 @@ delete_tunnel() {
     fi
     
     echo ""
-    read -p "请输入要删除的规则序号: " index
+    read -p "删除规则序号 [0取消]: " index
+    
+    if [ "$index" = "0" ] || [ -z "$index" ]; then
+        return
+    fi
     
     # 验证输入
     if ! [[ "$index" =~ ^[0-9]+$ ]] || [ "$index" -lt 1 ] || [ "$index" -gt "$tunnel_count" ]; then
@@ -341,28 +339,11 @@ delete_tunnel() {
         return
     fi
     
-    # 获取要删除的规则信息
-    local tunnel_info=$(cat "$CONFIG_FILE" | jq ".tunnels[$((index-1))]")
-    local tunnel_id=$(echo "$tunnel_info" | jq -r '.id')
-    local tunnel_comment=$(echo "$tunnel_info" | jq -r '.comment')
+    # 删除规则
+    jq "del(.tunnels[$((index-1))])" "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
     
-    echo -e "${YELLOW}确认删除规则:${NC}"
-    echo -e "ID: $tunnel_id"
-    echo -e "备注: $tunnel_comment"
-    read -p "确认删除？(y/N): " confirm
-    
-    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-        # 删除规则
-        local new_config=$(cat "$CONFIG_FILE" | jq "del(.tunnels[$((index-1))])")
-        echo "$new_config" > "$CONFIG_FILE"
-        
-        echo -e "${GREEN}规则删除成功！${NC}"
-        
-        # 重启服务
-        restart_service
-    else
-        echo -e "${YELLOW}取消删除${NC}"
-    fi
+    echo -e "${GREEN}✓ 已删除${NC}"
+    restart_service
 }
 
 # 启用/禁用转发规则
@@ -375,7 +356,11 @@ toggle_tunnel() {
     fi
     
     echo ""
-    read -p "请输入要启用/禁用的规则序号: " index
+    read -p "切换规则序号 [0取消]: " index
+    
+    if [ "$index" = "0" ] || [ -z "$index" ]; then
+        return
+    fi
     
     # 验证输入
     if ! [[ "$index" =~ ^[0-9]+$ ]] || [ "$index" -lt 1 ] || [ "$index" -gt "$tunnel_count" ]; then
@@ -383,23 +368,14 @@ toggle_tunnel() {
         return
     fi
     
-    # 获取当前状态
+    # 切换状态
     local current_status=$(cat "$CONFIG_FILE" | jq -r ".tunnels[$((index-1))].enabled")
     local new_status="true"
-    local action="启用"
+    [ "$current_status" = "true" ] && new_status="false"
     
-    if [ "$current_status" = "true" ]; then
-        new_status="false"
-        action="禁用"
-    fi
+    jq ".tunnels[$((index-1))].enabled = $new_status" "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
     
-    # 更新状态
-    local new_config=$(cat "$CONFIG_FILE" | jq ".tunnels[$((index-1))].enabled = $new_status")
-    echo "$new_config" > "$CONFIG_FILE"
-    
-    echo -e "${GREEN}规则已${action}！${NC}"
-    
-    # 重启服务
+    echo -e "${GREEN}✓ 已更新${NC}"
     restart_service
 }
 
@@ -434,7 +410,7 @@ CONFIG_FILE="/etc/wstunnel/config.json"
 SERVER_URL=$(cat "$CONFIG_FILE" | jq -r '.server.url')
 SECRET=$(cat "$CONFIG_FILE" | jq -r '.server.secret')
 
-if [ -z "$SERVER_URL" ]; then
+if [ -z "$SERVER_URL" ] || [ "$SERVER_URL" = "null" ]; then
     echo "错误：未配置服务器URL"
     exit 1
 fi
@@ -443,7 +419,7 @@ fi
 CMD="/usr/local/bin/wstunnel client"
 
 # 添加HTTP升级路径前缀（如果有）
-if [ -n "$SECRET" ] && [ "$SECRET" != "null" ]; then
+if [ -n "$SECRET" ] && [ "$SECRET" != "null" ] && [ "$SECRET" != "" ]; then
     CMD="$CMD --http-upgrade-path-prefix $SECRET"
 fi
 
@@ -451,147 +427,145 @@ fi
 TUNNELS=$(cat "$CONFIG_FILE" | jq -r '.tunnels[] | select(.enabled == true) | .config')
 
 for tunnel in $TUNNELS; do
-    CMD="$CMD -L '$tunnel'"
+    CMD="$CMD -L $tunnel"
 done
 
 # 添加服务器URL
 CMD="$CMD $SERVER_URL"
 
 # 执行命令
-echo "执行命令: $CMD"
+echo "执行: $CMD"
 eval "$CMD"
 EOF
 
     chmod +x "/usr/local/bin/wstunnel-start.sh"
-    
-    # 重新加载systemd
     systemctl daemon-reload
     
-    echo -e "${GREEN}systemd服务创建成功！${NC}"
+    echo -e "${GREEN}✓ 服务创建成功${NC}"
 }
 
 # 启动服务
 start_service() {
     if ! systemctl is-active --quiet wstunnel-client; then
         systemctl start wstunnel-client
-        echo -e "${GREEN}wstunnel服务已启动${NC}"
+        echo -e "${GREEN}✓ 服务已启动${NC}"
     else
-        echo -e "${YELLOW}wstunnel服务已在运行中${NC}"
+        echo -e "${YELLOW}服务已在运行${NC}"
     fi
-    
-    # 显示服务状态
-    systemctl status wstunnel-client --no-pager
 }
 
 # 停止服务
 stop_service() {
     if systemctl is-active --quiet wstunnel-client; then
         systemctl stop wstunnel-client
-        echo -e "${GREEN}wstunnel服务已停止${NC}"
+        echo -e "${GREEN}✓ 服务已停止${NC}"
     else
-        echo -e "${YELLOW}wstunnel服务未在运行${NC}"
+        echo -e "${YELLOW}服务未运行${NC}"
     fi
 }
 
 # 重启服务
 restart_service() {
-    echo -e "${CYAN}正在重启wstunnel服务...${NC}"
     systemctl restart wstunnel-client
-    sleep 2
+    sleep 1
     
     if systemctl is-active --quiet wstunnel-client; then
-        echo -e "${GREEN}wstunnel服务重启成功${NC}"
+        echo -e "${GREEN}✓ 服务重启成功${NC}"
     else
-        echo -e "${RED}wstunnel服务重启失败${NC}"
-        systemctl status wstunnel-client --no-pager
+        echo -e "${RED}✗ 服务重启失败${NC}"
     fi
 }
 
 # 查看日志
 view_logs() {
-    echo -e "${CYAN}wstunnel服务日志：${NC}"
-    journalctl -u wstunnel-client -n 50 --no-pager
+    echo -e "\n${GREEN}最近日志${NC}"
+    echo -e "${GREEN}═════════════════════════════════════════════════════════════${NC}"
+    journalctl -u wstunnel-client -n 30 --no-pager
+}
+
+# 服务状态
+service_status() {
+    if systemctl is-active --quiet wstunnel-client 2>/dev/null; then
+        echo -e "服务: ${GREEN}● 运行中${NC}"
+        
+        # 显示进程信息
+        local pid=$(systemctl show -p MainPID wstunnel-client | cut -d= -f2)
+        if [ "$pid" != "0" ]; then
+            local mem=$(ps -p $pid -o rss= 2>/dev/null | awk '{printf "%.1f", $1/1024}')
+            [ -n "$mem" ] && echo -e "内存: ${YELLOW}${mem}MB${NC}"
+        fi
+    else
+        echo -e "服务: ${RED}○ 已停止${NC}"
+    fi
+    
+    # 显示服务器
+    local server_url=$(cat "$CONFIG_FILE" 2>/dev/null | jq -r '.server.url' 2>/dev/null || echo "")
+    if [ -n "$server_url" ] && [ "$server_url" != "null" ] && [ "$server_url" != "" ]; then
+        echo -e "服务器: ${YELLOW}$server_url${NC}"
+    else
+        echo -e "服务器: ${RED}未配置${NC}"
+    fi
+    
+    # 显示活跃规则数
+    local active_count=$(cat "$CONFIG_FILE" 2>/dev/null | jq '[.tunnels[] | select(.enabled == true)] | length' 2>/dev/null || echo "0")
+    local total_count=$(cat "$CONFIG_FILE" 2>/dev/null | jq '.tunnels | length' 2>/dev/null || echo "0")
+    echo -e "规则: ${YELLOW}$active_count/$total_count${NC}"
 }
 
 # 主菜单
 main_menu() {
     while true; do
         clear
-        echo -e "${PURPLE}╔═══════════════════════════════════════════════════════════╗${NC}"
-        echo -e "${PURPLE}║              ${WHITE}wstunnel 客户端管理脚本${PURPLE}                      ║${NC}"
-        echo -e "${PURPLE}╚═══════════════════════════════════════════════════════════╝${NC}"
+        echo -e "${GREEN}wstunnel 管理工具${NC}"
+        echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+        
+        # 显示服务状态
+        service_status
         echo ""
         
         # 显示IP信息
         get_ip_info
-        
-        # 显示服务状态
-        if systemctl is-active --quiet wstunnel-client 2>/dev/null; then
-            echo -e "服务状态: ${GREEN}● 运行中${NC}"
-        else
-            echo -e "服务状态: ${RED}● 已停止${NC}"
-        fi
-        
-        # 显示服务器配置
-        local server_url=$(cat "$CONFIG_FILE" 2>/dev/null | jq -r '.server.url' 2>/dev/null || echo "")
-        if [ -n "$server_url" ] && [ "$server_url" != "null" ]; then
-            echo -e "服务器: ${CYAN}$server_url${NC}"
-        else
-            echo -e "服务器: ${YELLOW}未配置${NC}"
-        fi
         echo ""
         
-        echo -e "${CYAN}转发管理：${NC}"
-        echo "  1) 添加转发规则"
-        echo "  2) 查看转发规则"
-        echo "  3) 删除转发规则"
-        echo "  4) 启用/禁用规则"
+        # 菜单选项
+        echo -e "${GREEN}转发管理${NC}"
+        echo -e " 1) 添加规则    2) 查看规则"
+        echo -e " 3) 删除规则    4) 启用/禁用"
         echo ""
-        echo -e "${CYAN}服务管理：${NC}"
-        echo "  5) 配置服务器"
-        echo "  6) 启动服务"
-        echo "  7) 停止服务"
-        echo "  8) 重启服务"
-        echo "  9) 查看日志"
+        echo -e "${GREEN}服务管理${NC}"
+        echo -e " 5) 配置服务器  6) 启动服务"
+        echo -e " 7) 停止服务    8) 重启服务"
+        echo -e " 9) 查看日志"
         echo ""
-        echo -e "${CYAN}系统功能：${NC}"
-        echo "  10) 安装/更新 wstunnel"
-        echo "  11) 设置开机启动"
-        echo "  12) 取消开机启动"
+        echo -e "${GREEN}系统管理${NC}"
+        echo -e " a) 更新程序    b) 开机启动"
+        echo -e " 0) 退出"
         echo ""
-        echo "  0) 退出"
-        echo ""
-        read -p "请选择操作 [0-12]: " choice
+        read -p "请选择: " choice
         
         case $choice in
             1) add_tunnel ;;
-            2) list_tunnels; echo ""; read -p "按回车键继续..." ;;
+            2) list_tunnels; echo ""; read -p "按回车继续..." ;;
             3) delete_tunnel ;;
             4) toggle_tunnel ;;
             5) configure_server ;;
-            6) start_service; echo ""; read -p "按回车键继续..." ;;
-            7) stop_service; echo ""; read -p "按回车键继续..." ;;
-            8) restart_service; echo ""; read -p "按回车键继续..." ;;
-            9) view_logs; echo ""; read -p "按回车键继续..." ;;
-            10) install_wstunnel; echo ""; read -p "按回车键继续..." ;;
-            11) 
-                systemctl enable wstunnel-client
-                echo -e "${GREEN}已设置开机启动${NC}"
-                echo ""; read -p "按回车键继续..."
-                ;;
-            12) 
-                systemctl disable wstunnel-client
-                echo -e "${GREEN}已取消开机启动${NC}"
-                echo ""; read -p "按回车键继续..."
-                ;;
-            0) 
-                echo -e "${GREEN}感谢使用，再见！${NC}"
-                exit 0
-                ;;
-            *) 
-                echo -e "${RED}无效的选择，请重试${NC}"
+            6) start_service; sleep 2 ;;
+            7) stop_service; sleep 2 ;;
+            8) restart_service; sleep 2 ;;
+            9) view_logs; echo ""; read -p "按回车继续..." ;;
+            a|A) install_wstunnel; echo ""; read -p "按回车继续..." ;;
+            b|B) 
+                if systemctl is-enabled --quiet wstunnel-client 2>/dev/null; then
+                    systemctl disable wstunnel-client
+                    echo -e "${GREEN}✓ 已取消开机启动${NC}"
+                else
+                    systemctl enable wstunnel-client
+                    echo -e "${GREEN}✓ 已设置开机启动${NC}"
+                fi
                 sleep 2
                 ;;
+            0) echo -e "\n${GREEN}再见！${NC}"; exit 0 ;;
+            *) echo -e "${RED}无效选择${NC}"; sleep 1 ;;
         esac
     done
 }
@@ -608,14 +582,14 @@ check_dependencies() {
     done
     
     if [ ${#missing[@]} -gt 0 ]; then
-        echo -e "${YELLOW}正在安装缺失的依赖...${NC}"
+        echo -e "${YELLOW}安装依赖...${NC}"
         if command -v apt-get &> /dev/null; then
             apt-get update -qq
-            apt-get install -y "${missing[@]}"
+            apt-get install -y "${missing[@]}" >/dev/null 2>&1
         elif command -v yum &> /dev/null; then
-            yum install -y "${missing[@]}"
+            yum install -y "${missing[@]}" >/dev/null 2>&1
         else
-            echo -e "${RED}无法自动安装依赖，请手动安装: ${missing[*]}${NC}"
+            echo -e "${RED}请手动安装: ${missing[*]}${NC}"
             exit 1
         fi
     fi
@@ -626,13 +600,13 @@ main() {
     check_dependencies
     init_config
     
-    # 检查wstunnel是否已安装
+    # 检查wstunnel
     if [ ! -f "$WSTUNNEL_BIN" ]; then
-        echo -e "${YELLOW}检测到wstunnel未安装${NC}"
+        echo -e "${YELLOW}首次运行，正在初始化...${NC}"
         install_wstunnel
     fi
     
-    # 创建systemd服务（如果不存在）
+    # 创建服务
     if [ ! -f "$SERVICE_DIR/wstunnel-client.service" ]; then
         create_service
     fi
