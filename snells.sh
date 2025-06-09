@@ -247,16 +247,12 @@ create_snell_conf() {
         fi
     fi
 
-    # TFO is now enabled by default, without a prompt.
-    tfo_config="tfo = true"
-
     # Write the configuration file
     cat > "${snell_workspace}/snell-server.conf" << EOF
 [snell-server]
 listen = ${listen_addr}
 psk = ${snell_psk}
 ipv6 = ${ipv6_enabled:-true}
-${tfo_config}
 ${dns_config}
 EOF
 
@@ -379,16 +375,20 @@ config_shadow_tls() {
         client_snell_psk=$(grep -oP 'psk = \K.*' "${snell_workspace}/snell-server.conf")
     fi
 
-    # 为客户端配置确定TFO设置
-    local client_tfo_value="true" # 默认值，如果无法从配置文件读取
-    if [[ -f "${snell_workspace}/snell-server.conf" ]]; then
-        local current_tfo_setting=$(grep -oP 'tfo = \K(true|false)' "${snell_workspace}/snell-server.conf")
-        if [[ -n "$current_tfo_setting" ]]; then
-            client_tfo_value="$current_tfo_setting"
-        fi
+    # 客户端配置选项
+    read -rp "客户端启用 TFO (TCP Fast Open)? (Y/n): " client_tfo_choice
+    local client_tfo_value="true"
+    if [[ $client_tfo_choice =~ ^[Nn]$ ]]; then
+        client_tfo_value="false"
     fi
 
-    echo -e "${colo} = snell, ${server_ip}, ${shadow_tls_port}, psk=${client_snell_psk}, version=4, reuse=true, tfo=${client_tfo_value}, shadow-tls-password=${shadow_tls_password}, shadow-tls-sni=${shadow_tls_tls_domain}, shadow-tls-version=3"
+    read -rp "客户端启用 Session Reuse? (y/N): " client_reuse_choice
+    local client_reuse_value="false"
+    if [[ $client_reuse_choice =~ ^[Yy]$ ]]; then
+        client_reuse_value="true"
+    fi
+
+    echo -e "${colo} = snell, ${server_ip}, ${shadow_tls_port}, psk=${client_snell_psk}, version=4, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${shadow_tls_password}, shadow-tls-sni=${shadow_tls_tls_domain}, shadow-tls-version=3"
     msg ok "Shadow-TLS 配置已完成."
 }
 
@@ -786,12 +786,10 @@ display_config() {
     local snell_listen=$(echo "$snell_config" | grep -oP 'listen = \K.*')
     local snell_psk=$(echo "$snell_config" | grep -oP 'psk = \K.*')
     local snell_ipv6=$(echo "$snell_config" | grep -oP 'ipv6 = \K.*')
-    local snell_tfo=$(echo "$snell_config" | grep -oP 'tfo = \K.*' || echo "false")
     
     echo -e "${green}监听地址:${reset} $snell_listen"
     echo -e "${green}PSK密钥:${reset} $snell_psk"
     echo -e "${green}IPv6支持:${reset} $snell_ipv6"
-    echo -e "${green}TCP Fast Open:${reset} $snell_tfo"
     
     # 显示ShadowTLS配置（如果存在）
     if systemctl is-active --quiet shadow-tls; then
@@ -838,15 +836,29 @@ display_config() {
     
     local port=$(echo "$snell_listen" | grep -oP ':\K\d+$')
     
+    # 客户端配置选项
+    msg info "请为生成的客户端配置选择参数:"
+    read -rp "客户端启用 TFO (TCP Fast Open)? (Y/n): " client_tfo_choice
+    local client_tfo_value="true"
+    if [[ $client_tfo_choice =~ ^[Nn]$ ]]; then
+        client_tfo_value="false"
+    fi
+
+    read -rp "客户端启用 Session Reuse? (y/N): " client_reuse_choice
+    local client_reuse_value="false"
+    if [[ $client_reuse_choice =~ ^[Yy]$ ]]; then
+        client_reuse_value="true"
+    fi
+    
     if systemctl is-active --quiet shadow-tls; then
         local shadow_port=$(echo "$shadow_listen" | grep -oP ':\K\d+$')
         echo -e "${cyan}Surge配置:${reset}"
         echo -e "[Proxy]"
-        echo -e "Snell = snell, ${server_ip}, ${shadow_port}, psk=${snell_psk}, version=4, reuse=true, tfo=${snell_tfo}, shadow-tls-password=${shadow_password}, shadow-tls-sni=${shadow_tls%%:*}, shadow-tls-version=3"
+        echo -e "Snell = snell, ${server_ip}, ${shadow_port}, psk=${snell_psk}, version=4, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${shadow_password}, shadow-tls-sni=${shadow_tls%%:*}, shadow-tls-version=3"
     else
         echo -e "${cyan}Surge配置:${reset}"
         echo -e "[Proxy]"
-        echo -e "Snell = snell, ${server_ip}, ${port}, psk=${snell_psk}, version=4, reuse=true, tfo=${snell_tfo}"
+        echo -e "Snell = snell, ${server_ip}, ${port}, psk=${snell_psk}, version=4, reuse=${client_reuse_value}, tfo=${client_tfo_value}"
     fi
     
     echo ""
