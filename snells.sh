@@ -149,6 +149,44 @@ install_pkg() {
     apt-get install -y dnsutils ${dependencies[@]}  
 }
 
+# 自动创建Swap
+check_and_create_swap() {
+    # 检查总物理内存 (MB)
+    local total_mem=$(free -m | awk '/^Mem:/{print $2}')
+    
+    # 检查是否已存在 swap
+    if swapon --show | grep -q '/'; then
+        msg info "已存在Swap，跳过创建。"
+        return 0
+    fi
+
+    # 如果内存小于520MB，创建Swap
+    if [ "$total_mem" -lt 520 ]; then
+        msg warn "系统内存小于 520MB (${total_mem}MB)，且未发现Swap。正在创建1GB Swap文件..."
+        
+        # 使用 fallocate 创建 swap 文件，如果失败则使用 dd
+        fallocate -l 1G /swapfile
+        if [ $? -ne 0 ]; then
+            msg err "fallocate 创建失败，尝试使用 dd"
+            dd if=/dev/zero of=/swapfile bs=1M count=1024
+        fi
+
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+
+        # 检查 /etc/fstab 中是否已存在 /swapfile
+        if ! grep -q '/swapfile' /etc/fstab; then
+            echo '/swapfile none swap sw 0 0' >> /etc/fstab
+            msg ok "已将Swap配置写入 /etc/fstab，实现开机自启。"
+        fi
+        
+        msg ok "1GB Swap文件已创建并启用。"
+    else
+        msg info "系统内存为 ${total_mem}MB，无需自动创建Swap。"
+    fi
+}
+
 # Function to generate a random PSK
 generate_random_psk() {
     tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32  
@@ -438,6 +476,7 @@ install_all() {
 # Install Snell only without IP detection
 install_snell_without_ip() {
     install_pkg
+    check_and_create_swap
 
     msg info "下载 Snell..."
     mkdir -p "${snell_workspace}"
@@ -477,8 +516,23 @@ install_snell_without_ip() {
         echo -e "PSK: ${snell_psk}"
         echo -e "版本: 4"
         echo ""
+
+        # 客户端配置选项
+        msg info "请为生成的客户端配置选择参数:"
+        read -rp "客户端启用 TFO (TCP Fast Open)? (Y/n): " client_tfo_choice
+        local client_tfo_value="true"
+        if [[ $client_tfo_choice =~ ^[Nn]$ ]]; then
+            client_tfo_value="false"
+        fi
+
+        read -rp "客户端启用 Session Reuse? (y/N): " client_reuse_choice
+        local client_reuse_value="false"
+        if [[ $client_reuse_choice =~ ^[Yy]$ ]]; then
+            client_reuse_value="true"
+        fi
+
         echo -e "${cyan}Surge配置示例: ${reset}"
-        echo -e "${colo} = snell, ${server_ip}, ${snell_port}, psk=${snell_psk}, version=4"
+        echo -e "${colo} = snell, ${server_ip}, ${snell_port}, psk=${snell_psk}, version=4, reuse=${client_reuse_value}, tfo=${client_tfo_value}"
     else
         _red "Snell 服务启动失败，请检查配置或执行以下命令查看日志:"
         echo -e "${yellow}systemctl status snell${reset}"
@@ -512,6 +566,7 @@ install_snell() {
 # Install Shadow-TLS only without IP detection
 install_shadow_tls_without_ip() {
     install_pkg
+    check_and_create_swap
 
     msg info "下载 Shadow-TLS..."
     mkdir -p "${shadow_tls_workspace}"
