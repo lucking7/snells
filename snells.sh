@@ -181,11 +181,21 @@ create_snell_conf() {
     read -rp "Enter PSK for Snell (Leave it blank to generate a random one): " snell_psk
     [[ -z ${snell_psk} ]] && snell_psk=$(generate_random_psk) && echo "[INFO] Generated a random PSK for Snell: $snell_psk"
     
-    # Get DNS settings
-    read -rp "Enter custom DNS servers (comma-separated, leave blank for default): " custom_dns
-    if [[ -n $custom_dns ]]; then
+    # Get DNS settings, prioritizing system DNS
+    system_dns=$(grep -oP '(?<=nameserver\s)\S+' /etc/resolv.conf | tr '\n' ',' | sed 's/,$//')
+    prompt_dns="Enter custom DNS servers (comma-separated, leave blank for default): "
+    if [[ -n "$system_dns" ]]; then
+        prompt_dns="Enter custom DNS servers (comma-separated, leave blank for system DNS [${system_dns}]): "
+    fi
+    read -rp "$prompt_dns" custom_dns
+
+    if [[ -n "$custom_dns" ]]; then
         dns_config="dns = $custom_dns"
+    elif [[ -n "$system_dns" ]]; then
+        dns_config="dns = $system_dns"
+        msg info "使用系统DNS: $system_dns"
     else
+        msg warn "无法从 /etc/resolv.conf 获取系统DNS。使用预设DNS。"
         # 设置默认DNS，根据是否启用IPv6来决定使用哪些DNS服务器
         if [[ $ip_type == "both" || $ip_type == "ipv6" ]]; then
             # 带IPv6的默认DNS (Cloudflare + Google)
@@ -237,14 +247,8 @@ create_snell_conf() {
         fi
     fi
 
-    # 询问是否启用TFO
-    read -rp "是否启用TFO(TCP Fast Open)? (y/n): " enable_tfo
-    if [[ $enable_tfo =~ ^[Yy]$ ]]; then
-        tfo_config="tfo = true"
-        msg info "已启用TCP Fast Open"
-    else
-        tfo_config="tfo = false"
-    fi
+    # TFO is now enabled by default, without a prompt.
+    tfo_config="tfo = true"
 
     # Write the configuration file
     cat > "${snell_workspace}/snell-server.conf" << EOF
@@ -705,9 +709,10 @@ After=network.target
 [Service]
 User=root
 WorkingDirectory=${snell_workspace}
-ExecStart=/bin/bash -c '${snell_workspace}/snell-server -c snell-server.conf 2>&1 | tee /var/log/snell.log'
-Restart=on-failure
+ExecStart=${snell_workspace}/snell-server -c snell-server.conf
+Restart=always
 RestartSec=5
+OOMScoreAdjust=-500
 
 [Install]
 WantedBy=multi-user.target
@@ -737,12 +742,13 @@ menu() {
     _yellow "3) 管理"
     _cyan "4) 修改配置"
     _magenta "5) 显示配置信息"
+    _green "6) 更新 Snell"
     _red "0) 退出"
     echo ""
     
     echo -e "───────────────────────────────────────"
     
-    read -p "请输入选择 [0-5]: " operation
+    read -p "请输入选择 [0-6]: " operation
 
     case $operation in  
         1) install ;;
@@ -750,6 +756,7 @@ menu() {
         3) manage ;;
         4) modify ;;
         5) display_config ;;
+        6) update_snell && menu ;;
         0) echo -e "${green}再见!${reset}" && exit 0 ;;
         *) err "无效选择" && sleep 2 && menu ;;
     esac
@@ -924,6 +931,77 @@ restart_services() {
     
     read -p "按任意键返回..." _
     manage
+}
+
+# Update Snell
+update_snell() {
+    if [[ ! -f "${snell_workspace}/snell-server" ]]; then
+        msg err "Snell 未安装，无法更新。"
+        return
+    fi
+
+    # 获取当前版本
+    current_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+')
+    if [ -z "$current_version" ]; then
+        msg err "无法获取当前 Snell 版本。"
+        return
+    fi
+    msg info "当前 Snell 版本: $current_version"
+
+    # 获取最新版本
+    latest_version=$(curl -s https://manual.nssurge.com/others/snell.html | grep -oP 'snell-server-v\K[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+    if [ -z "$latest_version" ]; then
+        msg err "无法获取最新 Snell 版本号。"
+        return
+    fi
+    msg info "最新 Snell 版本: $latest_version"
+
+    if [[ "$current_version" == "$latest_version" ]]; then
+        msg ok "Snell 已是最新版本。"
+        return
+    fi
+
+    msg info "发现新版本 Snell ($latest_version)。"
+    read -rp "是否更新? (y/n): " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        msg info "已取消更新。"
+        return
+    fi
+
+    msg info "正在更新 Snell..."
+    systemctl stop snell
+
+    cd "${snell_workspace}" || exit 1
+    
+    arch=$(uname -m)
+    case $arch in
+    x86_64) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-amd64.zip" ;;
+    aarch64) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-aarch64.zip" ;;
+    armv7l) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-armv7l.zip" ;;
+    i386) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-i386.zip" ;;
+    *) msg err "不支持的架构: $arch" && exit 1 ;;
+    esac
+
+    msg info "下载 Snell 版本 ${latest_version}..."
+    wget -O snell-server.zip "${snell_url}"
+    if [ $? -ne 0 ]; then
+        msg err "下载 Snell 失败。正在重启旧版服务。"
+        systemctl start snell
+        return
+    fi
+
+    unzip -o snell-server.zip
+    rm snell-server.zip
+    chmod +x snell-server
+
+    systemctl start snell
+    sleep 2
+    if systemctl is-active --quiet snell; then
+        new_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+')
+        msg ok "Snell 更新成功，当前版本: $new_version"
+    else
+        msg err "Snell 更新后启动失败，请检查日志。"
+    fi
 }
 
 # Script starts here  
