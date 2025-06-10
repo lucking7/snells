@@ -517,20 +517,11 @@ add_forward_rule_interactive() {
     print_header
     print_section "添加转发规则"
     
-    echo -e "${LIGHT_BLUE}NAT转发原理说明:${NC}"
-    echo -e "${LIGHT_GRAY}1. 外部客户端连接到本地服务器的指定端口${NC}"
-    echo -e "${LIGHT_GRAY}2. DNAT：将目标地址转换，转发到目标服务器${NC}"
-    echo -e "${LIGHT_GRAY}3. SNAT：masquerade伪装源地址，确保返回流量经过本机${NC}"
-    echo -e "${LIGHT_GRAY}4. 支持TCP/UDP协议区分和IPv4/IPv6双栈${NC}"
-    echo -e "${LIGHT_GRAY}5. 自动匹配监听协议与目标IP版本确保兼容性${NC}"
-    echo
+
     
     # 协议选择
-    echo -e "${LIGHT_BLUE}选择协议类型:${NC}"
-    echo -e "${LIGHT_BLUE}1${NC} TCP"
-    echo -e "${LIGHT_BLUE}2${NC} UDP"
-    echo -e "${LIGHT_BLUE}3${NC} TCP + UDP (推荐)"
-    echo -ne "${ACCENT_BLUE}请选择 [1-3] (默认: 3): ${NC}"
+    echo -e "${LIGHT_BLUE}1${NC} TCP  ${LIGHT_BLUE}2${NC} UDP  ${LIGHT_BLUE}3${NC} TCP + UDP"
+    echo -ne "${ACCENT_BLUE}协议 [1-3]: ${NC}"
     read -r proto_choice
     [[ -z "$proto_choice" ]] && proto_choice="3"
     
@@ -548,9 +539,7 @@ add_forward_rule_interactive() {
     esac
     
     # 外部端口
-    echo -e "${LIGHT_BLUE}外部端口设置:${NC}"
-    echo -e "${LIGHT_GRAY}直接输入端口号或回车使用随机端口${NC}"
-    echo -ne "${ACCENT_BLUE}端口号 (1-65535，回车=随机): ${NC}"
+    echo -ne "${ACCENT_BLUE}外部端口 (回车=随机): ${NC}"
     read -r external_port
     
     if [[ -z "$external_port" ]]; then
@@ -564,11 +553,11 @@ add_forward_rule_interactive() {
     fi
     
     # 内网IP
-    echo -ne "${ACCENT_BLUE}目标服务器IP地址: ${NC}"
+    echo -ne "${ACCENT_BLUE}目标IP: ${NC}"
     read -r internal_ip
     
     if [[ -z "$internal_ip" ]]; then
-        print_error "目标IP地址不能为空"
+        print_error "目标IP不能为空"
         wait_enter
         show_forward_menu
         return
@@ -578,69 +567,42 @@ add_forward_rule_interactive() {
     local target_ip_type="unknown"
     if [[ "$internal_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
         target_ip_type="ipv4"
-        print_success "检测到目标服务器: ipv4"
     elif [[ "$internal_ip" =~ ^[0-9a-fA-F:]+$ ]]; then
         target_ip_type="ipv6"
-        print_success "检测到目标服务器: ipv6"
     else
-        print_error "无效的IP地址格式"
+        print_error "无效IP格式"
         wait_enter
         show_forward_menu
         return
     fi
     
-    print_info "自动设置监听协议: $target_ip_type"
-    print_info "使用相同协议确保最佳兼容性"
-    
     # 内网端口
-    echo -ne "${ACCENT_BLUE}目标服务器端口 (默认: $external_port): ${NC}"
+    echo -ne "${ACCENT_BLUE}目标端口 (默认: $external_port): ${NC}"
     read -r internal_port
     [[ -z "$internal_port" ]] && internal_port="$external_port"
     
     # 源IP限制
-    echo -e "${LIGHT_BLUE}源IP访问限制:${NC}"
-    echo -e "${LIGHT_BLUE}1${NC} 不限制源IP (推荐)"
-    echo -e "${LIGHT_BLUE}2${NC} 限制特定源IP"
-    echo -ne "${ACCENT_BLUE}请选择 [1-2] (默认: 1): ${NC}"
+    echo -e "${LIGHT_BLUE}1${NC} 不限制  ${LIGHT_BLUE}2${NC} 限制源IP"
+    echo -ne "${ACCENT_BLUE}源IP限制 [1-2]: ${NC}"
     read -r source_choice
     [[ -z "$source_choice" ]] && source_choice="1"
     
     local source_ip="any"
     if [[ "$source_choice" == "2" ]]; then
-        echo -ne "${ACCENT_BLUE}允许访问的源IP地址: ${NC}"
+        echo -ne "${ACCENT_BLUE}源IP: ${NC}"
         read -r source_ip
         [[ -z "$source_ip" ]] && source_ip="any"
     fi
     
     # 规则名称
-    echo -e "${LIGHT_BLUE}规则名称设置:${NC}"
-    echo -e "${LIGHT_BLUE}1${NC} 自动生成名称 (推荐)"
-    echo -e "${LIGHT_BLUE}2${NC} 自定义名称"
-    echo -ne "${ACCENT_BLUE}请选择 [1-2] (默认: 1): ${NC}"
-    read -r name_choice
-    [[ -z "$name_choice" ]] && name_choice="1"
-    
-    local rule_name=""
-    if [[ "$name_choice" == "2" ]]; then
-        echo -ne "${ACCENT_BLUE}自定义规则名称: ${NC}"
-        read -r rule_name
-    fi
+    echo -ne "${ACCENT_BLUE}规则名称 (回车=自动): ${NC}"
+    read -r rule_name
     [[ -z "$rule_name" ]] && rule_name="forward_${external_port}_$(date +%s)"
-    print_success "已生成规则名称: $rule_name"
     
     # 确认添加
     echo
-    print_section "规则确认 - 转发路径说明"
-    echo -e "${LIGHT_GRAY}协议类型: $protocol${NC}"
-    echo -e "${LIGHT_GRAY}本地监听: $target_ip_type 端口 $external_port${NC}"
-    echo -e "${LIGHT_GRAY}转发目标: $internal_ip:$internal_port ($target_ip_type)${NC}"
-    echo -e "${LIGHT_GRAY}源IP限制: $source_ip${NC}"
-    echo -e "${LIGHT_GRAY}规则名称: $rule_name${NC}"
-    echo
-    echo -e "${SUCCESS_GREEN}转发路径: 外部客户端 → 本地$target_ip_type:$external_port → 目标$target_ip_type:$internal_ip:$internal_port${NC}"
-    echo -e "${SUCCESS_GREEN}协议自动匹配，最佳兼容性${NC}"
-    echo
-    echo -ne "${WARNING_YELLOW}确认添加此规则? [Y/n] (回车=确认): ${NC}"
+    echo -e "${LIGHT_GRAY}$protocol $external_port → $internal_ip:$internal_port ($rule_name)${NC}"
+    echo -ne "${WARNING_YELLOW}确认添加? [Y/n]: ${NC}"
     read -r confirm
     [[ -z "$confirm" ]] && confirm="y"
     
@@ -672,9 +634,9 @@ add_forward_rule_core() {
     
     # 检查nftables表是否存在，如果不存在则初始化
     if ! nft list tables 2>/dev/null | grep -q "table"; then
-        print_warning "NFTables表不存在，正在初始化..."
+        print_warning "初始化NFTables..."
         if ! init_nftables; then
-            print_error "无法初始化NFTables配置"
+            print_error "初始化失败"
             return 1
         fi
     fi
@@ -761,16 +723,12 @@ show_config_menu() {
 
 config_ip_mode() {
     print_header
-    print_section "IP协议模式配置"
+    print_section "IP协议模式"
     
-    echo -e "${LIGHT_BLUE}当前模式: ${BOLD}$IP_MODE${NC}"
+    echo -e "${LIGHT_BLUE}当前: ${BOLD}$IP_MODE${NC}"
     echo
-    echo -e "${LIGHT_BLUE}可选模式:${NC}"
-    echo -e "${LIGHT_BLUE}1${NC} IPv4 Only - 仅支持IPv4转发"
-    echo -e "${LIGHT_BLUE}2${NC} IPv6 Only - 仅支持IPv6转发"
-    echo -e "${LIGHT_BLUE}3${NC} Mixed Mode - 同时支持IPv4和IPv6"
-    echo
-    echo -ne "${ACCENT_BLUE}请选择新模式 [1-3]: ${NC}"
+    echo -e "${LIGHT_BLUE}1${NC} IPv4  ${LIGHT_BLUE}2${NC} IPv6  ${LIGHT_BLUE}3${NC} Mixed"
+    echo -ne "${ACCENT_BLUE}选择模式 [1-3]: ${NC}"
     
     read -r mode_choice
     local new_mode=""
@@ -790,8 +748,8 @@ config_ip_mode() {
     if [[ "$new_mode" != "$IP_MODE" ]]; then
         IP_MODE="$new_mode"
         save_config
-        print_success "IP模式已更改为: $IP_MODE"
-        print_warning "请重新初始化nftables配置以应用更改"
+        print_success "模式已更改: $IP_MODE"
+        print_warning "需重新初始化配置"
     else
         print_info "模式未更改"
     fi
@@ -803,17 +761,17 @@ config_ip_mode() {
 # 初始化nftables交互式菜单
 init_nftables_interactive() {
     print_header
-    print_section "初始化nftables配置"
+    print_section "初始化配置"
     
-    echo -e "${WARNING_YELLOW}此操作将重置所有nftables配置，包括现有规则！${NC}"
-    echo -ne "${ACCENT_BLUE}确认初始化? [y/N]: ${NC}"
+    echo -e "${WARNING_YELLOW}将重置所有配置和规则！${NC}"
+    echo -ne "${ACCENT_BLUE}确认? [y/N]: ${NC}"
     read -r confirm
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         if init_nftables; then
-            print_success "nftables配置初始化成功"
+            print_success "初始化成功"
         else
-            print_error "nftables配置初始化失败"
+            print_error "初始化失败"
         fi
     else
         print_info "操作已取消"
@@ -826,10 +784,9 @@ init_nftables_interactive() {
 # 保存规则交互式菜单
 save_rules_interactive() {
     print_header
-    print_section "保存当前规则"
+    print_section "保存规则"
     
-    echo -e "${LIGHT_BLUE}保存当前所有转发规则到配置文件${NC}"
-    echo -ne "${ACCENT_BLUE}确认保存? [Y/n]: ${NC}"
+    echo -ne "${ACCENT_BLUE}保存当前规则? [Y/n]: ${NC}"
     read -r confirm
     [[ -z "$confirm" ]] && confirm="y"
     
@@ -1018,7 +975,7 @@ flush_all_rules_interactive() {
     local rule_count=$(wc -l < "${FORWARD_RULES_FILE}")
     print_warning "当前有 $rule_count 条转发规则"
     echo
-    echo -ne "${ERROR_RED}${BOLD}确定要清空所有转发规则吗？此操作不可恢复！ [y/N]: ${NC}"
+    echo -ne "${ERROR_RED}${BOLD}清空所有规则？不可恢复！ [y/N]: ${NC}"
     read -r confirm
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -1062,32 +1019,27 @@ flush_all_rules_interactive() {
 # 配置网络接口
 config_interfaces() {
     print_header
-    print_section "网络接口配置"
+    print_section "网络接口"
     
-    echo -e "${LIGHT_BLUE}当前配置:${NC}"
-    echo -e "${LIGHT_GRAY}WAN接口: $WAN_INTERFACE${NC}"
-    echo -e "${LIGHT_GRAY}LAN接口: $LAN_INTERFACE${NC}"
+    echo -e "${LIGHT_BLUE}当前: WAN=$WAN_INTERFACE LAN=$LAN_INTERFACE${NC}"
     echo
     
     # 显示可用接口
-    echo -e "${LIGHT_BLUE}可用网络接口:${NC}"
-    ip link show | grep -E "^[0-9]+:" | while read -r line; do
-        local interface=$(echo "$line" | sed 's/.*: \([^:]*\):.*/\1/')
-        echo -e "${LIGHT_GRAY}  - $interface${NC}"
-    done
-    echo
+    echo -e "${LIGHT_BLUE}可用接口:${NC}"
+    ip link show | grep -E "^[0-9]+:" | sed 's/.*: \([^:]*\):.*/\1/' | tr '\n' ' '
+    echo -e "\n"
     
-    echo -ne "${ACCENT_BLUE}WAN接口 (外网接口，当前: $WAN_INTERFACE): ${NC}"
+    echo -ne "${ACCENT_BLUE}WAN (当前: $WAN_INTERFACE): ${NC}"
     read -r new_wan
     [[ -n "$new_wan" ]] && WAN_INTERFACE="$new_wan"
     
-    echo -ne "${ACCENT_BLUE}LAN接口 (内网接口，当前: $LAN_INTERFACE): ${NC}"
+    echo -ne "${ACCENT_BLUE}LAN (当前: $LAN_INTERFACE): ${NC}"
     read -r new_lan
     [[ -n "$new_lan" ]] && LAN_INTERFACE="$new_lan"
     
     save_config
-    print_success "网络接口配置已更新"
-    print_warning "请重新初始化nftables配置以应用更改"
+    print_success "接口已更新"
+    print_warning "需重新初始化配置"
     
     wait_enter
     show_config_menu
@@ -1098,16 +1050,11 @@ config_other_settings() {
     print_header
     print_section "其他设置"
     
-    echo -e "${LIGHT_BLUE}当前设置:${NC}"
-    echo -e "${LIGHT_GRAY}自动保存: $AUTO_SAVE${NC}"
-    echo -e "${LIGHT_GRAY}日志级别: $LOG_LEVEL${NC}"
+    echo -e "${LIGHT_BLUE}当前: 自动保存=$AUTO_SAVE 日志=$LOG_LEVEL${NC}"
     echo
     
-    # 自动保存设置
-    echo -e "${LIGHT_BLUE}自动保存设置:${NC}"
-    echo -e "${LIGHT_BLUE}1${NC} 启用自动保存"
-    echo -e "${LIGHT_BLUE}2${NC} 禁用自动保存"
-    echo -ne "${ACCENT_BLUE}请选择 [1-2]: ${NC}"
+    echo -e "${LIGHT_BLUE}1${NC} 启用自动保存  ${LIGHT_BLUE}2${NC} 禁用自动保存"
+    echo -ne "${ACCENT_BLUE}自动保存 [1-2]: ${NC}"
     read -r auto_save_choice
     
     case "$auto_save_choice" in
@@ -1115,12 +1062,9 @@ config_other_settings() {
         2) AUTO_SAVE="false" ;;
     esac
     
-    # 日志级别设置
     echo
-    echo -e "${LIGHT_BLUE}日志级别设置:${NC}"
-    echo -e "${LIGHT_BLUE}1${NC} info - 基本信息"
-    echo -e "${LIGHT_BLUE}2${NC} debug - 详细调试信息"
-    echo -ne "${ACCENT_BLUE}请选择 [1-2]: ${NC}"
+    echo -e "${LIGHT_BLUE}1${NC} info  ${LIGHT_BLUE}2${NC} debug"
+    echo -ne "${ACCENT_BLUE}日志级别 [1-2]: ${NC}"
     read -r log_level_choice
     
     case "$log_level_choice" in
@@ -1138,10 +1082,9 @@ config_other_settings() {
 # 重新加载规则交互式菜单
 reload_rules_interactive() {
     print_header
-    print_section "重新加载规则"
+    print_section "重新加载"
     
-    echo -e "${LIGHT_BLUE}从配置文件重新加载所有转发规则${NC}"
-    echo -ne "${ACCENT_BLUE}确认重新加载? [y/N]: ${NC}"
+    echo -ne "${ACCENT_BLUE}重新加载规则? [y/N]: ${NC}"
     read -r confirm
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -1161,13 +1104,9 @@ reload_rules_interactive() {
 # 高级端口转发交互式菜单
 add_advanced_forward_interactive() {
     print_header
-    print_section "高级端口转发"
+    print_section "高级转发"
     
-    echo -e "${LIGHT_BLUE}同端口不同协议转发设置${NC}"
-    echo -e "${LIGHT_GRAY}例如：同一端口的TCP和UDP分别转发到不同目标${NC}"
-    echo
-    
-    print_info "此功能需要手动配置，请使用基本转发规则管理"
+    print_info "请使用基本转发规则管理"
     
     wait_enter
     show_advanced_menu
@@ -1301,38 +1240,14 @@ show_advanced_menu() {
 # 帮助菜单
 show_help_menu() {
     print_header
-    print_section "帮助文档"
+    print_section "帮助"
     
-    echo -e "${PRIMARY_BLUE}${BOLD}NFTables转发管理系统使用说明${NC}"
-    draw_line 60
-    
-    echo -e "${LIGHT_BLUE}基本概念:${NC}"
-    echo -e "${LIGHT_GRAY}• 端口转发: 将外部端口的流量转发到内网设备${NC}"
-    echo -e "${LIGHT_GRAY}• DNAT: 目标地址转换，重定向入站流量${NC}"
-    echo -e "${LIGHT_GRAY}• SNAT/Masquerade: 源地址伪装，确保返回流量路径${NC}"
-    echo -e "${LIGHT_GRAY}• 协议支持: TCP、UDP或两者同时${NC}"
-    echo -e "${LIGHT_GRAY}• IP模式: IPv4、IPv6或混合模式${NC}"
+    echo -e "${LIGHT_BLUE}快速使用:${NC}"
+    echo -e "${LIGHT_GRAY}1. 初始化配置 2. 添加转发规则 3. 查看规则状态${NC}"
     echo
-    
-    echo -e "${LIGHT_BLUE}使用流程:${NC}"
-    echo -e "${LIGHT_GRAY}1. 配置IP模式和网络接口${NC}"
-    echo -e "${LIGHT_GRAY}2. 初始化nftables配置（包含masquerade规则）${NC}"
-    echo -e "${LIGHT_GRAY}3. 添加转发规则（DNAT规则）${NC}"
-    echo -e "${LIGHT_GRAY}4. 测试规则是否生效${NC}"
-    echo
-    
-    echo -e "${LIGHT_BLUE}常见问题:${NC}"
-    echo -e "${LIGHT_GRAY}Q: 转发不工作？${NC}"
-    echo -e "${LIGHT_GRAY}A: 检查IP转发是否启用: sysctl net.ipv4.ip_forward${NC}"
-    echo
-    echo -e "${LIGHT_GRAY}Q: 规则不生效？${NC}"
-    echo -e "${LIGHT_GRAY}A: 重新加载配置或检查防火墙规则${NC}"
-    echo
-    
-    echo -e "${LIGHT_BLUE}安全建议:${NC}"
-    echo -e "${LIGHT_GRAY}• 使用源IP限制减少安全风险${NC}"
-    echo -e "${LIGHT_GRAY}• 定期备份配置文件${NC}"
-    echo -e "${LIGHT_GRAY}• 监控转发规则的使用情况${NC}"
+    echo -e "${LIGHT_BLUE}常用命令:${NC}"
+    echo -e "${LIGHT_GRAY}检查IP转发: sysctl net.ipv4.ip_forward${NC}"
+    echo -e "${LIGHT_GRAY}启用IP转发: echo 1 > /proc/sys/net/ipv4/ip_forward${NC}"
     
     wait_enter
     show_main_menu
@@ -1416,7 +1331,7 @@ import_rules_interactive() {
         return
     fi
     
-    echo -ne "${WARNING_YELLOW}确认导入规则文件? [y/N]: ${NC}"
+    echo -ne "${WARNING_YELLOW}导入规则? [y/N]: ${NC}"
     read -r confirm
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -1472,7 +1387,7 @@ backup_config_interactive() {
     read -r custom_backup_dir
     [[ -n "$custom_backup_dir" ]] && backup_dir="$custom_backup_dir"
     
-    echo -ne "${ACCENT_BLUE}确认创建备份? [Y/n]: ${NC}"
+    echo -ne "${ACCENT_BLUE}创建备份? [Y/n]: ${NC}"
     read -r confirm
     [[ -z "$confirm" ]] && confirm="y"
     
@@ -1545,15 +1460,15 @@ restore_config_interactive() {
         echo
     fi
     
-    echo -ne "${WARNING_YELLOW}确认恢复配置? 这将覆盖当前配置! [y/N]: ${NC}"
+    echo -ne "${WARNING_YELLOW}恢复配置? 将覆盖当前! [y/N]: ${NC}"
     read -r confirm
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         if restore_config_core "$restore_dir"; then
-            print_success "配置恢复成功"
-            print_warning "请重新启动脚本以应用恢复的配置"
+            print_success "恢复成功"
+            print_warning "需重启脚本"
         else
-            print_error "配置恢复失败"
+            print_error "恢复失败"
         fi
     else
         print_info "操作已取消"
@@ -1591,7 +1506,7 @@ exit_program() {
     print_header
     print_section "退出程序"
     
-    echo -ne "${WARNING_YELLOW}确定要退出程序吗? [y/N]: ${NC}"
+    echo -ne "${WARNING_YELLOW}退出程序? [y/N]: ${NC}"
     read -r confirm
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
