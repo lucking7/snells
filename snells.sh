@@ -306,12 +306,12 @@ After=network-online.target
 Wants=network-online.target systemd-networkd-wait-online.service
 
 [Service]
-LimitNOFILE=32767
+LimitNOFILE=65535
 Type=simple
 User=root
-Restart=on-failure
+Restart=always
 RestartSec=5s
-ExecStartPre=/bin/sh -c ulimit -n 51200
+OOMScoreAdjust=-500
 ExecStart=/usr/local/bin/shadow-tls --fastopen --v3 ${strict_option} server ${wildcard_option} --listen ${listen_addr} --server ${server_addr} --tls ${shadow_tls_tls_domain}:443 --password ${shadow_tls_password} 
 
 [Install]
@@ -718,6 +718,7 @@ ExecStart=${snell_workspace}/snell-server -c snell-server.conf
 Restart=always
 RestartSec=5
 OOMScoreAdjust=-500
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
