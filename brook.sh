@@ -2,7 +2,9 @@
 
 # Brook端口转发统一管理脚本
 # 支持功能: TCP转发、UDP转发、TCP+UDP转发、TCP和UDP分别转发到不同地址
-# 版本: 1.4.2 - 优化监听地址控制，调整颜色主题
+# 版本: 1.4.4 - 修复read颜色兼容性问题, 菜单增加版本号显示
+
+VERSION="1.4.4"
 
 # 颜色定义
 PLAIN='\033[0m'
@@ -336,34 +338,24 @@ save_forward_config() {
 # 添加转发
 add_forward() {
   printf "\n${BOLD}${COLOR_MENU_BORDER}--- 添加转发规则 ---${PLAIN}\n"
-  printf "${COLOR_INFO_TEXT}请选择转发类型:${PLAIN}\n"
-  printf "  ${COLOR_MENU_ITEM}1.${PLAIN} 仅TCP转发\n"
-  printf "  ${COLOR_MENU_ITEM}2.${PLAIN} 仅UDP转发\n"
-  printf "  ${COLOR_MENU_ITEM}3.${PLAIN} TCP+UDP转发到相同目标\n"
-  printf "  ${COLOR_MENU_ITEM}4.${PLAIN} TCP和UDP分别转发到不同目标\n"
-  printf "%s" "${COLOR_INFO_TEXT}请选择 [1-4]: ${PLAIN}"
+  echo -e "${COLOR_INFO_TEXT}请选择转发类型:${PLAIN}\n  ${COLOR_MENU_ITEM}1.${PLAIN} 仅TCP转发\n  ${COLOR_MENU_ITEM}2.${PLAIN} 仅UDP转发\n  ${COLOR_MENU_ITEM}3.${PLAIN} TCP+UDP转发到相同目标\n  ${COLOR_MENU_ITEM}4.${PLAIN} TCP和UDP分别转发到不同目标"
+  echo -e "${COLOR_INFO_TEXT}请选择 [1-4]: ${PLAIN}\c"
   read forward_type
   if ! [[ "$forward_type" =~ ^[1-4]$ ]]; then printf "${ERROR_SYMBOL} 无效的选择${PLAIN}\n"; return 1; fi
 
   local local_port
   while true; do 
-    printf "%s" "${COLOR_INFO_TEXT}请输入本地监听端口 [1-65535]: ${PLAIN}"
+    echo -e "${COLOR_INFO_TEXT}请输入本地监听端口 [1-65535]: ${PLAIN}\c"
     read local_port
     if validate_input "$local_port" "port"; then
       if lsof -iTCP:$local_port -iUDP:$local_port >/dev/null 2>&1 || netstat -tuln | grep -qw ":${local_port}" || grep -q "|[^|]*:${local_port}|.*|" "$CONFIG_FILE" 2>/dev/null; then
         printf "${ERROR_SYMBOL} 端口 ${COLOR_ERROR}%s${PLAIN} 已被占用或已配置Brook转发。\n" "$local_port"
-      else 
-        break
-      fi
+      else break; fi
     fi
   done
   
-  printf "${COLOR_INFO_TEXT}请选择监听地址范围:${PLAIN}\n"
-  printf "  ${COLOR_MENU_ITEM}1.${PLAIN} 所有网络接口 (0.0.0.0 和 ::, 推荐, ${BOLD}默认${PLAIN})\n"
-  printf "  ${COLOR_MENU_ITEM}2.${PLAIN} 仅 IPv4 (0.0.0.0)\n"
-  printf "  ${COLOR_MENU_ITEM}3.${PLAIN} 仅 IPv6 ([::])\n"
-  printf "  ${COLOR_MENU_ITEM}4.${PLAIN} 指定本地IP地址\n"
-  printf "%s" "${COLOR_INFO_TEXT}请选择 [1-4, 默认1]: ${PLAIN}"
+  echo -e "${COLOR_INFO_TEXT}请选择监听地址范围:${PLAIN}\n  ${COLOR_MENU_ITEM}1.${PLAIN} 所有网络接口 (0.0.0.0 和 ::, 推荐, ${BOLD}默认${PLAIN})\n  ${COLOR_MENU_ITEM}2.${PLAIN} 仅 IPv4 (0.0.0.0)\n  ${COLOR_MENU_ITEM}3.${PLAIN} 仅 IPv6 ([::])\n  ${COLOR_MENU_ITEM}4.${PLAIN} 指定本地IP地址"
+  echo -e "${COLOR_INFO_TEXT}请选择 [1-4, 默认1]: ${PLAIN}\c"
   read listen_scope_choice
   listen_scope_choice=${listen_scope_choice:-1}
   local listen_ip_for_brook="" final_listen_arg_for_brook=""
@@ -373,7 +365,7 @@ add_forward() {
     2) listen_ip_for_brook="0.0.0.0";; 
     3) listen_ip_for_brook="::";; 
     4) while true; do 
-         printf "%s" "${COLOR_INFO_TEXT}请输入要监听的本地IP地址: ${PLAIN}"
+         echo -e "${COLOR_INFO_TEXT}请输入要监听的本地IP地址: ${PLAIN}\c"
          read specific_listen_ip
          if validate_input "$specific_listen_ip" "ip"; then listen_ip_for_brook="$specific_listen_ip"; break; fi; done ;;
     *) printf "${WARN_SYMBOL} 无效选择，使用默认 (所有接口)。${PLAIN}\n"; listen_ip_for_brook="";;
@@ -391,14 +383,12 @@ add_forward() {
       if [ "$forward_type" -eq 3 ]; then proto_str="both"; fi
       
       while true; do 
-        printf "%s" "${COLOR_INFO_TEXT}请输入目标IP地址或域名: ${PLAIN}"
-        read remote_ip
-        if validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname"; then break; fi; 
+        echo -e "${COLOR_INFO_TEXT}请输入目标IP地址或域名: ${PLAIN}\c"
+        read remote_ip; if validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname"; then break; fi;
       done
-      while true; do 
-        printf "%s" "${COLOR_INFO_TEXT}请输入目标端口 [1-65535]: ${PLAIN}"
-        read remote_port
-        if validate_input "$remote_port" "port"; then break; fi; 
+      while true; do
+        echo -e "${COLOR_INFO_TEXT}请输入目标端口 [1-65535]: ${PLAIN}\c"
+        read remote_port; if validate_input "$remote_port" "port"; then break; fi;
       done
       remote_addr="${remote_ip}:${remote_port}"
       printf "${INFO_SYMBOL} 目标地址: ${COLOR_INFO_ACCENT}%s${PLAIN}\n" "$remote_addr"
@@ -414,28 +404,24 @@ add_forward() {
     4) # TCP and UDP to different targets
       printf "\n${BOLD}${COLOR_MENU_BORDER}--- TCP转发设置 ---${PLAIN}\n"
       local tcp_remote_ip tcp_remote_port tcp_remote_addr udp_remote_ip udp_remote_port udp_remote_addr
-      while true; do 
-        printf "%s" "${COLOR_INFO_TEXT}请输入TCP目标IP地址或域名: ${PLAIN}"
-        read tcp_remote_ip
-        if validate_input "$tcp_remote_ip" "ip" || validate_input "$tcp_remote_ip" "hostname"; then break; fi; 
+      while true; do
+        echo -e "${COLOR_INFO_TEXT}请输入TCP目标IP地址或域名: ${PLAIN}\c"
+        read tcp_remote_ip; if validate_input "$tcp_remote_ip" "ip" || validate_input "$tcp_remote_ip" "hostname"; then break; fi;
       done
       while true; do
-        printf "%s" "${COLOR_INFO_TEXT}请输入TCP目标端口 [1-65535]: ${PLAIN}"
-        read tcp_remote_port
-        if validate_input "$tcp_remote_port" "port"; then break; fi; 
+        echo -e "${COLOR_INFO_TEXT}请输入TCP目标端口 [1-65535]: ${PLAIN}\c"
+        read tcp_remote_port; if validate_input "$tcp_remote_port" "port"; then break; fi;
       done
       tcp_remote_addr="${tcp_remote_ip}:${tcp_remote_port}"; printf "${INFO_SYMBOL} TCP目标地址: ${COLOR_INFO_ACCENT}%s${PLAIN}\n" "$tcp_remote_addr"
       
       printf "\n${BOLD}${COLOR_MENU_BORDER}--- UDP转发设置 ---${PLAIN}\n"
-      while true; do 
-        printf "%s" "${COLOR_INFO_TEXT}请输入UDP目标IP地址或域名: ${PLAIN}"
-        read udp_remote_ip
-        if validate_input "$udp_remote_ip" "ip" || validate_input "$udp_remote_ip" "hostname"; then break; fi; 
+      while true; do
+        echo -e "${COLOR_INFO_TEXT}请输入UDP目标IP地址或域名: ${PLAIN}\c"
+        read udp_remote_ip; if validate_input "$udp_remote_ip" "ip" || validate_input "$udp_remote_ip" "hostname"; then break; fi;
       done
-      while true; do 
-        printf "%s" "${COLOR_INFO_TEXT}请输入UDP目标端口 [1-65535]: ${PLAIN}"
-        read udp_remote_port
-        if validate_input "$udp_remote_port" "port"; then break; fi; 
+      while true; do
+        echo -e "${COLOR_INFO_TEXT}请输入UDP目标端口 [1-65535]: ${PLAIN}\c"
+        read udp_remote_port; if validate_input "$udp_remote_port" "port"; then break; fi;
       done
       udp_remote_addr="${udp_remote_ip}:${udp_remote_port}"; printf "${INFO_SYMBOL} UDP目标地址: ${COLOR_INFO_ACCENT}%s${PLAIN}\n" "$udp_remote_addr"
       
@@ -526,29 +512,16 @@ delete_forward() {
   done
   
   printf "\n"
-  read -p "请输入要删除的服务编号 (输入0取消): " choice
-  
-  if [ "$choice" -eq 0 ]; then 
-    printf "${WARN_SYMBOL} 已取消删除${PLAIN}\n"
-    return
-  fi
-  
-  if [ "$choice" -lt 1 ] || [ "$choice" -gt ${#services[@]} ]; then 
-    printf "${ERROR_SYMBOL} 无效的选择${PLAIN}\n"
-    return
-  fi
-  
-  local service_name=${services[$((choice-1))]}
-  printf "${WARN_SYMBOL} 确定要删除服务 %s 吗? [y/N]: ${PLAIN}" "$service_name"
+  echo -e "${WARN_SYMBOL} 确定要删除服务 %s 吗? [y/N]: ${PLAIN}\c"
   read -r confirm
   
   if [[ "$confirm" =~ ^[Yy]$ ]]; then
-    $SUDO systemctl stop "$service_name" 2>/dev/null
-    $SUDO systemctl disable "$service_name" 2>/dev/null
-    $SUDO rm -f "${SERVICE_DIR}/${service_name}.service"
-    $SUDO sed -i "/^${service_name}|/d" "$CONFIG_FILE" 2>/dev/null
+    $SUDO systemctl stop "${services[$((choice-1))]} 2>/dev/null
+    $SUDO systemctl disable "${services[$((choice-1))]} 2>/dev/null
+    $SUDO rm -f "${SERVICE_DIR}/${services[$((choice-1))]}.service"
+    $SUDO sed -i "/^${services[$((choice-1))]}|/d" "$CONFIG_FILE" 2>/dev/null
     $SUDO systemctl daemon-reload
-    printf "${SUCCESS_SYMBOL} 服务 %s 已删除${PLAIN}\n" "$service_name"
+    printf "${SUCCESS_SYMBOL} 服务 %s 已删除${PLAIN}\n" "${services[$((choice-1))]}"
   else
     printf "${WARN_SYMBOL} 已取消删除${PLAIN}\n"
   fi
@@ -556,7 +529,7 @@ delete_forward() {
 
 # 卸载brook
 uninstall_brook() {
-  printf "${WARN_SYMBOL} 此操作将卸载Brook并删除所有转发服务。确定要继续吗? [y/N]: ${PLAIN}"
+  printf "${WARN_SYMBOL} 此操作将卸载Brook并删除所有转发服务。确定要继续吗? [y/N]: ${PLAIN}\c"
   read -r confirm_brook
   if [[ ! "$confirm_brook" =~ ^[Yy]$ ]]; then printf "${WARN_SYMBOL} 已取消卸载Brook${PLAIN}\n"; return 1; fi
 
@@ -712,24 +685,12 @@ show_ip_info() {
 # 显示菜单
 show_menu() {
   local ip_info=$(get_simple_ip_info)
-  
-  printf "\n${PURPLE}${BOLD}========== Brook 端口转发管理 ==========${PLAIN}\n"
-  
-  if [ -n "$ip_info" ] && [ "$ip_info" != "无法获取IP信息" ] && [ "$ip_info" != "网络工具未就绪" ]; then
-    printf "${CYAN}${INFO_SYMBOL} 本机IP: ${COLOR_IP_INFO}%s${PLAIN}\n" "$ip_info"
-  fi
-  
-  printf "${PURPLE}${BOLD}---------------------------------------${PLAIN}\n"
-  printf "  ${GREEN}1.${PLAIN} 添加转发\n"
-  printf "  ${GREEN}2.${PLAIN} 列出所有转发\n"
-  printf "  ${GREEN}3.${PLAIN} 删除转发\n"
-  printf "  ${GREEN}4.${PLAIN} 重启所有服务\n"
-  printf "  ${GREEN}5.${PLAIN} 查看服务日志\n"
-  printf "  ${GREEN}6.${PLAIN} 测试转发功能\n"
-  printf "  ${GREEN}7.${PLAIN} 卸载Brook\n"
-  printf "  ${GREEN}8.${PLAIN} 显示详细IP信息\n"
-  printf "  ${GREEN}0.${PLAIN} 退出\n"
-  printf "${PURPLE}${BOLD}=======================================${PLAIN}\n"
+  printf "\n${BOLD}${COLOR_MENU_BORDER}========== Brook 端口转发管理 (v%s) ==========${PLAIN}\n" "$VERSION"
+  if [ -n "$ip_info" ] && [ "$ip_info" != "无法获取IP信息" ] && [ "$ip_info" != "网络工具未就绪" ]; then printf "${INFO_SYMBOL} 本机IP: ${COLOR_IP_INFO}%s${PLAIN}\n" "$ip_info";
+  else printf "${WARN_SYMBOL} 本机IP信息: ${COLOR_WARNING}%s${PLAIN}\n" "$ip_info"; fi
+  printf "${BOLD}${COLOR_MENU_BORDER}----------------------------------------------------${PLAIN}\n"
+  echo -e "  ${COLOR_MENU_ITEM}1.${PLAIN} 添加转发\n  ${COLOR_MENU_ITEM}2.${PLAIN} 列出所有转发\n  ${COLOR_MENU_ITEM}3.${PLAIN} 删除转发\n  ${COLOR_MENU_ITEM}4.${PLAIN} 重启所有服务\n  ${COLOR_MENU_ITEM}5.${PLAIN} 查看服务日志\n  ${COLOR_MENU_ITEM}6.${PLAIN} 测试转发功能\n  ${COLOR_MENU_ITEM}7.${PLAIN} 卸载Brook\n  ${COLOR_MENU_ITEM}8.${PLAIN} 显示详细IP信息\n  ${COLOR_MENU_ITEM}0.${PLAIN} 退出"
+  printf "${BOLD}${COLOR_MENU_BORDER}====================================================${PLAIN}\n"
 }
 
 # 重启所有服务
@@ -774,7 +735,8 @@ view_service_logs() {
   done
   
   printf "\n"
-  read -p "请输入要查看日志的服务编号 (输入0查看所有): " choice
+  echo -e "${COLOR_INFO_TEXT}请输入要查看日志的服务编号 (输入0查看所有): ${PLAIN}\c"
+  read choice
   
   if [ "$choice" -eq 0 ]; then 
     printf "${CYAN}${INFO_SYMBOL} 显示所有Brook服务的最新日志...${PLAIN}\n"
@@ -808,7 +770,8 @@ test_brook_forward() {
   done
   
   printf "\n"
-  read -p "请输入要测试的服务编号 (输入0取消): " choice
+  echo -e "${COLOR_INFO_TEXT}请输入要测试的服务编号 (输入0取消): ${PLAIN}\c"
+  read choice
   
   if [ "$choice" -eq 0 ]; then 
     printf "${YELLOW}${INFO_SYMBOL} 已取消测试${PLAIN}\n"
@@ -858,25 +821,12 @@ test_brook_forward() {
 
 # 主函数
 main() {
-  if [ "$EUID" -ne 0 ]; then # 提示非root用户需要sudo
-    if ! command -v sudo &>/dev/null; then
-      printf "${ERROR_SYMBOL}检测到非root用户，且sudo命令未找到。请以root用户运行或安装sudo。${PLAIN}\n"
-      exit 1
-    fi
-    printf "${WARN_SYMBOL} 检测到非root用户，部分操作将需要sudo权限。${PLAIN}\n"
-  else
-    printf "${INFO_SYMBOL} 检测到root用户。${PLAIN}\n"
-  fi
-  
-  if ! check_and_install_dependencies; then
-    printf "${ERROR_SYMBOL} 初始化或依赖安装失败，脚本终止。${PLAIN}\n"
-    exit 1
-  fi
+  if [ "$EUID" -ne 0 ]; then if ! command -v sudo &>/dev/null; then printf "${ERROR_SYMBOL}检测到非root用户，且sudo命令未找到。请以root用户运行或安装sudo。${PLAIN}\n"; exit 1; fi; printf "${WARN_SYMBOL} 检测到非root用户，部分操作将需要sudo权限。${PLAIN}\n"; else printf "${INFO_SYMBOL} 检测到root用户。${PLAIN}\n"; fi
+  if ! check_and_install_dependencies; then printf "${ERROR_SYMBOL} 初始化或依赖安装失败，脚本终止。${PLAIN}\n"; exit 1; fi
   setup_config_dir
-  
   while true; do
     show_menu
-    printf "%s" "${COLOR_INFO_TEXT}请选择操作 [0-8]: ${PLAIN}"
+    echo -e "${COLOR_INFO_TEXT}请选择操作 [0-8]: ${PLAIN}\c"
     read choice
     case $choice in
       1) add_forward ;; 
