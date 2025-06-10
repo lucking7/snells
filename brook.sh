@@ -337,16 +337,18 @@ save_forward_config() {
 add_forward() {
   printf "\n${BOLD}${COLOR_MENU_BORDER}--- 添加转发规则 ---${PLAIN}\n"
   printf "${COLOR_INFO_TEXT}请选择转发类型:${PLAIN}\n"
-  printf "  ${COLOR_MENU_ITEM}1.${PLAIN} 仅TCP转发\n" \
-         "  ${COLOR_MENU_ITEM}2.${PLAIN} 仅UDP转发\n" \
-         "  ${COLOR_MENU_ITEM}3.${PLAIN} TCP+UDP转发到相同目标\n" \
-         "  ${COLOR_MENU_ITEM}4.${PLAIN} TCP和UDP分别转发到不同目标\n"
-  read -p "${COLOR_INFO_TEXT}请选择 [1-4]: ${PLAIN}" forward_type
+  printf "  ${COLOR_MENU_ITEM}1.${PLAIN} 仅TCP转发\n"
+  printf "  ${COLOR_MENU_ITEM}2.${PLAIN} 仅UDP转发\n"
+  printf "  ${COLOR_MENU_ITEM}3.${PLAIN} TCP+UDP转发到相同目标\n"
+  printf "  ${COLOR_MENU_ITEM}4.${PLAIN} TCP和UDP分别转发到不同目标\n"
+  printf "%s" "${COLOR_INFO_TEXT}请选择 [1-4]: ${PLAIN}"
+  read forward_type
   if ! [[ "$forward_type" =~ ^[1-4]$ ]]; then printf "${ERROR_SYMBOL} 无效的选择${PLAIN}\n"; return 1; fi
 
   local local_port
   while true; do 
-    read -p "${COLOR_INFO_TEXT}请输入本地监听端口 [1-65535]: ${PLAIN}" local_port
+    printf "%s" "${COLOR_INFO_TEXT}请输入本地监听端口 [1-65535]: ${PLAIN}"
+    read local_port
     if validate_input "$local_port" "port"; then
       if lsof -iTCP:$local_port -iUDP:$local_port >/dev/null 2>&1 || netstat -tuln | grep -qw ":${local_port}" || grep -q "|[^|]*:${local_port}|.*|" "$CONFIG_FILE" 2>/dev/null; then
         printf "${ERROR_SYMBOL} 端口 ${COLOR_ERROR}%s${PLAIN} 已被占用或已配置Brook转发。\n" "$local_port"
@@ -357,11 +359,12 @@ add_forward() {
   done
   
   printf "${COLOR_INFO_TEXT}请选择监听地址范围:${PLAIN}\n"
-  printf "  ${COLOR_MENU_ITEM}1.${PLAIN} 所有网络接口 (0.0.0.0 和 ::, 推荐, ${BOLD}默认${PLAIN})\n" \
-         "  ${COLOR_MENU_ITEM}2.${PLAIN} 仅 IPv4 (0.0.0.0)\n" \
-         "  ${COLOR_MENU_ITEM}3.${PLAIN} 仅 IPv6 ([::])\n" \
-         "  ${COLOR_MENU_ITEM}4.${PLAIN} 指定本地IP地址\n"
-  read -p "${COLOR_INFO_TEXT}请选择 [1-4, 默认1]: ${PLAIN}" listen_scope_choice
+  printf "  ${COLOR_MENU_ITEM}1.${PLAIN} 所有网络接口 (0.0.0.0 和 ::, 推荐, ${BOLD}默认${PLAIN})\n"
+  printf "  ${COLOR_MENU_ITEM}2.${PLAIN} 仅 IPv4 (0.0.0.0)\n"
+  printf "  ${COLOR_MENU_ITEM}3.${PLAIN} 仅 IPv6 ([::])\n"
+  printf "  ${COLOR_MENU_ITEM}4.${PLAIN} 指定本地IP地址\n"
+  printf "%s" "${COLOR_INFO_TEXT}请选择 [1-4, 默认1]: ${PLAIN}"
+  read listen_scope_choice
   listen_scope_choice=${listen_scope_choice:-1}
   local listen_ip_for_brook="" final_listen_arg_for_brook=""
 
@@ -369,7 +372,9 @@ add_forward() {
     1) listen_ip_for_brook="";; # Brook handles :port as all interfaces
     2) listen_ip_for_brook="0.0.0.0";; 
     3) listen_ip_for_brook="::";; 
-    4) while true; do read -p "${COLOR_INFO_TEXT}请输入要监听的本地IP地址: ${PLAIN}" specific_listen_ip
+    4) while true; do 
+         printf "%s" "${COLOR_INFO_TEXT}请输入要监听的本地IP地址: ${PLAIN}"
+         read specific_listen_ip
          if validate_input "$specific_listen_ip" "ip"; then listen_ip_for_brook="$specific_listen_ip"; break; fi; done ;;
     *) printf "${WARN_SYMBOL} 无效选择，使用默认 (所有接口)。${PLAIN}\n"; listen_ip_for_brook="";;
   esac
@@ -385,8 +390,16 @@ add_forward() {
       if [ "$forward_type" -eq 2 ]; then proto_str="udp"; fi
       if [ "$forward_type" -eq 3 ]; then proto_str="both"; fi
       
-      while true; do read -p "${COLOR_INFO_TEXT}请输入目标IP地址或域名: ${PLAIN}" remote_ip; if validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname"; then break; fi; done
-      while true; do read -p "${COLOR_INFO_TEXT}请输入目标端口 [1-65535]: ${PLAIN}" remote_port; if validate_input "$remote_port" "port"; then break; fi; done
+      while true; do 
+        printf "%s" "${COLOR_INFO_TEXT}请输入目标IP地址或域名: ${PLAIN}"
+        read remote_ip
+        if validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname"; then break; fi; 
+      done
+      while true; do 
+        printf "%s" "${COLOR_INFO_TEXT}请输入目标端口 [1-65535]: ${PLAIN}"
+        read remote_port
+        if validate_input "$remote_port" "port"; then break; fi; 
+      done
       remote_addr="${remote_ip}:${remote_port}"
       printf "${INFO_SYMBOL} 目标地址: ${COLOR_INFO_ACCENT}%s${PLAIN}\n" "$remote_addr"
       
@@ -401,13 +414,29 @@ add_forward() {
     4) # TCP and UDP to different targets
       printf "\n${BOLD}${COLOR_MENU_BORDER}--- TCP转发设置 ---${PLAIN}\n"
       local tcp_remote_ip tcp_remote_port tcp_remote_addr udp_remote_ip udp_remote_port udp_remote_addr
-      while true; do read -p "${COLOR_INFO_TEXT}请输入TCP目标IP地址或域名: ${PLAIN}" tcp_remote_ip; if validate_input "$tcp_remote_ip" "ip" || validate_input "$tcp_remote_ip" "hostname"; then break; fi; done
-      while true; do read -p "${COLOR_INFO_TEXT}请输入TCP目标端口 [1-65535]: ${PLAIN}" tcp_remote_port; if validate_input "$tcp_remote_port" "port"; then break; fi; done
+      while true; do 
+        printf "%s" "${COLOR_INFO_TEXT}请输入TCP目标IP地址或域名: ${PLAIN}"
+        read tcp_remote_ip
+        if validate_input "$tcp_remote_ip" "ip" || validate_input "$tcp_remote_ip" "hostname"; then break; fi; 
+      done
+      while true; do
+        printf "%s" "${COLOR_INFO_TEXT}请输入TCP目标端口 [1-65535]: ${PLAIN}"
+        read tcp_remote_port
+        if validate_input "$tcp_remote_port" "port"; then break; fi; 
+      done
       tcp_remote_addr="${tcp_remote_ip}:${tcp_remote_port}"; printf "${INFO_SYMBOL} TCP目标地址: ${COLOR_INFO_ACCENT}%s${PLAIN}\n" "$tcp_remote_addr"
       
       printf "\n${BOLD}${COLOR_MENU_BORDER}--- UDP转发设置 ---${PLAIN}\n"
-      while true; do read -p "${COLOR_INFO_TEXT}请输入UDP目标IP地址或域名: ${PLAIN}" udp_remote_ip; if validate_input "$udp_remote_ip" "ip" || validate_input "$udp_remote_ip" "hostname"; then break; fi; done
-      while true; do read -p "${COLOR_INFO_TEXT}请输入UDP目标端口 [1-65535]: ${PLAIN}" udp_remote_port; if validate_input "$udp_remote_port" "port"; then break; fi; done
+      while true; do 
+        printf "%s" "${COLOR_INFO_TEXT}请输入UDP目标IP地址或域名: ${PLAIN}"
+        read udp_remote_ip
+        if validate_input "$udp_remote_ip" "ip" || validate_input "$udp_remote_ip" "hostname"; then break; fi; 
+      done
+      while true; do 
+        printf "%s" "${COLOR_INFO_TEXT}请输入UDP目标端口 [1-65535]: ${PLAIN}"
+        read udp_remote_port
+        if validate_input "$udp_remote_port" "port"; then break; fi; 
+      done
       udp_remote_addr="${udp_remote_ip}:${udp_remote_port}"; printf "${INFO_SYMBOL} UDP目标地址: ${COLOR_INFO_ACCENT}%s${PLAIN}\n" "$udp_remote_addr"
       
       local tcp_service_name=$(generate_service_name "$local_port" "tcp" "$listen_ip_for_brook") 
@@ -847,7 +876,8 @@ main() {
   
   while true; do
     show_menu
-    read -p "${COLOR_INFO_TEXT}请选择操作 [0-8]: ${PLAIN}" choice
+    printf "%s" "${COLOR_INFO_TEXT}请选择操作 [0-8]: ${PLAIN}"
+    read choice
     case $choice in
       1) add_forward ;; 
       2) list_forwards ;; 
