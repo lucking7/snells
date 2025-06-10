@@ -2,32 +2,27 @@
 
 # Brook端口转发统一管理脚本
 # 支持功能: TCP转发、UDP转发、TCP+UDP转发、TCP和UDP分别转发到不同地址
-# 版本: 1.4.4 - 修复read颜色兼容性问题, 菜单增加版本号显示
+# 版本: 1.5.0 - 修复删除功能, 增加修改功能, 增加随机端口, 简化颜色和菜单
 
-VERSION="1.4.4"
+VERSION="1.5.0"
 
-# 颜色定义
+# 颜色定义 (简化为4色)
 PLAIN='\033[0m'
-BLACK='\033[0;30m'
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m' # 加粗黄色以示警告
 BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-WHITE='\033[0;37m'
 
 BOLD='\033[1m'
 UNDERLINE='\033[4m'
 
 # 主题颜色别名
-COLOR_PRIMARY_TEXT="${PLAIN}" # 大部分普通文本
-COLOR_INFO_TEXT="${CYAN}"    # 一般信息，提示符
+COLOR_INFO_TEXT="${BLUE}"    # 一般信息，提示符
 COLOR_INFO_ACCENT="${BLUE}"  # 补充信息，静态提示
 COLOR_SUCCESS="${GREEN}"    # 成功操作
 COLOR_ERROR="${RED}"      # 错误信息
 COLOR_WARNING="${YELLOW}"  # 警告信息
-COLOR_MENU_BORDER="${PURPLE}" # 菜单边框和主标题
+COLOR_MENU_BORDER="${BLUE}" # 菜单边框和主标题
 COLOR_MENU_ITEM="${GREEN}"   # 菜单项编号
 COLOR_IP_INFO="${GREEN}"     # IP信息高亮
 
@@ -208,6 +203,18 @@ setup_config_dir() {
   fi
 }
 
+# 查找一个可用的随机端口
+find_available_port() {
+  local port
+  while true; do
+    port=$(shuf -i 1024-65535 -n 1)
+    if ! (lsof -iTCP:$port -iUDP:$port >/dev/null 2>&1 || netstat -tuln | grep -qw ":${port}" || grep -q "|[^|]*:${port}|.*|" "$CONFIG_FILE" 2>/dev/null); then
+      echo "$port"
+      return 0
+    fi
+  done
+}
+
 # 验证输入
 validate_input() {
   local input=$1
@@ -338,15 +345,18 @@ save_forward_config() {
 # 添加转发
 add_forward() {
   printf "\n${BOLD}${COLOR_MENU_BORDER}--- 添加转发规则 ---${PLAIN}\n"
-  echo -e "${COLOR_INFO_TEXT}请选择转发类型:${PLAIN}\n  ${COLOR_MENU_ITEM}1.${PLAIN} 仅TCP转发\n  ${COLOR_MENU_ITEM}2.${PLAIN} 仅UDP转发\n  ${COLOR_MENU_ITEM}3.${PLAIN} TCP+UDP转发到相同目标\n  ${COLOR_MENU_ITEM}4.${PLAIN} TCP和UDP分别转发到不同目标"
-  echo -e "${COLOR_INFO_TEXT}请选择 [1-4]: ${PLAIN}\c"
-  read forward_type
+  printf "${COLOR_INFO_TEXT}请选择转发类型:${PLAIN}\n  ${COLOR_MENU_ITEM}1.${PLAIN} 仅TCP转发\n  ${COLOR_MENU_ITEM}2.${PLAIN} 仅UDP转发\n  ${COLOR_MENU_ITEM}3.${PLAIN} TCP+UDP转发到相同目标\n  ${COLOR_MENU_ITEM}4.${PLAIN} TCP和UDP分别转发到不同目标\n"
+  printf "${COLOR_INFO_TEXT}请选择 [1-4]: ${PLAIN}"; read -r forward_type
   if ! [[ "$forward_type" =~ ^[1-4]$ ]]; then printf "${ERROR_SYMBOL} 无效的选择${PLAIN}\n"; return 1; fi
 
   local local_port
   while true; do 
-    echo -e "${COLOR_INFO_TEXT}请输入本地监听端口 [1-65535]: ${PLAIN}\c"
-    read local_port
+    printf "${COLOR_INFO_TEXT}请输入本地监听端口 [1-65535] (默认: 随机可用端口): ${PLAIN}"; read -r local_port
+    if [ -z "$local_port" ]; then
+      local_port=$(find_available_port)
+      printf "${INFO_SYMBOL} 已为您选择随机可用端口: ${COLOR_IP_INFO}%s${PLAIN}\n" "$local_port"
+      break
+    fi
     if validate_input "$local_port" "port"; then
       if lsof -iTCP:$local_port -iUDP:$local_port >/dev/null 2>&1 || netstat -tuln | grep -qw ":${local_port}" || grep -q "|[^|]*:${local_port}|.*|" "$CONFIG_FILE" 2>/dev/null; then
         printf "${ERROR_SYMBOL} 端口 ${COLOR_ERROR}%s${PLAIN} 已被占用或已配置Brook转发。\n" "$local_port"
@@ -354,9 +364,8 @@ add_forward() {
     fi
   done
   
-  echo -e "${COLOR_INFO_TEXT}请选择监听地址范围:${PLAIN}\n  ${COLOR_MENU_ITEM}1.${PLAIN} 所有网络接口 (0.0.0.0 和 ::, 推荐, ${BOLD}默认${PLAIN})\n  ${COLOR_MENU_ITEM}2.${PLAIN} 仅 IPv4 (0.0.0.0)\n  ${COLOR_MENU_ITEM}3.${PLAIN} 仅 IPv6 ([::])\n  ${COLOR_MENU_ITEM}4.${PLAIN} 指定本地IP地址"
-  echo -e "${COLOR_INFO_TEXT}请选择 [1-4, 默认1]: ${PLAIN}\c"
-  read listen_scope_choice
+  printf "${COLOR_INFO_TEXT}请选择监听地址范围:${PLAIN}\n  ${COLOR_MENU_ITEM}1.${PLAIN} 所有网络接口 (0.0.0.0 和 ::, 推荐, ${BOLD}默认${PLAIN})\n  ${COLOR_MENU_ITEM}2.${PLAIN} 仅 IPv4 (0.0.0.0)\n  ${COLOR_MENU_ITEM}3.${PLAIN} 仅 IPv6 ([::])\n  ${COLOR_MENU_ITEM}4.${PLAIN} 指定本地IP地址\n"
+  printf "${COLOR_INFO_TEXT}请选择 [1-4, 默认1]: ${PLAIN}"; read -r listen_scope_choice
   listen_scope_choice=${listen_scope_choice:-1}
   local listen_ip_for_brook="" final_listen_arg_for_brook=""
 
@@ -365,8 +374,7 @@ add_forward() {
     2) listen_ip_for_brook="0.0.0.0";; 
     3) listen_ip_for_brook="::";; 
     4) while true; do 
-         echo -e "${COLOR_INFO_TEXT}请输入要监听的本地IP地址: ${PLAIN}\c"
-         read specific_listen_ip
+         printf "${COLOR_INFO_TEXT}请输入要监听的本地IP地址: ${PLAIN}"; read -r specific_listen_ip
          if validate_input "$specific_listen_ip" "ip"; then listen_ip_for_brook="$specific_listen_ip"; break; fi; done ;;
     *) printf "${WARN_SYMBOL} 无效选择，使用默认 (所有接口)。${PLAIN}\n"; listen_ip_for_brook="";;
   esac
@@ -383,12 +391,10 @@ add_forward() {
       if [ "$forward_type" -eq 3 ]; then proto_str="both"; fi
       
       while true; do 
-        echo -e "${COLOR_INFO_TEXT}请输入目标IP地址或域名: ${PLAIN}\c"
-        read remote_ip; if validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname"; then break; fi;
+        printf "${COLOR_INFO_TEXT}请输入目标IP地址或域名: ${PLAIN}"; read -r remote_ip; if validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname"; then break; fi;
       done
       while true; do
-        echo -e "${COLOR_INFO_TEXT}请输入目标端口 [1-65535]: ${PLAIN}\c"
-        read remote_port; if validate_input "$remote_port" "port"; then break; fi;
+        printf "${COLOR_INFO_TEXT}请输入目标端口 [1-65535]: ${PLAIN}"; read -r remote_port; if validate_input "$remote_port" "port"; then break; fi;
       done
       remote_addr="${remote_ip}:${remote_port}"
       printf "${INFO_SYMBOL} 目标地址: ${COLOR_INFO_ACCENT}%s${PLAIN}\n" "$remote_addr"
@@ -405,23 +411,19 @@ add_forward() {
       printf "\n${BOLD}${COLOR_MENU_BORDER}--- TCP转发设置 ---${PLAIN}\n"
       local tcp_remote_ip tcp_remote_port tcp_remote_addr udp_remote_ip udp_remote_port udp_remote_addr
       while true; do
-        echo -e "${COLOR_INFO_TEXT}请输入TCP目标IP地址或域名: ${PLAIN}\c"
-        read tcp_remote_ip; if validate_input "$tcp_remote_ip" "ip" || validate_input "$tcp_remote_ip" "hostname"; then break; fi;
+        printf "${COLOR_INFO_TEXT}请输入TCP目标IP地址或域名: ${PLAIN}"; read -r tcp_remote_ip; if validate_input "$tcp_remote_ip" "ip" || validate_input "$tcp_remote_ip" "hostname"; then break; fi;
       done
       while true; do
-        echo -e "${COLOR_INFO_TEXT}请输入TCP目标端口 [1-65535]: ${PLAIN}\c"
-        read tcp_remote_port; if validate_input "$tcp_remote_port" "port"; then break; fi;
+        printf "${COLOR_INFO_TEXT}请输入TCP目标端口 [1-65535]: ${PLAIN}"; read -r tcp_remote_port; if validate_input "$tcp_remote_port" "port"; then break; fi;
       done
       tcp_remote_addr="${tcp_remote_ip}:${tcp_remote_port}"; printf "${INFO_SYMBOL} TCP目标地址: ${COLOR_INFO_ACCENT}%s${PLAIN}\n" "$tcp_remote_addr"
       
       printf "\n${BOLD}${COLOR_MENU_BORDER}--- UDP转发设置 ---${PLAIN}\n"
       while true; do
-        echo -e "${COLOR_INFO_TEXT}请输入UDP目标IP地址或域名: ${PLAIN}\c"
-        read udp_remote_ip; if validate_input "$udp_remote_ip" "ip" || validate_input "$udp_remote_ip" "hostname"; then break; fi;
+        printf "${COLOR_INFO_TEXT}请输入UDP目标IP地址或域名: ${PLAIN}"; read -r udp_remote_ip; if validate_input "$udp_remote_ip" "ip" || validate_input "$udp_remote_ip" "hostname"; then break; fi;
       done
       while true; do
-        echo -e "${COLOR_INFO_TEXT}请输入UDP目标端口 [1-65535]: ${PLAIN}\c"
-        read udp_remote_port; if validate_input "$udp_remote_port" "port"; then break; fi;
+        printf "${COLOR_INFO_TEXT}请输入UDP目标端口 [1-65535]: ${PLAIN}"; read -r udp_remote_port; if validate_input "$udp_remote_port" "port"; then break; fi;
       done
       udp_remote_addr="${udp_remote_ip}:${udp_remote_port}"; printf "${INFO_SYMBOL} UDP目标地址: ${COLOR_INFO_ACCENT}%s${PLAIN}\n" "$udp_remote_addr"
       
@@ -451,9 +453,10 @@ list_forwards() {
   printf "${COLOR_MENU_BORDER}%s${PLAIN}\n" "---------------------------------------------------------------------------------------------------"
   
   local count=0
-  # 修复：直接查找systemd服务文件
-  local service_files=($($SUDO find /etc/systemd/system -name "${SERVICE_PREFIX}-*.service" 2>/dev/null | sort))
-  
+  # 修复：直接查找systemd服务文件，并确保排序一致性
+  local service_files
+  mapfile -t service_files < <(find "$SERVICE_DIR" -name "${SERVICE_PREFIX}-*.service" -print0 | xargs -0 -r ls -t | sort)
+
   if [ ${#service_files[@]} -eq 0 ]; then
     printf "${WARN_SYMBOL} 没有找到活动的转发服务${PLAIN}\n"
     return
@@ -494,34 +497,165 @@ list_forwards() {
   printf "\n${INFO_SYMBOL} 共 ${COLOR_INFO_ACCENT}%d${PLAIN} 个转发服务\n" "$count"
 }
 
-# 删除转发
-delete_forward() {
+# 修改转发
+modify_forward() {
   list_forwards
   
-  # 使用和list_forwards相同的查询方式
-  local service_files=($($SUDO find /etc/systemd/system -name "${SERVICE_PREFIX}-*.service" 2>/dev/null | sort))
+  local service_files
+  mapfile -t service_files < <(find "$SERVICE_DIR" -name "${SERVICE_PREFIX}-*.service" -print0 | xargs -0 -r ls -t | sort)
+  if [ ${#service_files[@]} -eq 0 ]; then return; fi
   
-  if [ ${#service_files[@]} -eq 0 ]; then 
-    return
-  fi
-  
-  # 创建服务名称数组
   local services=()
   for service_file in "${service_files[@]}"; do
     services+=($(basename "$service_file" .service))
   done
   
   printf "\n"
-  echo -e "${WARN_SYMBOL} 确定要删除服务 %s 吗? [y/N]: ${PLAIN}\c"
-  read -r confirm
+  local choice
+  printf "${COLOR_INFO_TEXT}请输入要修改的服务编号 (输入0取消): ${PLAIN}"; read -r choice
+  
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -eq 0 ]; then
+    printf "${WARN_SYMBOL} 已取消修改${PLAIN}\n"; return
+  fi
+
+  if [ "$choice" -lt 1 ] || [ "$choice" -gt ${#services[@]} ]; then 
+    printf "${ERROR_SYMBOL} 无效的选择${PLAIN}\n"; return
+  fi
+
+  local service_name=${services[$((choice-1))]}
+  local old_config
+  old_config=$(grep "^${service_name}|" "$CONFIG_FILE" 2>/dev/null | head -1)
+
+  if [ -z "$old_config" ]; then
+    printf "${ERROR_SYMBOL} 找不到服务 %s 的配置信息，无法修改。${PLAIN}\n" "$service_name"
+    return
+  fi
+
+  local old_listen_address old_remote_addr old_proto old_local_port
+  old_listen_address=$(echo "$old_config" | cut -d'|' -f2)
+  old_remote_addr=$(echo "$old_config" | cut -d'|' -f3)
+  old_proto=$(echo "$old_config" | cut -d'|' -f4)
+  old_local_port=$(echo "$old_listen_address" | awk -F: '{print $NF}')
+  
+  printf "\n${BOLD}${COLOR_MENU_BORDER}--- 修改转发: %s ---${PLAIN}\n" "$service_name"
+  printf "${INFO_SYMBOL} 当前本地端口: ${COLOR_IP_INFO}%s${PLAIN}\n" "$old_local_port"
+  printf "${INFO_SYMBOL} 当前目标地址: ${COLOR_IP_INFO}%s${PLAIN}\n" "$old_remote_addr"
+  printf "${INFO_SYMBOL} 当前协议: ${COLOR_IP_INFO}%s${PLAIN}\n" "$old_proto"
+  printf "${COLOR_INFO_ACCENT}提示: 直接回车将保留原设置。${PLAIN}\n"
+
+  local new_local_port
+  while true; do
+    printf "${COLOR_INFO_TEXT}新本地端口 (留空: %s): ${PLAIN}" "$old_local_port"; read -r new_local_port
+    new_local_port=${new_local_port:-$old_local_port}
+    if [ "$new_local_port" = "$old_local_port" ]; then break; fi
+    if validate_input "$new_local_port" "port"; then
+      if lsof -iTCP:"$new_local_port" -iUDP:"$new_local_port" >/dev/null 2>&1 || netstat -tuln | grep -qw ":${new_local_port}" || grep -q "|[^|]*:${new_local_port}|.*|" "$CONFIG_FILE" 2>/dev/null; then
+        printf "${ERROR_SYMBOL} 端口 %s 已被占用。\n" "$new_local_port"
+      else break; fi
+    fi
+  done
+  
+  local new_remote_ip old_remote_ip
+  old_remote_ip=$(echo "$old_remote_addr" | awk -F: 'BEGIN{OFS=":"} {NF--; print}')
+  if [[ "$old_remote_addr" == *]:* ]]; then # IPv6
+      old_remote_ip=$(echo "$old_remote_addr" | sed -e 's/\[//' -e 's/\].*//')
+  else
+      old_remote_ip=$(echo "$old_remote_addr" | cut -d: -f1)
+  fi
+
+  while true; do 
+    printf "${COLOR_INFO_TEXT}新目标IP/域名 (留空: %s): ${PLAIN}" "$old_remote_ip"; read -r new_remote_ip
+    new_remote_ip=${new_remote_ip:-$old_remote_ip}
+    if validate_input "$new_remote_ip" "ip" || validate_input "$new_remote_ip" "hostname"; then break; fi
+  done
+
+  local new_remote_port old_remote_port
+  old_remote_port=$(echo "$old_remote_addr" | awk -F: '{print $NF}')
+  while true; do
+    printf "${COLOR_INFO_TEXT}新目标端口 (留空: %s): ${PLAIN}" "$old_remote_port"; read -r new_remote_port
+    new_remote_port=${new_remote_port:-$old_remote_port}
+    if validate_input "$new_remote_port" "port"; then break; fi
+  done
+  
+  if [ "$new_local_port" = "$old_local_port" ] && [ "$new_remote_ip" = "$old_remote_ip" ] && [ "$new_remote_port" = "$old_remote_port" ]; then
+    printf "${WARN_SYMBOL} 配置未更改，无需操作。${PLAIN}\n"
+    return
+  fi
+
+  printf "${INFO_SYMBOL} 正在应用更改...${PLAIN}\n"
+
+  $SUDO systemctl stop "$service_name" 2>/dev/null
+  $SUDO systemctl disable "$service_name" 2>/dev/null
+  $SUDO rm -f "${SERVICE_DIR}/${service_name}.service"
+  $SUDO sed -i "/^${service_name}|/d" "$CONFIG_FILE" 2>/dev/null
+  $SUDO systemctl daemon-reload
+  
+  local listen_ip_for_brook final_listen_arg_for_brook
+  listen_ip_for_brook=$(echo "$old_listen_address" | sed -e 's/\[//' -e 's/\].*//' -e "s/:${old_local_port}$//")
+  if [ -z "$listen_ip_for_brook" ]; then final_listen_arg_for_brook=":${new_local_port}";
+  elif [[ "$listen_ip_for_brook" == *":"* ]]; then final_listen_arg_for_brook="[${listen_ip_for_brook}]:${new_local_port}";
+  else final_listen_arg_for_brook="${listen_ip_for_brook}:${new_local_port}"; fi
+  
+  local new_remote_addr
+  new_remote_addr="${new_remote_ip}:${new_remote_port}"
+  
+  local new_service_name
+  new_service_name=$(generate_service_name "$new_local_port" "$old_proto" "$listen_ip_for_brook")
+
+  if create_systemd_service "$new_service_name" "$final_listen_arg_for_brook" "$new_local_port" "$new_remote_addr" "$old_proto"; then
+    save_forward_config "$new_service_name" "$final_listen_arg_for_brook" "$new_remote_addr" "$old_proto"
+    printf "${SUCCESS_SYMBOL} 转发 %s 已成功修改为 %s。${PLAIN}\n" "$service_name" "$new_service_name"
+  else
+    printf "${ERROR_SYMBOL} 修改转发失败。请检查日志。${PLAIN}\n"
+    printf "${WARN_SYMBOL} 正在尝试恢复旧配置...${PLAIN}\n"
+    if create_systemd_service "$service_name" "$old_listen_address" "$old_local_port" "$old_remote_addr" "$old_proto"; then
+        save_forward_config "$service_name" "$old_listen_address" "$old_remote_addr" "$old_proto"
+        printf "${SUCCESS_SYMBOL} 旧配置已恢复。${PLAIN}\n"
+    else
+        printf "${ERROR_SYMBOL} 恢复旧配置失败。请手动干预。${PLAIN}\n"
+    fi
+  fi
+}
+
+# 删除转发
+delete_forward() {
+  list_forwards
+  
+  local service_files
+  mapfile -t service_files < <(find "$SERVICE_DIR" -name "${SERVICE_PREFIX}-*.service" -print0 | xargs -0 -r ls -t | sort)
+  
+  if [ ${#service_files[@]} -eq 0 ]; then 
+    return
+  fi
+  
+  local services=()
+  for service_file in "${service_files[@]}"; do
+    services+=($(basename "$service_file" .service))
+  done
+  
+  printf "\n"
+  local choice
+  printf "${COLOR_INFO_TEXT}请输入要删除的服务编号 (输入0取消): ${PLAIN}"; read -r choice
+  
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -eq 0 ]; then
+    printf "${WARN_SYMBOL} 已取消删除${PLAIN}\n"; return
+  fi
+
+  if [ "$choice" -lt 1 ] || [ "$choice" -gt ${#services[@]} ]; then 
+    printf "${ERROR_SYMBOL} 无效的选择${PLAIN}\n"; return
+  fi
+
+  local service_name_to_delete=${services[$((choice-1))]}
+  
+  printf "${WARN_SYMBOL} 确定要删除服务 %s 吗? [y/N]: ${PLAIN}" "$service_name_to_delete"; read -r confirm
   
   if [[ "$confirm" =~ ^[Yy]$ ]]; then
-    $SUDO systemctl stop "${services[$((choice-1))]} 2>/dev/null
-    $SUDO systemctl disable "${services[$((choice-1))]} 2>/dev/null
-    $SUDO rm -f "${SERVICE_DIR}/${services[$((choice-1))]}.service"
-    $SUDO sed -i "/^${services[$((choice-1))]}|/d" "$CONFIG_FILE" 2>/dev/null
+    $SUDO systemctl stop "$service_name_to_delete" 2>/dev/null
+    $SUDO systemctl disable "$service_name_to_delete" 2>/dev/null
+    $SUDO rm -f "${SERVICE_DIR}/${service_name_to_delete}.service"
+    $SUDO sed -i "/^${service_name_to_delete}|/d" "$CONFIG_FILE" 2>/dev/null
     $SUDO systemctl daemon-reload
-    printf "${SUCCESS_SYMBOL} 服务 %s 已删除${PLAIN}\n" "${services[$((choice-1))]}"
+    printf "${SUCCESS_SYMBOL} 服务 %s 已删除${PLAIN}\n" "$service_name_to_delete"
   else
     printf "${WARN_SYMBOL} 已取消删除${PLAIN}\n"
   fi
@@ -529,12 +663,12 @@ delete_forward() {
 
 # 卸载brook
 uninstall_brook() {
-  printf "${WARN_SYMBOL} 此操作将卸载Brook并删除所有转发服务。确定要继续吗? [y/N]: ${PLAIN}\c"
-  read -r confirm_brook
+  printf "${WARN_SYMBOL} 此操作将卸载Brook并删除所有转发服务。确定要继续吗? [y/N]: ${PLAIN}"; read -r confirm_brook
   if [[ ! "$confirm_brook" =~ ^[Yy]$ ]]; then printf "${WARN_SYMBOL} 已取消卸载Brook${PLAIN}\n"; return 1; fi
 
   printf "${INFO_SYMBOL} 停止所有Brook转发服务...${PLAIN}\n"
-  local service_files=($($SUDO find /etc/systemd/system -name "${SERVICE_PREFIX}-*.service" 2>/dev/null))
+  local service_files
+  mapfile -t service_files < <(find "$SERVICE_DIR" -name "${SERVICE_PREFIX}-*.service" -print0 | xargs -0 -r ls -t 2>/dev/null | sort)
   
   for service_file in "${service_files[@]}"; do
     local service_name=$(basename "$service_file" .service)
@@ -580,127 +714,29 @@ get_simple_ip_info() {
   fi
 }
 
-# 获取详细IP信息
-get_enhanced_ip_info() {
-  if ! command -v curl &>/dev/null; then 
-    echo "网络工具未就绪"
-    return 1
-  fi
-  
-  local ipv4_info ipv6_info result_info=""
-  
-  # 获取IPv4信息
-  ipv4_info=$(curl -s4 --connect-timeout 3 https://ipinfo.io/json 2>/dev/null)
-  if [ -n "$ipv4_info" ] && echo "$ipv4_info" | grep -q '"ip"'; then
-    local ipv4=$(echo "$ipv4_info" | grep -o '"ip": "[^"]*' | cut -d'"' -f4)
-    local country=$(echo "$ipv4_info" | grep -o '"country": "[^"]*' | cut -d'"' -f4)
-    local city=$(echo "$ipv4_info" | grep -o '"city": "[^"]*' | cut -d'"' -f4)
-    result_info="IPv4: ${GREEN}${ipv4}${PLAIN} (${country}, ${city})"
-  else
-    result_info="IPv4: 无连接"
-  fi
-  
-  # 检测IPv6连接
-  if curl -s6 --connect-timeout 2 https://ipv6.icanhazip.com >/dev/null 2>&1; then
-    ipv6_info=$(curl -s6 --connect-timeout 3 https://ipinfo.io/json 2>/dev/null)
-    if [ -n "$ipv6_info" ] && echo "$ipv6_info" | grep -q '"ip"'; then
-      local ipv6=$(echo "$ipv6_info" | grep -o '"ip": "[^"]*' | cut -d'"' -f4)
-      result_info="${result_info} | IPv6: 支持"
-    else
-      result_info="${result_info} | IPv6: 检测中"
-    fi
-  else
-    result_info="${result_info} | IPv6: 不支持"
-  fi
-  
-  echo "$result_info"
-}
-
-# 显示详细IP信息
-show_ip_info() {
-  printf "\n${CYAN}${BOLD}========== 网络信息详情 ==========${PLAIN}\n"
-  
-  if ! command -v curl &>/dev/null; then 
-    printf "${RED}${ERROR_SYMBOL} 未找到curl命令，无法获取IP信息${PLAIN}\n"
-    return 1
-  fi
-  
-  printf "${CYAN}${INFO_SYMBOL} IPv4地址信息:${PLAIN}\n"
-  local ipv4_info=$(curl -s4 --connect-timeout 5 https://ipinfo.io/json 2>/dev/null)
-  
-  if [ -n "$ipv4_info" ] && echo "$ipv4_info" | grep -q '"ip"'; then
-    if command -v jq &>/dev/null; then
-      echo "$ipv4_info" | jq .
-    else
-      echo "$ipv4_info" | grep -E '("ip"|"country"|"city"|"region"|"org"|"loc"|"timezone")'
-    fi
-  else
-    printf "${RED}${ERROR_SYMBOL} 无法获取IPv4公网信息${PLAIN}\n"
-  fi
-  
-  printf "\n${CYAN}${INFO_SYMBOL} IPv6地址信息:${PLAIN}\n"
-  if curl -s6 --connect-timeout 3 https://ipv6.icanhazip.com >/dev/null 2>&1; then
-    local ipv6_info=$(curl -s6 --connect-timeout 5 https://ipinfo.io/json 2>/dev/null)
-    
-    if [ -n "$ipv6_info" ] && echo "$ipv6_info" | grep -q '"ip"'; then
-      if command -v jq &>/dev/null; then
-        echo "$ipv6_info" | jq .
-      else
-        echo "$ipv6_info" | grep -E '("ip"|"country"|"city"|"region"|"org"|"loc")'
-      fi
-    else
-      printf "${YELLOW}${WARN_SYMBOL} IPv6连接可用，但无法获取详细信息${PLAIN}\n"
-    fi
-  else
-    printf "${YELLOW}${WARN_SYMBOL} 没有检测到IPv6连接${PLAIN}\n"
-  fi
-  
-  # 网络连接性测试
-  printf "\n${CYAN}${INFO_SYMBOL} 网络连接性测试:${PLAIN}\n"
-  
-  printf "DNS解析测试: "
-  if timeout 3 nslookup google.com >/dev/null 2>&1; then
-    printf "${GREEN}正常${PLAIN}\n"
-  else
-    printf "${RED}失败${PLAIN}\n"
-  fi
-  
-  printf "HTTP连接测试: "
-  if timeout 3 curl -s http://www.google.com >/dev/null 2>&1; then
-    printf "${GREEN}正常${PLAIN}\n"
-  else
-    printf "${RED}失败${PLAIN}\n"
-  fi
-  
-  printf "HTTPS连接测试: "
-  if timeout 3 curl -s https://www.google.com >/dev/null 2>&1; then
-    printf "${GREEN}正常${PLAIN}\n"
-  else
-    printf "${RED}失败${PLAIN}\n"
-  fi
-  
-  printf "\n"
-}
+# 获取简洁的IP信息用于菜单显示 (删除了详细IP信息功能)
 
 # 显示菜单
 show_menu() {
-  local ip_info=$(get_simple_ip_info)
+  local ip_info
+  ip_info=$(get_simple_ip_info)
   printf "\n${BOLD}${COLOR_MENU_BORDER}========== Brook 端口转发管理 (v%s) ==========${PLAIN}\n" "$VERSION"
   if [ -n "$ip_info" ] && [ "$ip_info" != "无法获取IP信息" ] && [ "$ip_info" != "网络工具未就绪" ]; then printf "${INFO_SYMBOL} 本机IP: ${COLOR_IP_INFO}%s${PLAIN}\n" "$ip_info";
   else printf "${WARN_SYMBOL} 本机IP信息: ${COLOR_WARNING}%s${PLAIN}\n" "$ip_info"; fi
   printf "${BOLD}${COLOR_MENU_BORDER}----------------------------------------------------${PLAIN}\n"
-  echo -e "  ${COLOR_MENU_ITEM}1.${PLAIN} 添加转发\n  ${COLOR_MENU_ITEM}2.${PLAIN} 列出所有转发\n  ${COLOR_MENU_ITEM}3.${PLAIN} 删除转发\n  ${COLOR_MENU_ITEM}4.${PLAIN} 重启所有服务\n  ${COLOR_MENU_ITEM}5.${PLAIN} 查看服务日志\n  ${COLOR_MENU_ITEM}6.${PLAIN} 测试转发功能\n  ${COLOR_MENU_ITEM}7.${PLAIN} 卸载Brook\n  ${COLOR_MENU_ITEM}8.${PLAIN} 显示详细IP信息\n  ${COLOR_MENU_ITEM}0.${PLAIN} 退出"
+  echo -e "  ${COLOR_MENU_ITEM}1.${PLAIN} 添加转发\n  ${COLOR_MENU_ITEM}2.${PLAIN} 列出所有转发\n  ${COLOR_MENU_ITEM}3.${PLAIN} 修改转发\n  ${COLOR_MENU_ITEM}4.${PLAIN} 删除转发\n  ${COLOR_MENU_ITEM}5.${PLAIN} 重启所有服务\n  ${COLOR_MENU_ITEM}6.${PLAIN} 查看服务日志\n  ${COLOR_MENU_ITEM}7.${PLAIN} 测试转发功能\n  ${COLOR_MENU_ITEM}8.${PLAIN} 卸载Brook\n  ${COLOR_MENU_ITEM}0.${PLAIN} 退出"
   printf "${BOLD}${COLOR_MENU_BORDER}====================================================${PLAIN}\n"
 }
 
 # 重启所有服务
 restart_all_services() {
-  printf "${CYAN}${INFO_SYMBOL} 重启所有Brook转发服务...${PLAIN}\n"
+  printf "${COLOR_INFO_TEXT}${INFO_SYMBOL} 重启所有Brook转发服务...${PLAIN}\n"
   
-  local service_files=($($SUDO find /etc/systemd/system -name "${SERVICE_PREFIX}-*.service" 2>/dev/null | sort))
+  local service_files
+  mapfile -t service_files < <(find "$SERVICE_DIR" -name "${SERVICE_PREFIX}-*.service" -print0 | xargs -0 -r ls -t | sort)
   
   if [ ${#service_files[@]} -eq 0 ]; then
-    printf "${YELLOW}${WARN_SYMBOL} 没有找到Brook转发服务${PLAIN}\n"
+    printf "${COLOR_WARNING}${WARN_SYMBOL} 没有找到Brook转发服务${PLAIN}\n"
     return
   fi
   
@@ -722,32 +758,35 @@ restart_all_services() {
 view_service_logs() {
   list_forwards
   
-  local service_files=($($SUDO find /etc/systemd/system -name "${SERVICE_PREFIX}-*.service" 2>/dev/null | sort))
+  local service_files
+  mapfile -t service_files < <(find "$SERVICE_DIR" -name "${SERVICE_PREFIX}-*.service" -print0 | xargs -0 -r ls -t | sort)
   
   if [ ${#service_files[@]} -eq 0 ]; then 
     return
   fi
   
-  # 创建服务名称数组
   local services=()
   for service_file in "${service_files[@]}"; do
     services+=($(basename "$service_file" .service))
   done
   
   printf "\n"
-  echo -e "${COLOR_INFO_TEXT}请输入要查看日志的服务编号 (输入0查看所有): ${PLAIN}\c"
-  read choice
+  printf "${COLOR_INFO_TEXT}请输入要查看日志的服务编号 (输入0查看所有): ${PLAIN}"; read -r choice
   
+  if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+    printf "${ERROR_SYMBOL} 无效的选择，请输入数字。${PLAIN}\n"; return
+  fi
+
   if [ "$choice" -eq 0 ]; then 
-    printf "${CYAN}${INFO_SYMBOL} 显示所有Brook服务的最新日志...${PLAIN}\n"
+    printf "${COLOR_INFO_TEXT}${INFO_SYMBOL} 显示所有Brook服务的最新日志...${PLAIN}\n"
     for service_name in "${services[@]}"; do
-      printf "\n${CYAN}=== %s 日志 ===${PLAIN}\n" "$service_name"
-      $SUDO journalctl -u "$service_name" --no-pager -n 10 2>/dev/null || printf "${YELLOW}${WARN_SYMBOL} 无法获取 %s 的日志${PLAIN}\n" "$service_name"
+      printf "\n${COLOR_INFO_TEXT}=== %s 日志 ===${PLAIN}\n" "$service_name"
+      $SUDO journalctl -u "$service_name" --no-pager -n 10 2>/dev/null || printf "${COLOR_WARNING}${WARN_SYMBOL} 无法获取 %s 的日志${PLAIN}\n" "$service_name"
     done
   elif [ "$choice" -ge 1 ] && [ "$choice" -le ${#services[@]} ]; then 
     local service_name=${services[$((choice-1))]}
-    printf "${CYAN}${INFO_SYMBOL} 显示 %s 的日志...${PLAIN}\n" "$service_name"
-    $SUDO journalctl -u "$service_name" --no-pager -n 50 2>/dev/null || printf "${YELLOW}${WARN_SYMBOL} 无法获取 %s 的日志${PLAIN}\n" "$service_name"
+    printf "${COLOR_INFO_TEXT}${INFO_SYMBOL} 显示 %s 的日志...${PLAIN}\n" "$service_name"
+    $SUDO journalctl -u "$service_name" --no-pager -n 50 2>/dev/null || printf "${COLOR_WARNING}${WARN_SYMBOL} 无法获取 %s 的日志${PLAIN}\n" "$service_name"
   else 
     printf "${ERROR_SYMBOL} 无效的选择${PLAIN}\n"
   fi
@@ -757,24 +796,23 @@ view_service_logs() {
 test_brook_forward() {
   list_forwards
   
-  local service_files=($($SUDO find /etc/systemd/system -name "${SERVICE_PREFIX}-*.service" 2>/dev/null | sort))
+  local service_files
+  mapfile -t service_files < <(find "$SERVICE_DIR" -name "${SERVICE_PREFIX}-*.service" -print0 | xargs -0 -r ls -t | sort)
   
   if [ ${#service_files[@]} -eq 0 ]; then 
     return
   fi
   
-  # 创建服务名称数组
   local services=()
   for service_file in "${service_files[@]}"; do
     services+=($(basename "$service_file" .service))
   done
   
   printf "\n"
-  echo -e "${COLOR_INFO_TEXT}请输入要测试的服务编号 (输入0取消): ${PLAIN}\c"
-  read choice
+  printf "${COLOR_INFO_TEXT}请输入要测试的服务编号 (输入0取消): ${PLAIN}"; read -r choice
   
-  if [ "$choice" -eq 0 ]; then 
-    printf "${YELLOW}${INFO_SYMBOL} 已取消测试${PLAIN}\n"
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -eq 0 ]; then
+    printf "${COLOR_WARNING}${INFO_SYMBOL} 已取消测试${PLAIN}\n"
     return
   fi
   
@@ -784,35 +822,44 @@ test_brook_forward() {
   fi
   
   local service_name=${services[$((choice-1))]}
-  local info=$(grep "^${service_name}|" "$CONFIG_FILE" 2>/dev/null | head -1)
+  local info
+  info=$(grep "^${service_name}|" "$CONFIG_FILE" 2>/dev/null | head -1)
   
   if [ -n "$info" ]; then
-    local local_port=$(echo "$info" | cut -d'|' -f2)
-    local remote_addr=$(echo "$info" | cut -d'|' -f3)
-    local proto=$(echo "$info" | cut -d'|' -f4)
+    local local_listen_addr remote_addr proto
+    local_listen_addr=$(echo "$info" | cut -d'|' -f2)
+    remote_addr=$(echo "$info" | cut -d'|' -f3)
+    proto=$(echo "$info" | cut -d'|' -f4)
+    local local_port
+    local_port=$(echo "$local_listen_addr" | awk -F: '{print $NF}')
     
-    printf "${CYAN}${INFO_SYMBOL} 测试转发: 本地端口 %s (%s) -> %s${PLAIN}\n" "$local_port" "$proto" "$remote_addr"
+    printf "${COLOR_INFO_TEXT}${INFO_SYMBOL} 测试转发: 本地端口 %s (%s) -> %s${PLAIN}\n" "$local_listen_addr" "$proto" "$remote_addr"
     
     # 检查服务状态
-    printf "${CYAN}${INFO_SYMBOL} 检查服务状态...${PLAIN}\n"
+    printf "${COLOR_INFO_TEXT}${INFO_SYMBOL} 检查服务状态...${PLAIN}\n"
     if $SUDO systemctl is-active --quiet "$service_name" 2>/dev/null; then
       printf "${SUCCESS_SYMBOL} 服务 %s 正在运行${PLAIN}\n" "$service_name"
     else
       printf "${ERROR_SYMBOL} 服务 %s 未运行，尝试启动...${PLAIN}\n" "$service_name"
       if $SUDO systemctl start "$service_name" 2>/dev/null; then
-        printf "${SUCCESS_SYMBOL} 服务已启动${PLAIN}\n"
+        sleep 1 # 等待服务启动
+        if $SUDO systemctl is-active --quiet "$service_name" 2>/dev/null; then
+          printf "${SUCCESS_SYMBOL} 服务已启动${PLAIN}\n"
+        else
+          printf "${ERROR_SYMBOL} 服务启动失败${PLAIN}\n"
+          return
+        fi
       else
-        printf "${ERROR_SYMBOL} 服务启动失败${PLAIN}\n"
-        return
+        printf "${ERROR_SYMBOL} 服务启动失败${PLAIN}\n"; return
       fi
     fi
     
     # 简单的端口连通性测试
-    printf "${CYAN}${INFO_SYMBOL} 测试端口连通性...${PLAIN}\n"
-    if timeout 3 bash -c "</dev/tcp/127.0.0.1/${local_port}" 2>/dev/null; then
-      printf "${SUCCESS_SYMBOL} 本地端口 %s 可达${PLAIN}\n" "$local_port"
+    printf "${COLOR_INFO_TEXT}${INFO_SYMBOL} 测试端口连通性...${PLAIN}\n"
+    if timeout 3 bash -c "true &>/dev/null </dev/tcp/127.0.0.1/${local_port}" 2>/dev/null; then
+      printf "${SUCCESS_SYMBOL} 本地TCP端口 %s 可达${PLAIN}\n" "$local_port"
     else
-      printf "${YELLOW}${WARN_SYMBOL} 本地端口 %s 无法连接或目标服务器无响应${PLAIN}\n" "$local_port"
+      printf "${COLOR_WARNING}${WARN_SYMBOL} 本地TCP端口 %s 无法连接或目标服务器无响应${PLAIN}\n" "$local_port"
     fi
   else
     printf "${ERROR_SYMBOL} 无法获取服务信息${PLAIN}\n"
@@ -826,17 +873,16 @@ main() {
   setup_config_dir
   while true; do
     show_menu
-    echo -e "${COLOR_INFO_TEXT}请选择操作 [0-8]: ${PLAIN}\c"
-    read choice
+    printf "${COLOR_INFO_TEXT}请选择操作 [0-8]: ${PLAIN}"; read -r choice
     case $choice in
       1) add_forward ;; 
       2) list_forwards ;; 
-      3) delete_forward ;; 
-      4) restart_all_services ;;
-      5) view_service_logs ;; 
-      6) test_brook_forward ;;
-      7) uninstall_brook; if [ $? -eq 0 ]; then break; fi ;; # 卸载成功后退出
-      8) show_ip_info ;; 
+      3) modify_forward ;;
+      4) delete_forward ;; 
+      5) restart_all_services ;;
+      6) view_service_logs ;; 
+      7) test_brook_forward ;;
+      8) uninstall_brook; if [ $? -eq 0 ]; then break; fi ;; # 卸载成功后退出
       0) printf "${SUCCESS_SYMBOL} 感谢使用，再见！${PLAIN}\n"; break ;; 
       *) printf "${ERROR_SYMBOL} 无效的选择，请重试${PLAIN}\n" ;;
     esac
