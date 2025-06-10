@@ -149,44 +149,6 @@ install_pkg() {
     apt-get install -y dnsutils ${dependencies[@]}  
 }
 
-# 自动创建Swap
-check_and_create_swap() {
-    # 检查总物理内存 (MB)
-    local total_mem=$(free -m | awk '/^Mem:/{print $2}')
-    
-    # 检查是否已存在 swap
-    if swapon --show | grep -q '/'; then
-        msg info "已存在Swap，跳过创建。"
-        return 0
-    fi
-
-    # 如果内存小于520MB，创建Swap
-    if [ "$total_mem" -lt 520 ]; then
-        msg warn "系统内存小于 520MB (${total_mem}MB)，且未发现Swap。正在创建1GB Swap文件..."
-        
-        # 使用 fallocate 创建 swap 文件，如果失败则使用 dd
-        fallocate -l 1G /swapfile
-        if [ $? -ne 0 ]; then
-            msg err "fallocate 创建失败，尝试使用 dd"
-            dd if=/dev/zero of=/swapfile bs=1M count=1024
-        fi
-
-        chmod 600 /swapfile
-        mkswap /swapfile
-        swapon /swapfile
-
-        # 检查 /etc/fstab 中是否已存在 /swapfile
-        if ! grep -q '/swapfile' /etc/fstab; then
-            echo '/swapfile none swap sw 0 0' >> /etc/fstab
-            msg ok "已将Swap配置写入 /etc/fstab，实现开机自启。"
-        fi
-        
-        msg ok "1GB Swap文件已创建并启用。"
-    else
-        msg info "系统内存为 ${total_mem}MB，无需自动创建Swap。"
-    fi
-}
-
 # Function to generate a random PSK
 generate_random_psk() {
     tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32  
@@ -219,32 +181,32 @@ create_snell_conf() {
     read -rp "Enter PSK for Snell (Leave it blank to generate a random one): " snell_psk
     [[ -z ${snell_psk} ]] && snell_psk=$(generate_random_psk) && echo "[INFO] Generated a random PSK for Snell: $snell_psk"
     
-    # Get DNS settings, prioritizing system DNS
-    system_dns=$(grep -oP '(?<=nameserver\s)\S+' /etc/resolv.conf | tr '\n' ',' | sed 's/,$//')
-    prompt_dns="Enter custom DNS servers (comma-separated, leave blank for default): "
+    # Get DNS settings
+    system_dns=$(grep -oP '(?<=nameserver\s)\S+' /etc/resolv.conf | sort -u | tr '\n' ',' | sed 's/,$//')
+    prompt_dns="Enter custom DNS servers (leave blank for default): "
     if [[ -n "$system_dns" ]]; then
         prompt_dns="Enter custom DNS servers (comma-separated, leave blank for system DNS [${system_dns}]): "
     fi
     read -rp "$prompt_dns" custom_dns
 
+    local final_dns=""
     if [[ -n "$custom_dns" ]]; then
-        dns_config="dns = $custom_dns"
+        final_dns="$custom_dns"
+        msg info "使用自定义DNS: $final_dns"
     elif [[ -n "$system_dns" ]]; then
-        dns_config="dns = $system_dns"
-        msg info "使用系统DNS: $system_dns"
+        final_dns="$system_dns"
+        msg info "使用系统DNS: $final_dns"
     else
         msg warn "无法从 /etc/resolv.conf 获取系统DNS。使用预设DNS。"
-        # 设置默认DNS，根据是否启用IPv6来决定使用哪些DNS服务器
         if [[ $ip_type == "both" || $ip_type == "ipv6" ]]; then
-            # 带IPv6的默认DNS (Cloudflare + Google)
-            dns_config="dns = 1.1.1.1, 8.8.8.8, 2606:4700:4700::1111, 2001:4860:4860::8888"
-            msg info "使用默认DNS (Cloudflare + Google，包含IPv6)"
+            final_dns="1.1.1.1,2606:4700:4700::1111" # Cloudflare only for IPv6
+            msg info "使用预设DNS (Cloudflare, 含IPv6)"
         else
-            # 仅IPv4的默认DNS (Cloudflare + Google)
-            dns_config="dns = 1.1.1.1, 8.8.8.8"
-            msg info "使用默认DNS (Cloudflare + Google，仅IPv4)"
+            final_dns="1.1.1.1,8.8.8.8" # Cloudflare + Google for IPv4
+            msg info "使用预设DNS (Cloudflare + Google, 仅IPv4)"
         fi
     fi
+    dns_config="dns = $final_dns"
 
     # 询问是否仅监听本地地址
     read -rp "是否仅监听本地地址？(y/n, 推荐使用Shadow-TLS时选择y): " local_only
@@ -262,16 +224,6 @@ create_snell_conf() {
             if [[ $enable_ipv6 =~ ^[Yy]$ ]]; then
                 listen_addr="::0:$snell_port"
                 ipv6_enabled="true"
-                
-                # 如果启用IPv6但用户使用了自定义DNS，提醒可能需要包含IPv6 DNS
-                if [[ -n $custom_dns ]] && ! [[ $custom_dns =~ ":" ]]; then
-                    msg warn "您启用了IPv6但DNS中似乎没有包含IPv6地址，这可能会影响IPv6连接"
-                    read -rp "是否添加IPv6 DNS？(y/n): " add_ipv6_dns
-                    if [[ $add_ipv6_dns =~ ^[Yy]$ ]]; then
-                        dns_config="dns = $custom_dns, 2606:4700:4700::1111, 2001:4860:4860::8888"
-                        msg info "已添加Cloudflare和Google的IPv6 DNS"
-                    fi
-                fi
             else
                 listen_addr="0.0.0.0:$snell_port"
                 ipv6_enabled="false"
@@ -476,7 +428,6 @@ install_all() {
 # Install Snell only without IP detection
 install_snell_without_ip() {
     install_pkg
-    check_and_create_swap
 
     msg info "下载 Snell..."
     mkdir -p "${snell_workspace}"
@@ -566,7 +517,6 @@ install_snell() {
 # Install Shadow-TLS only without IP detection
 install_shadow_tls_without_ip() {
     install_pkg
-    check_and_create_swap
 
     msg info "下载 Shadow-TLS..."
     mkdir -p "${shadow_tls_workspace}"

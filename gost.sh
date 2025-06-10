@@ -18,6 +18,37 @@ BOLD='\033[1m'
 UNDERLINE='\033[4m'
 PLAIN='\033[0m'
 
+# Check for root privileges and define SUDO command
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+    SUDO="sudo"
+    if ! command -v sudo &>/dev/null; then
+        printf "${RED} ${ERROR_SYMBOL}This script requires sudo to run as a non-root user, but sudo is not found.${PLAIN}\n"
+        exit 1
+    fi
+fi
+
+# Function to run a command as a specific user
+run_as() {
+  local user="$1"
+  shift
+  if [ "$(id -u)" -eq 0 ]; then
+    if command -v sudo &>/dev/null; then
+      sudo -u "$user" "$@"
+    elif command -v su &>/dev/null; then
+      # su needs a single command string
+      local cmd_str
+      printf -v cmd_str '%q ' "$@"
+      su -s /bin/sh -c "$cmd_str" "$user"
+    else
+      return 1
+    fi
+  else
+    # SUDO must be "sudo" here because of the check at the top
+    $SUDO -u "$user" "$@"
+  fi
+}
+
 # Service files directory - Standard systemd path
 SERVICE_DIR="/etc/systemd/system"
 
@@ -68,9 +99,9 @@ check_and_install_dependencies_and_gost() {
       printf "${YELLOW} ${INFO_SYMBOL}The following packages are missing or not found: %s.${PLAIN}\n" "${pkgs_to_install[*]}"
       printf "${YELLOW} ${INFO_SYMBOL}Attempting to install them using %s (requires sudo)...${PLAIN}\n" "$pkg_manager_detected"
       if [ "$pkg_manager_detected" == "apt-get" ]; then
-        sudo apt-get update -y || printf "${RED} ${ERROR_SYMBOL}Failed to update package lists.${PLAIN}\n"
+        $SUDO apt-get update -y || printf "${RED} ${ERROR_SYMBOL}Failed to update package lists.${PLAIN}\n"
       fi
-      if sudo $pkg_manager_detected install -y "${pkgs_to_install[@]}"; then
+      if $SUDO $pkg_manager_detected install -y "${pkgs_to_install[@]}"; then
         printf "${GREEN} ${SUCCESS_SYMBOL}Successfully attempted installation of: %s.${PLAIN}\n" "${pkgs_to_install[*]}"
       else
         printf "${RED} ${ERROR_SYMBOL}Failed to install some packages. Please check errors and install them manually.${PLAIN}\n"
@@ -126,7 +157,7 @@ show_loading() {
 # 检查和创建配置目录
 setup_config_dir() {
   # 尝试标准位置，优先级: /etc/gost/ > $HOME/gost/ > ./gost_config
-  if [ -d "/etc/gost" ] || (sudo mkdir -p /etc/gost && sudo chmod 755 /etc/gost 2>/dev/null); then
+  if [ -d "/etc/gost" ] || ($SUDO mkdir -p /etc/gost && $SUDO chmod 755 /etc/gost 2>/dev/null); then
     CONFIG_DIR="/etc/gost"
     printf "${GREEN} ${SUCCESS_SYMBOL}使用标准配置目录: ${CONFIG_DIR}${PLAIN}\n"
   elif [ -d "$HOME/gost" ] || mkdir -p "$HOME/gost" 2>/dev/null; then
@@ -194,7 +225,7 @@ ensure_config_dir() {
     # 此处的mkdir -p主要用于 $HOME/gost 或 ./gost_config 的情况
     # 因为 /etc/gost 应该在 setup_config_dir 中用 sudo 创建了
     if [[ "$CONFIG_DIR" == "/etc/"* ]]; then
-      sudo mkdir -p "$CONFIG_DIR" 2>/dev/null
+      $SUDO mkdir -p "$CONFIG_DIR" 2>/dev/null
     else
       mkdir -p "$CONFIG_DIR" 2>/dev/null
     fi
@@ -204,10 +235,10 @@ ensure_config_dir() {
   if [ ! -f "$CONFIG_FILE" ]; then
     json_content='{"services":[]}' # Ensure simplest valid JSON for initialization
     if [[ "$CONFIG_DIR" == "/etc/"* ]]; then
-      echo "$json_content" | sudo tee "$CONFIG_FILE" > /dev/null # No -e needed for this simple JSON
-      sudo chown root:root "$CONFIG_FILE"  
-      sudo chmod 644 "$CONFIG_FILE"       
-      sudo chmod 755 "$CONFIG_DIR"        
+      echo "$json_content" | $SUDO tee "$CONFIG_FILE" > /dev/null # No -e needed for this simple JSON
+      $SUDO chown root:root "$CONFIG_FILE"  
+      $SUDO chmod 644 "$CONFIG_FILE"       
+      $SUDO chmod 755 "$CONFIG_DIR"        
       printf "${GREEN} ${SUCCESS_SYMBOL}Created base config file (with sudo): %s${PLAIN}\n" "$CONFIG_FILE"
     else
       echo "$json_content" > "$CONFIG_FILE" # No -e needed for this simple JSON
@@ -216,9 +247,9 @@ ensure_config_dir() {
     fi
   else
     if [[ "$CONFIG_DIR" == "/etc/"* ]]; then
-      sudo chown root:root "$CONFIG_FILE"
-      sudo chmod 644 "$CONFIG_FILE"
-      sudo chmod 755 "$CONFIG_DIR"
+      $SUDO chown root:root "$CONFIG_FILE"
+      $SUDO chmod 644 "$CONFIG_FILE"
+      $SUDO chmod 755 "$CONFIG_DIR"
       # Check if permissions were actually changed or already correct
       # No direct output here unless it's a fix, to reduce noise.
       # A dedicated check function could provide this if needed.
@@ -234,7 +265,7 @@ ensure_config_dir() {
   fi
 
   if [[ "$CONFIG_DIR" == "/etc/"* ]]; then
-    if ! sudo -u "$target_user" test -r "$CONFIG_FILE" 2>/dev/null; then
+    if ! run_as "$target_user" test -r "$CONFIG_FILE" 2>/dev/null; then
       printf "${RED} ${ERROR_SYMBOL}Warning: user ${target_user} cannot read config file. Attempting to fix...${PLAIN}\n"
       # Permissions were set above, this re-evaluates if they are sufficient
       # If the above chown/chmod was to a different group than what target_user is in, it might fail.
@@ -244,9 +275,9 @@ ensure_config_dir() {
       # So, a simple `sudo chmod 644 "$CONFIG_FILE"` and `sudo chmod 755 "$CONFIG_DIR"` should suffice.
       # The commands are already there; this check is more for complex scenarios or if they were altered.
       # Re-applying them explicitly if test fails might be redundant but harmless.
-      sudo chmod 644 "$CONFIG_FILE"
-      sudo chmod 755 "$CONFIG_DIR"
-      if ! sudo -u "$target_user" test -r "$CONFIG_FILE" 2>/dev/null; then
+      $SUDO chmod 644 "$CONFIG_FILE"
+      $SUDO chmod 755 "$CONFIG_DIR"
+      if ! run_as "$target_user" test -r "$CONFIG_FILE" 2>/dev/null; then
         printf "${RED} ${ERROR_SYMBOL}Failed to fix permissions for ${target_user}. Consider config location or manual check.${PLAIN}\n"
         # return 1 # Decided not to make this fatal for now, but it's a serious warning.
       else
@@ -301,9 +332,9 @@ add_forward_to_config() {
     fi
 
     if [[ "$CONFIG_FILE" == "/etc/gost/"* ]]; then
-        sudo mv "$temp_file" "$CONFIG_FILE"
-        sudo chown root:root "$CONFIG_FILE"
-        sudo chmod 644 "$CONFIG_FILE"
+        $SUDO mv "$temp_file" "$CONFIG_FILE"
+        $SUDO chown root:root "$CONFIG_FILE"
+        $SUDO chmod 644 "$CONFIG_FILE"
     else
         mv "$temp_file" "$CONFIG_FILE"
         chmod 644 "$CONFIG_FILE"
@@ -363,7 +394,7 @@ apply_config() {
 
   printf "${CYAN} ${INFO_SYMBOL}Stopping existing gost service (if any)...${PLAIN}\n"
   if systemctl is-active --quiet gost; then
-    sudo systemctl stop gost
+    $SUDO systemctl stop gost
     printf "${GREEN} ${SUCCESS_SYMBOL}GOST service stopped.${PLAIN}\n"
   else
     printf "${YELLOW} ${WARN_SYMBOL}GOST service is not running.${PLAIN}\n"
@@ -388,7 +419,7 @@ apply_config() {
 # 创建gost用户（如果不存在）
 if ! id "gost" &>/dev/null; then
   printf "${CYAN} ${INFO_SYMBOL}Creating gost system user...${PLAIN}\n"
-  sudo useradd --system --no-create-home --shell /bin/false gost 2>/dev/null || {
+  $SUDO useradd --system --no-create-home --shell /bin/false gost 2>/dev/null || {
     printf "${YELLOW} ${WARN_SYMBOL}Failed to create gost user, using nobody instead${PLAIN}\n"
     GOST_USER="nobody"
     GOST_GROUP="nogroup"
@@ -398,9 +429,9 @@ if ! id "gost" &>/dev/null; then
     GOST_GROUP="gost"
     # 确保gost用户可以读取配置文件
     if [[ "$CONFIG_DIR" == "/etc/"* ]]; then
-      sudo chown -R root:gost "$CONFIG_DIR"
-      sudo chmod -R 750 "$CONFIG_DIR"
-      sudo chmod 640 "$CONFIG_FILE"
+      $SUDO chown -R root:gost "$CONFIG_DIR"
+      $SUDO chmod -R 750 "$CONFIG_DIR"
+      $SUDO chmod 640 "$CONFIG_FILE"
     fi
   fi
 else
@@ -408,9 +439,9 @@ else
   GOST_GROUP="gost"
   # 确保gost用户可以读取配置文件
   if [[ "$CONFIG_DIR" == "/etc/"* ]]; then
-    sudo chown -R root:gost "$CONFIG_DIR"
-    sudo chmod -R 750 "$CONFIG_DIR"
-    sudo chmod 640 "$CONFIG_FILE"
+    $SUDO chown -R root:gost "$CONFIG_DIR"
+    $SUDO chmod -R 750 "$CONFIG_DIR"
+    $SUDO chmod 640 "$CONFIG_FILE"
   fi
 fi
 
@@ -438,23 +469,23 @@ WantedBy=multi-user.target
 EOF
 )
 
-  echo "$SERVICE_FILE_CONTENT" | sudo tee "$SERVICE_DIR/gost.service" > /dev/null
+  echo "$SERVICE_FILE_CONTENT" | $SUDO tee "$SERVICE_DIR/gost.service" > /dev/null
   if [ $? -ne 0 ]; then
     printf "${RED} ${ERROR_SYMBOL}Failed to write gost.service file. Check sudo permissions or if '%s' is writable.${PLAIN}\n" "$SERVICE_DIR"
     return 1
   fi
 
-  sudo systemctl daemon-reload
-  sudo systemctl enable gost
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl enable gost
 
   printf "${CYAN} ${INFO_SYMBOL}Starting gost service...${PLAIN}\n"
-  if ! sudo systemctl start gost; then
+  if ! $SUDO systemctl start gost; then
     printf "${RED} ${ERROR_SYMBOL}Failed to start gost service. Checking for errors...${PLAIN}\n"
-    sudo journalctl -u gost --no-pager -n 20
+    $SUDO journalctl -u gost --no-pager -n 20
     return 1
   fi
 
-  if sudo systemctl is-active --quiet gost; then
+  if $SUDO systemctl is-active --quiet gost; then
     printf "${GREEN} ${SUCCESS_SYMBOL}Gost service is running successfully!${PLAIN}\n"
     printf "${CYAN} ${INFO_SYMBOL}Configured forwarding services from %s:${PLAIN}\n" "$CONFIG_FILE"
     local counter=1
@@ -472,7 +503,7 @@ EOF
     fi
   else
     printf "${RED} ${ERROR_SYMBOL}Failed to start gost service. Service status is inactive.${PLAIN}\n"
-    sudo journalctl -u gost --no-pager -n 20
+    $SUDO journalctl -u gost --no-pager -n 20
     return 1
   fi
   printf "${GREEN} ${SUCCESS_SYMBOL}Successfully applied configuration from: %s${PLAIN}\n" "$CONFIG_FILE"
@@ -752,7 +783,7 @@ manage_forward_services() {
     6)
       printf "${CYAN}${INFO_SYMBOL}Stopping GOST service...${PLAIN}\n"
       if systemctl is-active --quiet gost; then
-        sudo systemctl stop gost
+        $SUDO systemctl stop gost
         printf "${GREEN} ${SUCCESS_SYMBOL}GOST service stopped.${PLAIN}\n"
       else
         printf "${YELLOW} ${WARN_SYMBOL}GOST service is not running.${PLAIN}\n"
@@ -761,10 +792,10 @@ manage_forward_services() {
     7)
       printf "${CYAN}${INFO_SYMBOL}Restarting GOST service...${PLAIN}\n"
       if systemctl is-active --quiet gost; then
-        sudo systemctl restart gost
+        $SUDO systemctl restart gost
         printf "${GREEN} ${SUCCESS_SYMBOL}GOST service restarted.${PLAIN}\n"
       else
-        sudo systemctl start gost 
+        $SUDO systemctl start gost 
         if systemctl is-active --quiet gost; then
             printf "${GREEN} ${SUCCESS_SYMBOL}GOST service started.${PLAIN}\n"
         else
@@ -802,7 +833,7 @@ config_file_management() {
         # Before removing, ensure it's not a directory or something unexpected
         if [ -f "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; then # If it's a file or symlink
             if [[ "$CONFIG_FILE" == "/etc/gost/"* ]]; then
-                sudo rm -f "$CONFIG_FILE"
+                $SUDO rm -f "$CONFIG_FILE"
             else
                 rm -f "$CONFIG_FILE"
             fi
@@ -848,7 +879,7 @@ config_file_management() {
       else
         # Use sudo if editing /etc/gost/config.json
         if [[ "$CONFIG_FILE" == "/etc/gost/"* ]]; then
-            sudo "$editor" "$CONFIG_FILE"
+            $SUDO "$editor" "$CONFIG_FILE"
         else
             "$editor" "$CONFIG_FILE"
         fi
@@ -882,9 +913,9 @@ config_file_management() {
         backup_file="$backup_dir/config-$(date +%Y%m%d-%H%M%S).json.bak"
         
         if [[ "$CONFIG_FILE" == "/etc/gost/"* ]]; then
-            sudo cp "$CONFIG_FILE" "$backup_file"
+            $SUDO cp "$CONFIG_FILE" "$backup_file"
             # If backup_dir was changed to user's home, chown might be needed if sudo cp was used.
-            if [[ "$backup_dir" == "$HOME/"* ]]; then sudo chown "$(id -u)":"$(id -g)" "$backup_file"; fi
+            if [[ "$backup_dir" == "$HOME/"* ]]; then $SUDO chown "$(id -u)":"$(id -g)" "$backup_file"; fi
         else
             cp "$CONFIG_FILE" "$backup_file"
         fi
@@ -940,9 +971,9 @@ config_file_management() {
               read -p "This will overwrite your current config ($CONFIG_FILE). Are you sure? (y/N): " confirm_restore
               if [[ $confirm_restore == [Yy]* ]]; then
                 if [[ "$CONFIG_FILE" == "/etc/gost/"* ]]; then
-                    sudo cp "$selected_backup_path" "$CONFIG_FILE"
-                    sudo chown root:root "$CONFIG_FILE" # Ensure correct ownership after restore
-                    sudo chmod 644 "$CONFIG_FILE"
+                    $SUDO cp "$selected_backup_path" "$CONFIG_FILE"
+                    $SUDO chown root:root "$CONFIG_FILE" # Ensure correct ownership after restore
+                    $SUDO chmod 644 "$CONFIG_FILE"
                 else
                     cp "$selected_backup_path" "$CONFIG_FILE"
                 fi
@@ -973,9 +1004,9 @@ config_file_management() {
         if jq . "$CONFIG_FILE" > "$temp_format_file" 2>/dev/null; then
           # Check if original needs sudo to write
           if [[ "$CONFIG_FILE" == "/etc/gost/"* ]]; then
-            sudo mv "$temp_format_file" "$CONFIG_FILE"
-            sudo chown root:root "$CONFIG_FILE"
-            sudo chmod 644 "$CONFIG_FILE"
+            $SUDO mv "$temp_format_file" "$CONFIG_FILE"
+            $SUDO chown root:root "$CONFIG_FILE"
+            $SUDO chmod 644 "$CONFIG_FILE"
           else
             mv "$temp_format_file" "$CONFIG_FILE"
           fi
@@ -1075,7 +1106,7 @@ delete_config_forward() {
     
   if [ $? -eq 0 ]; then
     if [[ "$CONFIG_FILE" == "/etc/gost/"* ]]; then
-        sudo mv "$temp_file" "$CONFIG_FILE"
+        $SUDO mv "$temp_file" "$CONFIG_FILE"
     else
         mv "$temp_file" "$CONFIG_FILE"
     fi
@@ -1174,7 +1205,11 @@ edit_config_forward() {
     "$CONFIG_FILE" > "$temp_file"
     
   if [ $? -eq 0 ]; then
-    mv "$temp_file" "$CONFIG_FILE"
+    if [[ "$CONFIG_FILE" == "/etc/gost/"* ]]; then
+        $SUDO mv "$temp_file" "$CONFIG_FILE"
+    else
+        mv "$temp_file" "$CONFIG_FILE"
+    fi
   else
     printf "${RED} ${ERROR_SYMBOL}Error updating config file using jq.${PLAIN}\n"; rm -f "$temp_file"; return 1;
   fi
@@ -1223,9 +1258,9 @@ cleanup_old_services() {
     # Ensure we are not touching the main gost.service, though the find pattern should prevent this.
     if [ "$service_name" != "gost" ]; then 
       printf "${CYAN} ${INFO_SYMBOL}Stopping, disabling and removing %s...${PLAIN}\n" "$service_name"
-      sudo systemctl stop "$service_name" &>/dev/null
-      sudo systemctl disable "$service_name" &>/dev/null
-      sudo rm -f "$service_file_path"
+      $SUDO systemctl stop "$service_name" &>/dev/null
+      $SUDO systemctl disable "$service_name" &>/dev/null
+      $SUDO rm -f "$service_file_path"
       if [ $? -eq 0 ]; then
         removed_count=$((removed_count + 1))
       else
@@ -1235,7 +1270,7 @@ cleanup_old_services() {
   done
 
   if [ $removed_count -gt 0 ]; then
-    sudo systemctl daemon-reload
+    $SUDO systemctl daemon-reload
     printf "${GREEN} ${SUCCESS_SYMBOL}Successfully removed %s old GOST systemd services.${PLAIN}\n" "$removed_count"
   else
     printf "${YELLOW} ${WARN_SYMBOL}No old services were actually removed (perhaps only gost.service was found or removal failed).${PLAIN}\n"
