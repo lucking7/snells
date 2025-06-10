@@ -39,6 +39,11 @@ load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
     else
+        # 如果配置文件不存在，创建它并设置默认值
+        WAN_INTERFACE="$DEFAULT_INTERFACE_WAN"
+        LAN_INTERFACE="$DEFAULT_INTERFACE_LAN"
+        AUTO_SAVE="true"
+        LOG_LEVEL="info"
         create_default_config
     fi
 }
@@ -260,6 +265,28 @@ install_nftables() {
 # 初始化nftables配置
 init_nftables() {
     print_section "初始化 nftables 配置" "双栈IPv4/IPv6支持"
+
+    # 检查接口配置是否为空
+    if [[ -z "$WAN_INTERFACE" ]]; then
+        print_warning "WAN 接口未配置，正在尝试自动检测..."
+        # 尝试自动检测主网络接口
+        local detected_wan=$(ip route | grep '^default' | awk '{print $5}' | head -1)
+        if [[ -n "$detected_wan" ]]; then
+            WAN_INTERFACE="$detected_wan"
+            print_success "自动检测到 WAN 接口为: $WAN_INTERFACE"
+            save_config
+        else
+            print_error "无法自动检测 WAN 接口。"
+            echo -ne "${PRIMARY}请输入您的 WAN (外网) 接口名称 (例如 eth0): ${NC}"
+            read -r wan_if_input
+            if [[ -z "$wan_if_input" ]]; then
+                print_error "WAN 接口不能为空。初始化失败。"
+                return 1
+            fi
+            WAN_INTERFACE="$wan_if_input"
+            save_config
+        fi
+    fi
     
     # 创建配置文件
     cat > "${NFTABLES_CONF}" << EOF
