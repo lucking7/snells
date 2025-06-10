@@ -357,6 +357,8 @@ table ip nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
+        # SNAT/Masquerade规则 - 关键！确保返回流量经过本机
+        masquerade
     }
 }
 EOF
@@ -389,6 +391,8 @@ table ip6 nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
+        # SNAT/Masquerade规则 - 关键！确保返回流量经过本机
+        masquerade
     }
 }
 EOF
@@ -421,6 +425,8 @@ table ip nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
+        # SNAT/Masquerade规则 - 关键！确保返回流量经过本机
+        masquerade
     }
 }
 
@@ -431,6 +437,8 @@ table ip6 nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
+        # SNAT/Masquerade规则 - 关键！确保返回流量经过本机
+        masquerade
     }
 }
 EOF
@@ -511,9 +519,10 @@ add_forward_rule_interactive() {
     
     echo -e "${LIGHT_BLUE}NAT转发原理说明:${NC}"
     echo -e "${LIGHT_GRAY}1. 外部客户端连接到本地服务器的指定端口${NC}"
-    echo -e "${LIGHT_GRAY}2. NFTables将流量转发到目标服务器的指定端口${NC}"
-    echo -e "${LIGHT_GRAY}3. 支持TCP/UDP协议区分和IPv4/IPv6双栈${NC}"
-    echo -e "${LIGHT_GRAY}4. 自动匹配监听协议与目标IP版本确保兼容性${NC}"
+    echo -e "${LIGHT_GRAY}2. DNAT：将目标地址转换，转发到目标服务器${NC}"
+    echo -e "${LIGHT_GRAY}3. SNAT：masquerade伪装源地址，确保返回流量经过本机${NC}"
+    echo -e "${LIGHT_GRAY}4. 支持TCP/UDP协议区分和IPv4/IPv6双栈${NC}"
+    echo -e "${LIGHT_GRAY}5. 自动匹配监听协议与目标IP版本确保兼容性${NC}"
     echo
     
     # 协议选择
@@ -1022,13 +1031,15 @@ flush_all_rules_interactive() {
         nft flush table $table_family nat 2>/dev/null
         [[ "$IP_MODE" == "mix" ]] && nft flush table ip6 nat 2>/dev/null
         
-        # 重新创建链
+        # 重新创建链并添加masquerade规则
         nft add chain $table_family nat prerouting { type nat hook prerouting priority dstnat\; policy accept\; } 2>/dev/null
         nft add chain $table_family nat postrouting { type nat hook postrouting priority srcnat\; policy accept\; } 2>/dev/null
+        nft add rule $table_family nat postrouting masquerade 2>/dev/null
         
         if [[ "$IP_MODE" == "mix" ]]; then
             nft add chain ip6 nat prerouting { type nat hook prerouting priority dstnat\; policy accept\; } 2>/dev/null
             nft add chain ip6 nat postrouting { type nat hook postrouting priority srcnat\; policy accept\; } 2>/dev/null
+            nft add rule ip6 nat postrouting masquerade 2>/dev/null
         fi
         
         # 清空记录文件
@@ -1297,14 +1308,16 @@ show_help_menu() {
     
     echo -e "${LIGHT_BLUE}基本概念:${NC}"
     echo -e "${LIGHT_GRAY}• 端口转发: 将外部端口的流量转发到内网设备${NC}"
+    echo -e "${LIGHT_GRAY}• DNAT: 目标地址转换，重定向入站流量${NC}"
+    echo -e "${LIGHT_GRAY}• SNAT/Masquerade: 源地址伪装，确保返回流量路径${NC}"
     echo -e "${LIGHT_GRAY}• 协议支持: TCP、UDP或两者同时${NC}"
     echo -e "${LIGHT_GRAY}• IP模式: IPv4、IPv6或混合模式${NC}"
     echo
     
     echo -e "${LIGHT_BLUE}使用流程:${NC}"
     echo -e "${LIGHT_GRAY}1. 配置IP模式和网络接口${NC}"
-    echo -e "${LIGHT_GRAY}2. 初始化nftables配置${NC}"
-    echo -e "${LIGHT_GRAY}3. 添加转发规则${NC}"
+    echo -e "${LIGHT_GRAY}2. 初始化nftables配置（包含masquerade规则）${NC}"
+    echo -e "${LIGHT_GRAY}3. 添加转发规则（DNAT规则）${NC}"
     echo -e "${LIGHT_GRAY}4. 测试规则是否生效${NC}"
     echo
     
