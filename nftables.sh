@@ -1,28 +1,32 @@
 #!/bin/bash
 
 # ==========================================
-# NFTables 转发管理脚本 v2.0
+# NFTables 转发管理脚本 Enhanced v2.0
 # 适用于 Debian/Ubuntu 系统
-# 功能：IPv4/IPv6支持、端口转发管理
+# 功能：IPv4/IPv6支持、双栈协议转发、自动SNAT配置
 # ==========================================
 
-# 三色方案 - 60-30-10 原则
+# 颜色定义 - 60 30 10 原则
 # 60% 主色调 - 蓝色系
-PRIMARY='\033[38;5;33m'           # 主蓝色
-PRIMARY_BOLD='\033[1;38;5;33m'    # 主蓝色加粗
+PRIMARY_BLUE='\033[38;5;32m'      # 深蓝色
+LIGHT_BLUE='\033[38;5;39m'        # 浅蓝色
+ACCENT_BLUE='\033[38;5;33m'       # 强调蓝色
 
-# 30% 辅助色 - 灰色系  
-SECONDARY='\033[38;5;243m'        # 中灰色
-SECONDARY_LIGHT='\033[38;5;250m'  # 浅灰色
+# 30% 次色调 - 灰色系
+SECONDARY_GRAY='\033[38;5;242m'   # 中灰色
+LIGHT_GRAY='\033[38;5;248m'       # 浅灰色
+DARK_GRAY='\033[38;5;236m'        # 深灰色
 
 # 10% 强调色 - 状态色
-ACCENT_SUCCESS='\033[38;5;34m'    # 成功绿色
-ACCENT_ERROR='\033[38;5;196m'     # 错误红色
-ACCENT_WARNING='\033[38;5;220m'   # 警告黄色
+SUCCESS_GREEN='\033[38;5;34m'     # 成功绿色
+ERROR_RED='\033[38;5;196m'        # 错误红色
+WARNING_YELLOW='\033[38;5;220m'   # 警告黄色
 
 # 重置和特殊效果
 NC='\033[0m'                      # 重置颜色
 BOLD='\033[1m'                    # 粗体
+DIM='\033[2m'                     # 暗色
+UNDERLINE='\033[4m'               # 下划线
 
 # 配置文件路径
 NFTABLES_CONF="/etc/nftables.conf"
@@ -31,19 +35,37 @@ CONFIG_FILE="/etc/nftables_forward_config.conf"
 SCRIPT_VERSION="2.0.0"
 
 # 默认配置
+DEFAULT_IP_MODE="mix"  # ipv4, ipv6, mix
 DEFAULT_INTERFACE_WAN="eth0"
 DEFAULT_INTERFACE_LAN="eth1"
+
+# 全局变量初始化
+IP_MODE="$DEFAULT_IP_MODE"
+WAN_INTERFACE="$DEFAULT_INTERFACE_WAN"
+LAN_INTERFACE="$DEFAULT_INTERFACE_LAN"
+AUTO_SAVE="true"
+LOG_LEVEL="info"
+
+# API配置
+IPAPI_URL="https://ipapi.co/json"
+
+# IP信息缓存
+CACHED_IPV4=""
+CACHED_IPV6=""
+CACHED_IPV4_INFO=""
+CACHED_IPV6_INFO=""
 
 # 载入配置文件
 load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
+        # 确保变量不为空，使用默认值
+        [[ -z "$IP_MODE" ]] && IP_MODE="$DEFAULT_IP_MODE"
+        [[ -z "$WAN_INTERFACE" ]] && WAN_INTERFACE="$DEFAULT_INTERFACE_WAN"
+        [[ -z "$LAN_INTERFACE" ]] && LAN_INTERFACE="$DEFAULT_INTERFACE_LAN"
+        [[ -z "$AUTO_SAVE" ]] && AUTO_SAVE="true"
+        [[ -z "$LOG_LEVEL" ]] && LOG_LEVEL="info"
     else
-        # 如果配置文件不存在，创建它并设置默认值
-        WAN_INTERFACE="$DEFAULT_INTERFACE_WAN"
-        LAN_INTERFACE="$DEFAULT_INTERFACE_LAN"
-        AUTO_SAVE="true"
-        LOG_LEVEL="info"
         create_default_config
     fi
 }
@@ -52,17 +74,7 @@ load_config() {
 create_default_config() {
     cat > "$CONFIG_FILE" << EOF
 # NFTables转发脚本配置文件
-WAN_INTERFACE="$DEFAULT_INTERFACE_WAN"
-LAN_INTERFACE="$DEFAULT_INTERFACE_LAN"
-AUTO_SAVE="true"
-LOG_LEVEL="info"
-EOF
-}
-
-# 保存配置
-save_config() {
-    cat > "$CONFIG_FILE" << EOF
-# NFTables转发脚本配置文件
+IP_MODE="$IP_MODE"
 WAN_INTERFACE="$WAN_INTERFACE"
 LAN_INTERFACE="$LAN_INTERFACE"
 AUTO_SAVE="$AUTO_SAVE"
@@ -70,76 +82,119 @@ LOG_LEVEL="$LOG_LEVEL"
 EOF
 }
 
-# 日志函数
-print_header() {
-    clear
-    echo -e "${PRIMARY_BOLD}NFTables 转发管理系统 v${SCRIPT_VERSION}${NC}"
-    echo -e "${SECONDARY}双栈协议转发 | 自动SNAT配置${NC}"
-    echo
+# 保存配置
+save_config() {
+    cat > "$CONFIG_FILE" << EOF
+# NFTables转发脚本配置文件
+IP_MODE="$IP_MODE"
+WAN_INTERFACE="$WAN_INTERFACE"
+LAN_INTERFACE="$LAN_INTERFACE"
+AUTO_SAVE="$AUTO_SAVE"
+LOG_LEVEL="$LOG_LEVEL"
+EOF
+}
 
-    # 获取IPv4信息
-    local ipv4_info="IPv4: 未检测到"
-    local public_ipv4=$(curl -s -4 https://ipapi.co/ip 2>/dev/null)
-    if [[ -n "$public_ipv4" ]]; then
-        local ipv4_data=$(curl -s -4 "https://ipapi.co/${public_ipv4}/json" 2>/dev/null)
-        if [[ -n "$ipv4_data" ]] && echo "$ipv4_data" | jq -e . >/dev/null 2>&1; then
-            local country=$(echo "$ipv4_data" | jq -r '.country_name // "N/A"')
-            local city=$(echo "$ipv4_data" | jq -r '.city // "N/A"')
-            ipv4_info="IPv4: ${public_ipv4} (${country}/${city})"
-        else
-            ipv4_info="IPv4: ${public_ipv4}"
+# 获取本机IP信息
+get_local_ip_info() {
+    # 获取IPv4
+    if [[ -z "$CACHED_IPV4" ]]; then
+        CACHED_IPV4=$(timeout 5 curl -s -4 ifconfig.me 2>/dev/null || timeout 5 curl -s -4 ipinfo.io/ip 2>/dev/null || echo "")
+        if [[ -n "$CACHED_IPV4" ]]; then
+            local ipv4_data=$(timeout 5 curl -s "${IPAPI_URL}?ip=${CACHED_IPV4}" 2>/dev/null)
+            if [[ -n "$ipv4_data" ]] && echo "$ipv4_data" | jq -e . >/dev/null 2>&1; then
+                local country=$(echo "$ipv4_data" | jq -r '.country_name // .country // "未知"' 2>/dev/null)
+                local city=$(echo "$ipv4_data" | jq -r '.city // "未知"' 2>/dev/null)
+                local org=$(echo "$ipv4_data" | jq -r '.org // .organization // "未知"' 2>/dev/null)
+                CACHED_IPV4_INFO="$country/$city"
+            else
+                CACHED_IPV4_INFO="位置未知"
+            fi
         fi
     fi
-    echo -e "${SECONDARY}${ipv4_info}${NC}"
-
-    # 获取IPv6信息
-    local ipv6_info="IPv6: 未检测到"
-    local public_ipv6=$(curl -s -6 https://ipapi.co/ip 2>/dev/null)
-    if [[ -n "$public_ipv6" ]]; then
-        local ipv6_data=$(curl -s -6 "https://ipapi.co/${public_ipv6}/json" 2>/dev/null)
-        if [[ -n "$ipv6_data" ]] && echo "$ipv6_data" | jq -e . >/dev/null 2>&1; then
-            local country=$(echo "$ipv6_data" | jq -r '.country_name // "N/A"')
-            local city=$(echo "$ipv6_data" | jq -r '.city // "N/A"')
-            ipv6_info="IPv6: ${public_ipv6} (${country}/${city})"
-        else
-            ipv6_info="IPv6: ${public_ipv6}"
-        fi 
-    fi
-    echo -e "${SECONDARY}${ipv6_info}${NC}"
     
-    echo -e "${SECONDARY}系统: $(lsb_release -si 2>/dev/null || echo 'Linux') | 时间: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
+    # 获取IPv6
+    if [[ -z "$CACHED_IPV6" ]]; then
+        CACHED_IPV6=$(timeout 5 curl -s -6 ifconfig.me 2>/dev/null || timeout 5 curl -s -6 ipinfo.io/ip 2>/dev/null || echo "")
+        if [[ -n "$CACHED_IPV6" ]]; then
+            local ipv6_data=$(timeout 5 curl -s "${IPAPI_URL}?ip=${CACHED_IPV6}" 2>/dev/null)
+            if [[ -n "$ipv6_data" ]] && echo "$ipv6_data" | jq -e . >/dev/null 2>&1; then
+                local country=$(echo "$ipv6_data" | jq -r '.country_name // .country // "未知"' 2>/dev/null)
+                local city=$(echo "$ipv6_data" | jq -r '.city // "未知"' 2>/dev/null)
+                local org=$(echo "$ipv6_data" | jq -r '.org // .organization // "未知"' 2>/dev/null)
+                CACHED_IPV6_INFO="$country/$city"
+            else
+                CACHED_IPV6_INFO="位置未知"
+            fi
+        fi
+    fi
+}
+
+# 美化日志函数
+print_header() {
+    clear
+    
+    # 获取IP信息
+    get_local_ip_info
+    
+    echo -e "${PRIMARY_BLUE}${BOLD}"
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║              🚀 NFTables 转发管理系统 v${SCRIPT_VERSION}              ║"
+    echo "║                   双栈协议转发 | 自动SNAT配置                  ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    # 显示IP信息
+    local ipv4_display="${CACHED_IPV4:-未检测到}"
+    local ipv6_display="${CACHED_IPV6:-未检测到}"
+    local ipv4_info_display="${CACHED_IPV4_INFO:-}"
+    local ipv6_info_display="${CACHED_IPV6_INFO:-}"
+    
+    if [[ "$CACHED_IPV4" != "" ]]; then
+        echo -e "${LIGHT_BLUE}IPv4: ${BOLD}$ipv4_display${NC} ${LIGHT_GRAY}($ipv4_info_display)${NC}"
+    else
+        echo -e "${LIGHT_GRAY}IPv4: 未检测到${NC}"
+    fi
+    
+    if [[ "$CACHED_IPV6" != "" ]]; then
+        echo -e "${LIGHT_BLUE}IPv6: ${BOLD}$ipv6_display${NC} ${LIGHT_GRAY}($ipv6_info_display)${NC}"
+    else
+        echo -e "${LIGHT_GRAY}IPv6: 未检测到${NC}"
+    fi
+    
+    echo -e "${LIGHT_GRAY}${DIM}系统: $(lsb_release -si 2>/dev/null || echo 'Linux') | 时间: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
     echo
 }
 
 print_section() {
-    echo -e "${PRIMARY}> $1${NC}"
-    [[ -n "$2" ]] && echo -e "${SECONDARY}$2${NC}"
+    echo -e "${ACCENT_BLUE}${BOLD}▶ $1${NC}"
+    echo -e "${SECONDARY_GRAY}$([[ -n "$2" ]] && echo "$2")${NC}"
 }
 
 print_success() {
-    echo -e "${ACCENT_SUCCESS}[OK] $1${NC}"
+    echo -e "${SUCCESS_GREEN}✅ $1${NC}"
 }
 
 print_error() {
-    echo -e "${ACCENT_ERROR}[错误] $1${NC}"
+    echo -e "${ERROR_RED}❌ $1${NC}"
 }
 
 print_warning() {
-    echo -e "${ACCENT_WARNING}[警告] $1${NC}"
+    echo -e "${WARNING_YELLOW}⚠️  $1${NC}"
 }
 
 print_info() {
-    echo -e "${PRIMARY}[信息] $1${NC}"
+    echo -e "${LIGHT_BLUE}ℹ️  $1${NC}"
 }
 
 print_debug() {
-    [[ "$LOG_LEVEL" == "debug" ]] && echo -e "${SECONDARY}[调试] $1${NC}"
+    [[ "$LOG_LEVEL" == "debug" ]] && echo -e "${DARK_GRAY}🔍 DEBUG: $1${NC}"
 }
 
 # 绘制分隔线
 draw_line() {
     local length=${1:-60}
-    echo -e "${SECONDARY}$(printf "%*s" $length | tr ' ' "-")${NC}"
+    local char=${2:-"─"}
+    echo -e "${SECONDARY_GRAY}$(printf "%*s" $length | tr ' ' "$char")${NC}"
 }
 
 # 绘制菜单项
@@ -149,58 +204,16 @@ draw_menu_item() {
     local desc="$3"
     local status="$4"
     
-    printf "${PRIMARY}%2s${NC} ${BOLD}%-20s${NC} ${SECONDARY}%-30s${NC}" "$number" "$title" "$desc"
-    [[ -n "$status" ]] && printf " ${ACCENT_SUCCESS}[%s]${NC}" "$status"
+    printf "${PRIMARY_BLUE}%2s${NC} ${BOLD}%-25s${NC} ${LIGHT_GRAY}%-30s${NC}" "$number" "$title" "$desc"
+    [[ -n "$status" ]] && printf " ${SUCCESS_GREEN}[$status]${NC}"
     echo
 }
 
 # 等待用户输入
 wait_enter() {
     echo
-    echo -e "${SECONDARY_LIGHT}按 Enter 键继续...${NC}"
+    echo -e "${SECONDARY_GRAY}${DIM}按 Enter 键继续...${NC}"
     read -r
-}
-
-# IP地址格式验证
-validate_ip_format() {
-    local ip="$1"
-    
-    # IPv4格式验证
-    if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-        local IFS='.'
-        local -a octets=($ip)
-        for octet in "${octets[@]}"; do
-            if ! [[ "$octet" -ge 0 && "$octet" -le 255 ]]; then
-                return 1
-            fi
-        done
-        return 0
-    fi
-    
-    # IPv6格式验证（更完善的检查）
-    if [[ "$ip" =~ : ]]; then
-        # 移除可能的CIDR后缀
-        local clean_ip=$(echo "$ip" | sed 's|/.*$||') 
-        # 使用工具进行验证，例如 Python (如果可用)
-        # if python -c "import ipaddress; ipaddress.ip_address('$clean_ip')" > /dev/null 2>&1; then
-        #    return 0
-        # fi
-        # 简单检查：允许字母、数字、冒号，且冒号不能连续超过2个 (::)
-        if [[ "$clean_ip" =~ ^[0-9a-fA-F:]+$ && ! "$clean_ip" =~ ::: ]]; then
-            # 进一步检查双冒号的合法性
-            if [[ $(echo "$clean_ip" | grep -o "::" | wc -l) -le 1 ]]; then
-                return 0
-            fi
-        fi
-    fi
-    
-    return 1
-}
-
-# 生成随机端口
-generate_random_port() {
-    # 生成1024-65535范围内的随机端口
-    echo $((1024 + RANDOM % (65535 - 1024 + 1)))
 }
 
 # 检查系统权限和兼容性
@@ -215,77 +228,69 @@ check_system() {
         exit 1
     fi
     
-    print_success "系统检查通过: $(lsb_release -ds 2>/dev/null || cat /etc/debian_version)"
+    print_success "系统检查通过 - $(lsb_release -ds 2>/dev/null || cat /etc/debian_version)"
 }
 
 # 检查和安装nftables
 install_nftables() {
-    print_section "检查 NFTables 安装状态"
+    print_section "检查 nftables 安装状态"
     
     if ! command -v nft &> /dev/null; then
-        print_warning "NFTables 未安装，正在安装..."
+        print_warning "nftables 未安装，正在安装..."
         
         apt update -qq
         if apt install -y nftables > /dev/null 2>&1; then
-            print_success "NFTables 安装成功"
+            print_success "nftables 安装成功"
         else
-            print_error "NFTables 安装失败"
+            print_error "nftables 安装失败"
             exit 1
         fi
     else
         local version=$(nft --version | head -n1)
-        print_success "NFTables 已安装: $version"
+        print_success "nftables 已安装 - $version"
+    fi
+    
+    # 安装jq用于JSON解析
+    if ! command -v jq &> /dev/null; then
+        print_info "安装JSON解析工具..."
+        apt install -y jq > /dev/null 2>&1
     fi
     
     # 启用服务
-    if ! systemctl is-enabled nftables.service > /dev/null 2>&1; then
-        systemctl enable nftables.service > /dev/null 2>&1
-        print_info "NFTables 服务已设置为开机启动"
+    systemctl enable nftables.service > /dev/null 2>&1
+    systemctl start nftables.service > /dev/null 2>&1
+    print_success "nftables 服务已启用"
+}
+
+# 自动检测网络接口
+auto_detect_interfaces() {
+    # 自动检测WAN接口（有默认路由的接口）
+    local auto_wan=$(ip route | grep default | head -n1 | awk '{print $5}' 2>/dev/null)
+    if [[ -n "$auto_wan" && "$auto_wan" != "lo" ]]; then
+        WAN_INTERFACE="$auto_wan"
+        print_debug "自动检测到WAN接口: $WAN_INTERFACE"
+    else
+        print_debug "无法自动检测WAN接口，使用默认值: $WAN_INTERFACE"
     fi
-    if ! systemctl is-active nftables.service > /dev/null 2>&1; then
-        systemctl start nftables.service > /dev/null 2>&1
-        print_info "NFTables 服务已启动"
-    fi
-    print_success "NFTables 服务已启用并运行"
     
-    # 启用IP转发
-    local sysctl_conf="/etc/sysctl.d/99-ip-forward.conf"
-    if ! grep -q "net.ipv4.ip_forward=1" "$sysctl_conf" 2>/dev/null; then
-        echo 'net.ipv4.ip_forward=1' > "$sysctl_conf"
-        print_info "IPv4转发已配置"
+    # 如果LAN接口不存在，设置为和WAN相同
+    if ! ip link show "$LAN_INTERFACE" &>/dev/null; then
+        LAN_INTERFACE="$WAN_INTERFACE"
+        print_debug "LAN接口设置为: $LAN_INTERFACE"
     fi
-    if ! grep -q "net.ipv6.conf.all.forwarding=1" "$sysctl_conf" 2>/dev/null; then
-        echo 'net.ipv6.conf.all.forwarding=1' >> "$sysctl_conf"
-        print_info "IPv6转发已配置"
-    fi
-    sysctl -p "$sysctl_conf" > /dev/null 2>&1
-    print_success "IP转发已启用 (IPv4 和 IPv6)"
 }
 
 # 初始化nftables配置
 init_nftables() {
-    print_section "初始化 nftables 配置" "双栈IPv4/IPv6支持"
-
-    # 检查接口配置是否为空
-    if [[ -z "$WAN_INTERFACE" ]]; then
-        print_warning "WAN 接口未配置，正在尝试自动检测..."
-        # 尝试自动检测主网络接口
-        local detected_wan=$(ip route | grep '^default' | awk '{print $5}' | head -1)
-        if [[ -n "$detected_wan" ]]; then
-            WAN_INTERFACE="$detected_wan"
-            print_success "自动检测到 WAN 接口为: $WAN_INTERFACE"
-            save_config
-        else
-            print_error "无法自动检测 WAN 接口。"
-            echo -ne "${PRIMARY}请输入您的 WAN (外网) 接口名称 (例如 eth0): ${NC}"
-            read -r wan_if_input
-            if [[ -z "$wan_if_input" ]]; then
-                print_error "WAN 接口不能为空。初始化失败。"
-                return 1
-            fi
-            WAN_INTERFACE="$wan_if_input"
-            save_config
-        fi
+    print_section "初始化 nftables 配置" "IP模式: $IP_MODE"
+    
+    # 自动检测网络接口
+    auto_detect_interfaces
+    
+    # 验证接口存在
+    if ! ip link show "$WAN_INTERFACE" &>/dev/null; then
+        print_warning "WAN接口 $WAN_INTERFACE 不存在，使用第一个可用接口"
+        WAN_INTERFACE=$(ip link show | grep -E "^[0-9]+:" | grep -v lo | head -n1 | sed 's/.*: \([^:]*\):.*/\1/')
     fi
     
     # 创建配置文件
@@ -294,18 +299,24 @@ init_nftables() {
 
 flush ruleset
 
-# 定义变量
-define WAN_IF = "$WAN_INTERFACE"
-define LAN_IF = "$LAN_INTERFACE"
-
 EOF
 
-    # 创建双栈表结构（IPv4 + IPv6）
-    create_mixed_tables
+    # 根据IP模式创建不同的表结构
+    case "$IP_MODE" in
+        "ipv4")
+            create_ipv4_tables
+            ;;
+        "ipv6")
+            create_ipv6_tables
+            ;;
+        "mix")
+            create_mixed_tables
+            ;;
+    esac
     
     # 加载配置
     if nft -f "${NFTABLES_CONF}"; then
-        print_success "nftables 双栈配置初始化成功"
+        print_success "nftables 配置初始化成功 (模式: $IP_MODE)"
     else
         print_error "nftables 配置初始化失败"
         return 1
@@ -314,6 +325,9 @@ EOF
     # 创建规则记录文件
     touch "${FORWARD_RULES_FILE}"
     print_success "转发规则记录文件已创建"
+    
+    # 保存配置
+    save_config
 }
 
 create_ipv4_tables() {
@@ -343,7 +357,6 @@ table ip nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-        oifname $WAN_IF masquerade
     }
 }
 EOF
@@ -376,7 +389,6 @@ table ip6 nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-        oifname $WAN_IF masquerade
     }
 }
 EOF
@@ -384,7 +396,7 @@ EOF
 
 create_mixed_tables() {
     cat >> "${NFTABLES_CONF}" << 'EOF'
-# 混合IPv4/IPv6表结构 - 使用inet filter + 双NAT表
+# 混合IPv4/IPv6表结构
 table inet filter {
     chain input {
         type filter hook input priority 0; policy accept;
@@ -402,7 +414,6 @@ table inet filter {
     }
 }
 
-# IPv4 NAT表
 table ip nat {
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
@@ -410,11 +421,9 @@ table ip nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-        oifname $WAN_IF masquerade
     }
 }
 
-# IPv6 NAT表  
 table ip6 nat {
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
@@ -422,7 +431,6 @@ table ip6 nat {
     
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-        oifname $WAN_IF masquerade
     }
 }
 EOF
@@ -432,19 +440,19 @@ EOF
 show_main_menu() {
     print_header
     
-    echo -e "${PRIMARY_BOLD}主菜单${NC}"
+    echo -e "${PRIMARY_BLUE}${BOLD}主菜单${NC}"
     draw_line 60
     
     draw_menu_item "1" "转发规则管理" "添加、删除、查看转发规则"
-    draw_menu_item "2" "系统配置" "网络接口配置等"
+    draw_menu_item "2" "系统配置" "IP模式、接口配置等"
     draw_menu_item "3" "系统状态" "查看服务状态和统计"
     draw_menu_item "4" "批量管理" "导入导出规则配置"
-    draw_menu_item "5" "系统管理" "初始化、保存、重载配置"
-    draw_menu_item "6" "端口测试" "测试转发规则连通性"
+    draw_menu_item "5" "高级功能" "高级转发、测试等"
+    draw_menu_item "6" "帮助文档" "使用说明和示例"
     draw_menu_item "0" "退出程序" "安全退出脚本"
     
     draw_line 60
-    echo -ne "${PRIMARY}请选择功能 [0-6]: ${NC}"
+    echo -ne "${ACCENT_BLUE}请选择功能 [0-6]: ${NC}"
     
     read -r choice
     handle_main_menu "$choice"
@@ -457,7 +465,7 @@ handle_main_menu() {
         3) show_status_menu ;;
         4) show_batch_menu ;;
         5) show_advanced_menu ;;
-        6) show_test_menu ;;
+        6) show_help_menu ;;
         0) exit_program ;;
         *) 
             print_error "无效选择，请重新输入"
@@ -479,7 +487,7 @@ show_forward_menu() {
     draw_menu_item "9" "返回主菜单" ""
     
     draw_line 40
-    echo -ne "${PRIMARY}请选择操作 [1-4,9]: ${NC}"
+    echo -ne "${ACCENT_BLUE}请选择操作 [1-4,9]: ${NC}"
     
     read -r choice
     case "$choice" in
@@ -501,19 +509,19 @@ add_forward_rule_interactive() {
     print_header
     print_section "添加转发规则"
     
-    echo -e "${PRIMARY}NAT转发原理说明:${NC}"
-    echo -e "${SECONDARY_LIGHT}1. 外部客户端连接到本地服务器的指定端口${NC}"
-    echo -e "${SECONDARY_LIGHT}2. NFTables将流量转发到目标服务器的指定端口${NC}"
-    echo -e "${SECONDARY_LIGHT}3. 支持TCP/UDP协议区分和IPv4/IPv6双栈${NC}"
-    echo -e "${SECONDARY_LIGHT}4. 自动匹配监听协议与目标IP版本确保兼容性${NC}"
+    echo -e "${LIGHT_BLUE}NAT转发原理说明:${NC}"
+    echo -e "${LIGHT_GRAY}1. 外部客户端连接到本地服务器的指定端口${NC}"
+    echo -e "${LIGHT_GRAY}2. NFTables将流量转发到目标服务器的指定端口${NC}"
+    echo -e "${LIGHT_GRAY}3. 支持TCP/UDP协议区分和IPv4/IPv6双栈${NC}"
+    echo -e "${LIGHT_GRAY}4. 自动匹配监听协议与目标IP版本确保兼容性${NC}"
     echo
     
     # 协议选择
-    echo -e "${PRIMARY}选择协议类型:${NC}"
-    echo -e "${PRIMARY}1${NC} TCP"
-    echo -e "${PRIMARY}2${NC} UDP"
-    echo -e "${PRIMARY}3${NC} TCP + UDP (推荐)"
-    echo -ne "${PRIMARY}请选择 [1-3] (默认: 3): ${NC}"
+    echo -e "${LIGHT_BLUE}选择协议类型:${NC}"
+    echo -e "${LIGHT_BLUE}1${NC} TCP"
+    echo -e "${LIGHT_BLUE}2${NC} UDP"
+    echo -e "${LIGHT_BLUE}3${NC} TCP + UDP (推荐)"
+    echo -ne "${ACCENT_BLUE}请选择 [1-3] (默认: 3): ${NC}"
     read -r proto_choice
     [[ -z "$proto_choice" ]] && proto_choice="3"
     
@@ -531,129 +539,104 @@ add_forward_rule_interactive() {
     esac
     
     # 外部端口
-    echo -e "${PRIMARY}外部端口设置:${NC}"
-    echo -e "${SECONDARY_LIGHT}直接输入端口号或回车使用随机端口${NC}"
-    echo -ne "${PRIMARY}端口号 (1-65535，回车=随机): ${NC}"
+    echo -e "${LIGHT_BLUE}外部端口设置:${NC}"
+    echo -e "${LIGHT_GRAY}直接输入端口号或回车使用随机端口${NC}"
+    echo -ne "${ACCENT_BLUE}端口号 (1-65535，回车=随机): ${NC}"
     read -r external_port
     
     if [[ -z "$external_port" ]]; then
-        # 回车使用随机端口
-        external_port=$(generate_random_port)
-        echo -e "${PRIMARY}已生成随机端口: ${ACCENT_SUCCESS}$external_port${NC}"
-    elif [[ "$external_port" =~ ^[0-9]+$ ]] && [[ "$external_port" -ge 1 && "$external_port" -le 65535 ]]; then
-        echo -e "${PRIMARY}使用指定端口: ${ACCENT_SUCCESS}$external_port${NC}"
-    else
+        external_port=$((RANDOM % 30000 + 10000))
+        print_success "已生成随机端口: $external_port"
+    elif ! [[ "$external_port" =~ ^[0-9]+$ ]] || [[ "$external_port" -lt 1 || "$external_port" -gt 65535 ]]; then
         print_error "端口号无效"
         wait_enter
         show_forward_menu
         return
     fi
     
-    # 目标服务器IP
-    echo -ne "${PRIMARY}目标服务器IP地址: ${NC}"
+    # 内网IP
+    echo -ne "${ACCENT_BLUE}目标服务器IP地址: ${NC}"
     read -r internal_ip
     
-    # 验证IP地址格式
-    if ! validate_ip_format "$internal_ip"; then
-        print_error "IP地址格式无效"
+    if [[ -z "$internal_ip" ]]; then
+        print_error "目标IP地址不能为空"
         wait_enter
         show_forward_menu
         return
     fi
     
-    # 自动检测目标IP版本并设置相同的监听协议
-    local target_ip_type="ipv4"
-    local listen_protocol="ipv4"
-    if [[ "$internal_ip" =~ : ]]; then
+    # 检测目标IP类型
+    local target_ip_type="unknown"
+    if [[ "$internal_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        target_ip_type="ipv4"
+        print_success "检测到目标服务器: ipv4"
+    elif [[ "$internal_ip" =~ ^[0-9a-fA-F:]+$ ]]; then
         target_ip_type="ipv6"
-        listen_protocol="ipv6"
+        print_success "检测到目标服务器: ipv6"
+    else
+        print_error "无效的IP地址格式"
+        wait_enter
+        show_forward_menu
+        return
     fi
     
-    echo -e "${PRIMARY}检测到目标服务器: ${ACCENT_SUCCESS}$target_ip_type${NC}"
-    echo -e "${PRIMARY}自动设置监听协议: ${ACCENT_SUCCESS}$listen_protocol${NC}"
-    echo -e "${SECONDARY_LIGHT}使用相同协议确保最佳兼容性${NC}"
+    print_info "自动设置监听协议: $target_ip_type"
+    print_info "使用相同协议确保最佳兼容性"
     
-    # 目标服务器端口
-    echo -ne "${PRIMARY}目标服务器端口 (默认: $external_port): ${NC}"
+    # 内网端口
+    echo -ne "${ACCENT_BLUE}目标服务器端口 (默认: $external_port): ${NC}"
     read -r internal_port
     [[ -z "$internal_port" ]] && internal_port="$external_port"
     
     # 源IP限制
-    echo -e "${PRIMARY}源IP访问限制:${NC}"
-    echo -e "${PRIMARY}1${NC} 不限制源IP (推荐)"
-    echo -e "${PRIMARY}2${NC} 限制特定源IP"
-    echo -ne "${PRIMARY}请选择 [1-2] (默认: 1): ${NC}"
+    echo -e "${LIGHT_BLUE}源IP访问限制:${NC}"
+    echo -e "${LIGHT_BLUE}1${NC} 不限制源IP (推荐)"
+    echo -e "${LIGHT_BLUE}2${NC} 限制特定源IP"
+    echo -ne "${ACCENT_BLUE}请选择 [1-2] (默认: 1): ${NC}"
     read -r source_choice
     [[ -z "$source_choice" ]] && source_choice="1"
     
     local source_ip="any"
-    case "$source_choice" in
-        1)
-            source_ip="any"
-            ;;
-        2)
-            echo -ne "${PRIMARY}请输入允许的源IP地址: ${NC}"
-            read -r source_ip
-            if [[ -n "$source_ip" ]] && ! validate_ip_format "$source_ip"; then
-                print_error "源IP地址格式无效"
-                wait_enter
-                show_forward_menu
-                return
-            fi
-            [[ -z "$source_ip" ]] && source_ip="any"
-            ;;
-        *)
-            print_error "无效选择"
-            wait_enter
-            show_forward_menu
-            return
-            ;;
-    esac
+    if [[ "$source_choice" == "2" ]]; then
+        echo -ne "${ACCENT_BLUE}允许访问的源IP地址: ${NC}"
+        read -r source_ip
+        [[ -z "$source_ip" ]] && source_ip="any"
+    fi
     
     # 规则名称
-    echo -e "${PRIMARY}规则名称设置:${NC}"
-    echo -e "${PRIMARY}1${NC} 自动生成名称 (推荐)"
-    echo -e "${PRIMARY}2${NC} 自定义名称"
-    echo -ne "${PRIMARY}请选择 [1-2] (默认: 1): ${NC}"
+    echo -e "${LIGHT_BLUE}规则名称设置:${NC}"
+    echo -e "${LIGHT_BLUE}1${NC} 自动生成名称 (推荐)"
+    echo -e "${LIGHT_BLUE}2${NC} 自定义名称"
+    echo -ne "${ACCENT_BLUE}请选择 [1-2] (默认: 1): ${NC}"
     read -r name_choice
     [[ -z "$name_choice" ]] && name_choice="1"
     
     local rule_name=""
-    case "$name_choice" in
-        1)
-            rule_name="forward_${external_port}_$(date +%s)"
-            echo -e "${PRIMARY}已生成规则名称: ${ACCENT_SUCCESS}$rule_name${NC}"
-            ;;
-        2)
-            echo -ne "${PRIMARY}请输入规则名称: ${NC}"
-            read -r rule_name
-            [[ -z "$rule_name" ]] && rule_name="forward_${external_port}_$(date +%s)"
-            ;;
-        *)
-            print_error "无效选择"
-            wait_enter
-            show_forward_menu
-            return
-            ;;
-    esac
+    if [[ "$name_choice" == "2" ]]; then
+        echo -ne "${ACCENT_BLUE}自定义规则名称: ${NC}"
+        read -r rule_name
+    fi
+    [[ -z "$rule_name" ]] && rule_name="forward_${external_port}_$(date +%s)"
+    print_success "已生成规则名称: $rule_name"
     
     # 确认添加
     echo
     print_section "规则确认 - 转发路径说明"
-    echo -e "${SECONDARY_LIGHT}协议类型: $protocol${NC}"
-    echo -e "${SECONDARY_LIGHT}本地监听: $listen_protocol 端口 $external_port${NC}"
-    echo -e "${SECONDARY_LIGHT}转发目标: $internal_ip:$internal_port ($target_ip_type)${NC}"
-    echo -e "${SECONDARY_LIGHT}源IP限制: $source_ip${NC}"
-    echo -e "${SECONDARY_LIGHT}规则名称: $rule_name${NC}"
+    echo -e "${LIGHT_GRAY}协议类型: $protocol${NC}"
+    echo -e "${LIGHT_GRAY}本地监听: $target_ip_type 端口 $external_port${NC}"
+    echo -e "${LIGHT_GRAY}转发目标: $internal_ip:$internal_port ($target_ip_type)${NC}"
+    echo -e "${LIGHT_GRAY}源IP限制: $source_ip${NC}"
+    echo -e "${LIGHT_GRAY}规则名称: $rule_name${NC}"
     echo
-    echo -e "${PRIMARY}转发路径: ${NC}${SECONDARY_LIGHT}外部客户端 → 本地$listen_protocol:$external_port → 目标$target_ip_type:$internal_ip:$internal_port${NC}"
-    echo -e "${ACCENT_SUCCESS}协议自动匹配，最佳兼容性${NC}"
+    echo -e "${SUCCESS_GREEN}转发路径: 外部客户端 → 本地$target_ip_type:$external_port → 目标$target_ip_type:$internal_ip:$internal_port${NC}"
+    echo -e "${SUCCESS_GREEN}协议自动匹配，最佳兼容性${NC}"
     echo
-    echo -ne "${PRIMARY}确认添加此规则? [Y/n] (回车=确认): ${NC}"
+    echo -ne "${WARNING_YELLOW}确认添加此规则? [Y/n] (回车=确认): ${NC}"
     read -r confirm
+    [[ -z "$confirm" ]] && confirm="y"
     
-    if [[ -z "$confirm" || "$confirm" =~ ^[Yy]$ ]]; then
-        if add_forward_rule_core "$protocol" "$external_port" "$internal_ip" "$internal_port" "$source_ip" "$rule_name" "$listen_protocol"; then
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        if add_forward_rule_core "$protocol" "$external_port" "$internal_ip" "$internal_port" "$source_ip" "$rule_name" "$target_ip_type"; then
             print_success "转发规则添加成功！"
         else
             print_error "转发规则添加失败！"
@@ -674,81 +657,61 @@ add_forward_rule_core() {
     local internal_port="$4"
     local external_ip="${5:-any}"
     local rule_name="${6:-rule_$(date +%s)}"
-    local listen_protocol="$7"
+    local target_ip_type="${7:-ipv4}"
     
-    if [[ -z "$listen_protocol" ]]; then
-        print_error "内部错误: add_forward_rule_core 未能获取 listen_protocol。"
-        return 1
-    fi
+    print_debug "添加规则: $protocol $external_port -> $internal_ip:$internal_port"
     
-    print_debug "添加规则: $protocol $external_port -> $internal_ip:$internal_port (监听: $listen_protocol, 名称: $rule_name)"
-    
-    # 检测目标IP类型
-    local target_ip_type="ipv4"
-    if [[ "$internal_ip" =~ : ]]; then
-        target_ip_type="ipv6"
-    fi
-    
-    # 根据监听协议选择NAT表
-    local table_family=""
-    if [[ "$listen_protocol" == "ipv4" ]]; then
-        table_family="ip"
-    else
-        table_family="ip6"
-    fi
-    
-    # 构建规则条件（根据监听协议）
-    local src_condition=""
-    if [[ "$external_ip" != "any" ]]; then
-        # 验证源IP与监听协议匹配（现在监听协议总是与目标IP匹配）
-        local source_ip_type="ipv4"
-        if [[ "$external_ip" =~ : ]]; then
-            source_ip_type="ipv6"
-        fi
-        
-        if [[ "$source_ip_type" != "$listen_protocol" ]]; then
-            print_error "源IP协议版本必须与目标IP协议版本相同 ($listen_protocol)"
+    # 检查nftables表是否存在，如果不存在则初始化
+    if ! nft list tables 2>/dev/null | grep -q "table"; then
+        print_warning "NFTables表不存在，正在初始化..."
+        if ! init_nftables; then
+            print_error "无法初始化NFTables配置"
             return 1
         fi
-        
-        if [[ "$listen_protocol" == "ipv4" ]]; then
+    fi
+    
+    # 根据目标IP类型选择表
+    local table_family=""
+    case "$target_ip_type" in
+        "ipv4") table_family="ip" ;;
+        "ipv6") table_family="ip6" ;;
+        *) table_family="ip" ;;
+    esac
+    
+    # 构建规则
+    local src_condition=""
+    if [[ "$external_ip" != "any" ]]; then
+        if [[ "$target_ip_type" == "ipv4" ]]; then
             src_condition="ip saddr $external_ip "
         else
             src_condition="ip6 saddr $external_ip "
         fi
     fi
     
-    # 检查表是否存在，如果不存在则先初始化
-    if ! nft list table $table_family nat &>/dev/null; then
-        print_warning "NFTables表不存在，正在初始化..."
-        init_nftables
-    fi
-    
     # 添加转发规则到nftables
     local success=true
-    local error_msg=""
     
     if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
         local tcp_rule="${src_condition}tcp dport $external_port dnat to $internal_ip:$internal_port comment \"$rule_name\""
-        error_msg=$(nft add rule $table_family nat prerouting $tcp_rule 2>&1)
-        if [[ $? -ne 0 ]]; then
-            print_error "TCP转发规则添加失败: $error_msg"
+        print_debug "执行命令: nft add rule $table_family nat prerouting $tcp_rule"
+        if ! nft add rule $table_family nat prerouting $tcp_rule 2>/dev/null; then
+            print_error "TCP转发规则添加失败: $(nft add rule $table_family nat prerouting $tcp_rule 2>&1)"
             success=false
         else
             print_success "TCP转发规则添加成功"
-            echo "tcp|$external_port|$internal_ip|$internal_port|$external_ip|$rule_name|$(date)|$listen_protocol" >> "${FORWARD_RULES_FILE}"
+            echo "tcp|$external_port|$internal_ip|$internal_port|$external_ip|$rule_name|$(date)" >> "${FORWARD_RULES_FILE}"
         fi
     fi
     
     if [[ "$protocol" == "udp" || "$protocol" == "both" ]]; then
         local udp_rule="${src_condition}udp dport $external_port dnat to $internal_ip:$internal_port comment \"$rule_name\""
-        error_msg=$(nft add rule $table_family nat prerouting $udp_rule 2>&1)
-        if [[ $? -ne 0 ]]; then
-            print_error "UDP转发规则添加失败: $error_msg"
+        print_debug "执行命令: nft add rule $table_family nat prerouting $udp_rule"
+        if ! nft add rule $table_family nat prerouting $udp_rule 2>/dev/null; then
+            print_error "UDP转发规则添加失败: $(nft add rule $table_family nat prerouting $udp_rule 2>&1)"
             success=false
         else
             print_success "UDP转发规则添加成功"
-            echo "udp|$external_port|$internal_ip|$internal_port|$external_ip|$rule_name|$(date)|$listen_protocol" >> "${FORWARD_RULES_FILE}"
+            echo "udp|$external_port|$internal_ip|$internal_port|$external_ip|$rule_name|$(date)" >> "${FORWARD_RULES_FILE}"
         fi
     fi
     
@@ -760,22 +723,24 @@ add_forward_rule_core() {
     [[ "$success" == "true" ]]
 }
 
-# 其他菜单函数继续...
+# 系统配置菜单
 show_config_menu() {
     print_header
     print_section "系统配置"
     
-    draw_menu_item "1" "网络接口配置" "WAN: $WAN_INTERFACE | LAN: $LAN_INTERFACE"
-    draw_menu_item "2" "其他设置" "自动保存等"
+    draw_menu_item "1" "IP协议模式" "当前: $IP_MODE"
+    draw_menu_item "2" "网络接口配置" "WAN: $WAN_INTERFACE | LAN: $LAN_INTERFACE"
+    draw_menu_item "3" "其他设置" "自动保存等"
     draw_menu_item "9" "返回主菜单" ""
     
     draw_line 40
-    echo -ne "${PRIMARY}请选择配置项 [1-2,9]: ${NC}"
+    echo -ne "${ACCENT_BLUE}请选择配置项 [1-3,9]: ${NC}"
     
     read -r choice
     case "$choice" in
-        1) config_interfaces ;;
-        2) config_other_settings ;;
+        1) config_ip_mode ;;
+        2) config_interfaces ;;
+        3) config_other_settings ;;
         9) show_main_menu ;;
         *) 
             print_error "无效选择"
@@ -785,36 +750,333 @@ show_config_menu() {
     esac
 }
 
-# IP模式配置功能已移除 - 系统自动检测IP版本
+config_ip_mode() {
+    print_header
+    print_section "IP协议模式配置"
+    
+    echo -e "${LIGHT_BLUE}当前模式: ${BOLD}$IP_MODE${NC}"
+    echo
+    echo -e "${LIGHT_BLUE}可选模式:${NC}"
+    echo -e "${LIGHT_BLUE}1${NC} IPv4 Only - 仅支持IPv4转发"
+    echo -e "${LIGHT_BLUE}2${NC} IPv6 Only - 仅支持IPv6转发"
+    echo -e "${LIGHT_BLUE}3${NC} Mixed Mode - 同时支持IPv4和IPv6"
+    echo
+    echo -ne "${ACCENT_BLUE}请选择新模式 [1-3]: ${NC}"
+    
+    read -r mode_choice
+    local new_mode=""
+    
+    case "$mode_choice" in
+        1) new_mode="ipv4" ;;
+        2) new_mode="ipv6" ;;
+        3) new_mode="mix" ;;
+        *) 
+            print_error "无效选择"
+            wait_enter
+            show_config_menu
+            return
+            ;;
+    esac
+    
+    if [[ "$new_mode" != "$IP_MODE" ]]; then
+        IP_MODE="$new_mode"
+        save_config
+        print_success "IP模式已更改为: $IP_MODE"
+        print_warning "请重新初始化nftables配置以应用更改"
+    else
+        print_info "模式未更改"
+    fi
+    
+    wait_enter
+    show_config_menu
+}
+
+# 初始化nftables交互式菜单
+init_nftables_interactive() {
+    print_header
+    print_section "初始化nftables配置"
+    
+    echo -e "${WARNING_YELLOW}此操作将重置所有nftables配置，包括现有规则！${NC}"
+    echo -ne "${ACCENT_BLUE}确认初始化? [y/N]: ${NC}"
+    read -r confirm
+    
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        if init_nftables; then
+            print_success "nftables配置初始化成功"
+        else
+            print_error "nftables配置初始化失败"
+        fi
+    else
+        print_info "操作已取消"
+    fi
+    
+    wait_enter
+    show_advanced_menu
+}
+
+# 保存规则交互式菜单
+save_rules_interactive() {
+    print_header
+    print_section "保存当前规则"
+    
+    echo -e "${LIGHT_BLUE}保存当前所有转发规则到配置文件${NC}"
+    echo -ne "${ACCENT_BLUE}确认保存? [Y/n]: ${NC}"
+    read -r confirm
+    [[ -z "$confirm" ]] && confirm="y"
+    
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        if save_rules_core; then
+            print_success "规则保存成功"
+        else
+            print_error "规则保存失败"
+        fi
+    else
+        print_info "操作已取消"
+    fi
+    
+    wait_enter
+    show_advanced_menu
+}
+
+# 删除转发规则交互式函数
+delete_forward_rule_interactive() {
+    print_header
+    print_section "删除转发规则"
+    
+    # 首先显示现有规则
+    if [[ ! -f "${FORWARD_RULES_FILE}" ]] || [[ ! -s "${FORWARD_RULES_FILE}" ]]; then
+        print_warning "暂无转发规则"
+        wait_enter
+        show_forward_menu
+        return
+    fi
+    
+    echo -e "${LIGHT_BLUE}当前转发规则:${NC}"
+    draw_line 60
+    
+    local counter=1
+    while IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name create_time; do
+        [[ -z "$protocol" ]] && continue
+        printf "${PRIMARY_BLUE}%2s${NC} ${BOLD}%-8s${NC} ${LIGHT_GRAY}%5s -> %15s:%-5s %20s${NC}\n" \
+            "$counter" "$protocol" "$external_port" "$internal_ip" "$internal_port" "$rule_name"
+        ((counter++))
+    done < "${FORWARD_RULES_FILE}"
+    
+    draw_line 60
+    echo -ne "${ACCENT_BLUE}请输入要删除的规则序号或规则名称: ${NC}"
+    read -r rule_identifier
+    
+    if [[ -z "$rule_identifier" ]]; then
+        print_error "输入不能为空"
+        wait_enter
+        show_forward_menu
+        return
+    fi
+    
+    # 确认删除
+    echo -ne "${WARNING_YELLOW}确认删除规则 '$rule_identifier'? [y/N]: ${NC}"
+    read -r confirm
+    
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        if delete_forward_rule_core "$rule_identifier"; then
+            print_success "转发规则删除成功！"
+        else
+            print_error "转发规则删除失败！"
+        fi
+    else
+        print_info "操作已取消"
+    fi
+    
+    wait_enter
+    show_forward_menu
+}
+
+# 核心删除规则函数
+delete_forward_rule_core() {
+    local rule_identifier="$1"
+    local deleted=false
+    
+    # 通过序号删除
+    if [[ "$rule_identifier" =~ ^[0-9]+$ ]]; then
+        local line_number=$(($rule_identifier))
+        local rule_info=$(sed -n "${line_number}p" "${FORWARD_RULES_FILE}")
+        
+        if [[ -n "$rule_info" ]]; then
+            local protocol=$(echo "$rule_info" | cut -d'|' -f1)
+            local external_port=$(echo "$rule_info" | cut -d'|' -f2)
+            
+            # 删除nftables规则
+            nft list ruleset -a | grep "dport $external_port" | grep "$protocol" | while read -r line; do
+                local handle=$(echo "$line" | grep -o 'handle [0-9]*' | awk '{print $2}')
+                if [[ -n "$handle" ]]; then
+                    local table_family="ip"
+                    [[ "$IP_MODE" == "ipv6" ]] && table_family="ip6"
+                    nft delete rule $table_family nat prerouting handle "$handle" 2>/dev/null
+                fi
+            done
+            
+            # 从记录文件中删除
+            sed -i "${line_number}d" "${FORWARD_RULES_FILE}"
+            deleted=true
+        fi
+    else
+        # 通过规则名称删除
+        if grep -q "|$rule_identifier|" "${FORWARD_RULES_FILE}" 2>/dev/null; then
+            local rule_info=$(grep "|$rule_identifier|" "${FORWARD_RULES_FILE}")
+            local protocol=$(echo "$rule_info" | cut -d'|' -f1)
+            local external_port=$(echo "$rule_info" | cut -d'|' -f2)
+            
+            # 删除nftables规则
+            nft list ruleset -a | grep "dport $external_port" | grep "$protocol" | while read -r line; do
+                local handle=$(echo "$line" | grep -o 'handle [0-9]*' | awk '{print $2}')
+                if [[ -n "$handle" ]]; then
+                    local table_family="ip"
+                    [[ "$IP_MODE" == "ipv6" ]] && table_family="ip6"
+                    nft delete rule $table_family nat prerouting handle "$handle" 2>/dev/null
+                fi
+            done
+            
+            # 从记录文件中删除
+            sed -i "/$rule_identifier/d" "${FORWARD_RULES_FILE}"
+            deleted=true
+        fi
+    fi
+    
+    # 自动保存
+    if [[ "$AUTO_SAVE" == "true" && "$deleted" == "true" ]]; then
+        save_rules_core
+    fi
+    
+    [[ "$deleted" == "true" ]]
+}
+
+# 列出转发规则交互式函数
+list_forward_rules_interactive() {
+    print_header
+    print_section "转发规则列表"
+    
+    if [[ ! -f "${FORWARD_RULES_FILE}" ]] || [[ ! -s "${FORWARD_RULES_FILE}" ]]; then
+        print_warning "暂无转发规则"
+        wait_enter
+        show_forward_menu
+        return
+    fi
+    
+    printf "${PRIMARY_BLUE}%-4s %-8s %-6s %-15s %-6s %-15s %-20s %-20s${NC}\n" \
+        "序号" "协议" "外端口" "内网IP" "内端口" "源IP限制" "规则名称" "创建时间"
+    draw_line 100
+    
+    local counter=1
+    while IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name create_time; do
+        [[ -z "$protocol" ]] && continue
+        
+        local src_display="any"
+        [[ "$external_ip" != "any" ]] && src_display="$external_ip"
+        
+        printf "${LIGHT_GRAY}%-4s %-8s %-6s %-15s %-6s %-15s %-20s %-20s${NC}\n" \
+            "$counter" "$protocol" "$external_port" "$internal_ip" "$internal_port" \
+            "$src_display" "$rule_name" "$create_time"
+        
+        ((counter++))
+    done < "${FORWARD_RULES_FILE}"
+    
+    echo
+    print_info "总计 $((counter-1)) 条转发规则"
+    
+    # 显示当前活动的nftables规则
+    echo
+    print_section "当前活动的NAT规则"
+    local table_family="ip"
+    [[ "$IP_MODE" == "ipv6" ]] && table_family="ip6"
+    nft list table $table_family nat 2>/dev/null || print_warning "无法获取NAT规则"
+    
+    wait_enter
+    show_forward_menu
+}
+
+# 清空所有规则交互式函数
+flush_all_rules_interactive() {
+    print_header
+    print_section "清空所有转发规则"
+    
+    if [[ ! -f "${FORWARD_RULES_FILE}" ]] || [[ ! -s "${FORWARD_RULES_FILE}" ]]; then
+        print_warning "暂无转发规则需要清空"
+        wait_enter
+        show_forward_menu
+        return
+    fi
+    
+    local rule_count=$(wc -l < "${FORWARD_RULES_FILE}")
+    print_warning "当前有 $rule_count 条转发规则"
+    echo
+    echo -ne "${ERROR_RED}${BOLD}确定要清空所有转发规则吗？此操作不可恢复！ [y/N]: ${NC}"
+    read -r confirm
+    
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        print_info "正在清空所有转发规则..."
+        
+        # 清空NAT表
+        local table_family="ip"
+        [[ "$IP_MODE" == "ipv6" ]] && table_family="ip6"
+        
+        nft flush table $table_family nat 2>/dev/null
+        [[ "$IP_MODE" == "mix" ]] && nft flush table ip6 nat 2>/dev/null
+        
+        # 重新创建链
+        nft add chain $table_family nat prerouting { type nat hook prerouting priority dstnat\; policy accept\; } 2>/dev/null
+        nft add chain $table_family nat postrouting { type nat hook postrouting priority srcnat\; policy accept\; } 2>/dev/null
+        
+        if [[ "$IP_MODE" == "mix" ]]; then
+            nft add chain ip6 nat prerouting { type nat hook prerouting priority dstnat\; policy accept\; } 2>/dev/null
+            nft add chain ip6 nat postrouting { type nat hook postrouting priority srcnat\; policy accept\; } 2>/dev/null
+        fi
+        
+        # 清空记录文件
+        > "${FORWARD_RULES_FILE}"
+        
+        # 自动保存
+        if [[ "$AUTO_SAVE" == "true" ]]; then
+            save_rules_core
+        fi
+        
+        print_success "所有转发规则已清空"
+    else
+        print_info "操作已取消"
+    fi
+    
+    wait_enter
+    show_forward_menu
+}
 
 # 配置网络接口
 config_interfaces() {
     print_header
     print_section "网络接口配置"
     
-    echo -e "${PRIMARY}当前配置:${NC}"
-    echo -e "${SECONDARY_LIGHT}WAN接口: $WAN_INTERFACE${NC}"
-    echo -e "${SECONDARY_LIGHT}LAN接口: $LAN_INTERFACE${NC}"
+    echo -e "${LIGHT_BLUE}当前配置:${NC}"
+    echo -e "${LIGHT_GRAY}WAN接口: $WAN_INTERFACE${NC}"
+    echo -e "${LIGHT_GRAY}LAN接口: $LAN_INTERFACE${NC}"
     echo
     
     # 显示可用接口
-    echo -e "${PRIMARY}可用网络接口:${NC}"
+    echo -e "${LIGHT_BLUE}可用网络接口:${NC}"
     ip link show | grep -E "^[0-9]+:" | while read -r line; do
         local interface=$(echo "$line" | sed 's/.*: \([^:]*\):.*/\1/')
-        echo -e "${SECONDARY_LIGHT}  - $interface${NC}"
+        echo -e "${LIGHT_GRAY}  - $interface${NC}"
     done
     echo
     
-    echo -ne "${PRIMARY}WAN接口 (外网接口，当前: $WAN_INTERFACE): ${NC}"
+    echo -ne "${ACCENT_BLUE}WAN接口 (外网接口，当前: $WAN_INTERFACE): ${NC}"
     read -r new_wan
     [[ -n "$new_wan" ]] && WAN_INTERFACE="$new_wan"
     
-    echo -ne "${PRIMARY}LAN接口 (内网接口，当前: $LAN_INTERFACE): ${NC}"
+    echo -ne "${ACCENT_BLUE}LAN接口 (内网接口，当前: $LAN_INTERFACE): ${NC}"
     read -r new_lan
     [[ -n "$new_lan" ]] && LAN_INTERFACE="$new_lan"
     
     save_config
     print_success "网络接口配置已更新"
+    print_warning "请重新初始化nftables配置以应用更改"
     
     wait_enter
     show_config_menu
@@ -825,16 +1087,16 @@ config_other_settings() {
     print_header
     print_section "其他设置"
     
-    echo -e "${PRIMARY}当前设置:${NC}"
-    echo -e "${SECONDARY_LIGHT}自动保存: $AUTO_SAVE${NC}"
-    echo -e "${SECONDARY_LIGHT}日志级别: $LOG_LEVEL${NC}"
+    echo -e "${LIGHT_BLUE}当前设置:${NC}"
+    echo -e "${LIGHT_GRAY}自动保存: $AUTO_SAVE${NC}"
+    echo -e "${LIGHT_GRAY}日志级别: $LOG_LEVEL${NC}"
     echo
     
     # 自动保存设置
-    echo -e "${PRIMARY}自动保存设置:${NC}"
-    echo -e "${PRIMARY}1${NC} 启用自动保存"
-    echo -e "${PRIMARY}2${NC} 禁用自动保存"
-    echo -ne "${PRIMARY}请选择 [1-2]: ${NC}"
+    echo -e "${LIGHT_BLUE}自动保存设置:${NC}"
+    echo -e "${LIGHT_BLUE}1${NC} 启用自动保存"
+    echo -e "${LIGHT_BLUE}2${NC} 禁用自动保存"
+    echo -ne "${ACCENT_BLUE}请选择 [1-2]: ${NC}"
     read -r auto_save_choice
     
     case "$auto_save_choice" in
@@ -844,10 +1106,10 @@ config_other_settings() {
     
     # 日志级别设置
     echo
-    echo -e "${PRIMARY}日志级别设置:${NC}"
-    echo -e "${PRIMARY}1${NC} info - 基本信息"
-    echo -e "${PRIMARY}2${NC} debug - 详细调试信息"
-    echo -ne "${PRIMARY}请选择 [1-2]: ${NC}"
+    echo -e "${LIGHT_BLUE}日志级别设置:${NC}"
+    echo -e "${LIGHT_BLUE}1${NC} info - 基本信息"
+    echo -e "${LIGHT_BLUE}2${NC} debug - 详细调试信息"
+    echo -ne "${ACCENT_BLUE}请选择 [1-2]: ${NC}"
     read -r log_level_choice
     
     case "$log_level_choice" in
@@ -862,88 +1124,105 @@ config_other_settings() {
     show_config_menu
 }
 
+# 重新加载规则交互式菜单
+reload_rules_interactive() {
+    print_header
+    print_section "重新加载规则"
+    
+    echo -e "${LIGHT_BLUE}从配置文件重新加载所有转发规则${NC}"
+    echo -ne "${ACCENT_BLUE}确认重新加载? [y/N]: ${NC}"
+    read -r confirm
+    
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        if nft -f "${NFTABLES_CONF}"; then
+            print_success "规则重新加载成功"
+        else
+            print_error "规则重新加载失败"
+        fi
+    else
+        print_info "操作已取消"
+    fi
+    
+    wait_enter
+    show_advanced_menu
+}
+
+# 高级端口转发交互式菜单
+add_advanced_forward_interactive() {
+    print_header
+    print_section "高级端口转发"
+    
+    echo -e "${LIGHT_BLUE}同端口不同协议转发设置${NC}"
+    echo -e "${LIGHT_GRAY}例如：同一端口的TCP和UDP分别转发到不同目标${NC}"
+    echo
+    
+    print_info "此功能需要手动配置，请使用基本转发规则管理"
+    
+    wait_enter
+    show_advanced_menu
+}
+
+# 测试转发规则交互式菜单
+test_forward_rule_interactive() {
+    print_header
+    print_section "测试转发规则"
+    
+    echo -ne "${ACCENT_BLUE}请输入要测试的端口: ${NC}"
+    read -r test_port
+    
+    if [[ -z "$test_port" ]] || ! [[ "$test_port" =~ ^[0-9]+$ ]]; then
+        print_error "端口号无效"
+        wait_enter
+        show_advanced_menu
+        return
+    fi
+    
+    echo -e "${LIGHT_BLUE}正在测试端口 $test_port 的连通性...${NC}"
+    
+    # 测试端口是否监听
+    if netstat -ln 2>/dev/null | grep -q ":$test_port "; then
+        print_success "端口 $test_port 正在监听"
+    else
+        print_warning "端口 $test_port 未监听"
+    fi
+    
+    # 显示相关的nftables规则
+    echo
+    print_section "相关转发规则"
+    nft list ruleset | grep "$test_port" || print_info "未找到相关规则"
+    
+    wait_enter
+    show_advanced_menu
+}
+
 # 系统状态菜单
 show_status_menu() {
     print_header
-    print_section "系统状态概览"
+    print_section "系统状态"
     
     # 服务状态
-    echo -e "${PRIMARY}${BOLD}NFTables 服务状态:${NC}"
-    local nft_service_status=$(systemctl is-active nftables.service 2>/dev/null)
-    local nft_service_enabled=$(systemctl is-enabled nftables.service 2>/dev/null)
-    
-    if [[ "$nft_service_status" == "active" ]]; then
-        echo -e "  ${ACCENT_SUCCESS}运行中 (active)" 
-    else
-        echo -e "  ${ACCENT_ERROR}未运行 ($nft_service_status)"
-    fi
-    echo -e "  开机启动: ${ACCENT_SUCCESS}${nft_service_enabled}${NC}"
+    echo -e "${PRIMARY_BLUE}${BOLD}服务状态:${NC}"
+    systemctl status nftables.service --no-pager -l
     echo
     
     # 规则统计
-    print_section "转发规则统计"
+    print_section "规则统计"
     local rule_count=$(wc -l < "${FORWARD_RULES_FILE}" 2>/dev/null || echo "0")
-    echo -e "  总转发规则数: ${ACCENT_SUCCESS}$rule_count${NC}"
-    echo -e "  WAN接口: ${SECONDARY_LIGHT}$WAN_INTERFACE${NC} | LAN接口: ${SECONDARY_LIGHT}$LAN_INTERFACE${NC}"
-    echo
-        
-    # NFTables实际规则状态
-    print_section "NFTables 规则集摘要"
-    echo -e "  ${SECONDARY_LIGHT}IPv4 NAT规则 (dnat):${NC}"
-    nft list table ip nat 2>/dev/null | grep -E "(dnat|tcp dport|udp dport)" | sed 's/^/    /' || echo -e "    ${SECONDARY_LIGHT}无IPv4转发规则${NC}"
-    echo -e "  ${SECONDARY_LIGHT}IPv4 NAT规则 (snat/masquerade):${NC}"
-    nft list table ip nat 2>/dev/null | grep -E "(snat|masquerade)" | sed 's/^/    /' || echo -e "    ${SECONDARY_LIGHT}无IPv4 SNAT规则${NC}"
-    echo
-    echo -e "  ${SECONDARY_LIGHT}IPv6 NAT规则 (dnat):${NC}"
-    nft list table ip6 nat 2>/dev/null | grep -E "(dnat|tcp dport|udp dport)" | sed 's/^/    /' || echo -e "    ${SECONDARY_LIGHT}无IPv6转发规则${NC}"
-    echo -e "  ${SECONDARY_LIGHT}IPv6 NAT规则 (snat/masquerade):${NC}"
-    nft list table ip6 nat 2>/dev/null | grep -E "(snat|masquerade)" | sed 's/^/    /' || echo -e "    ${SECONDARY_LIGHT}无IPv6 SNAT规则${NC}"
+    echo -e "${LIGHT_GRAY}总转发规则数: $rule_count${NC}"
+    echo -e "${LIGHT_GRAY}当前IP模式: $IP_MODE${NC}"
+    echo -e "${LIGHT_GRAY}WAN接口: $WAN_INTERFACE${NC}"
+    echo -e "${LIGHT_GRAY}LAN接口: $LAN_INTERFACE${NC}"
     echo
     
-    # IP转发状态
-    print_section "系统 IP 转发状态"
-    local ipv4_forward=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
-    local ipv6_forward=$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null || echo "0")
-    if [[ "$ipv4_forward" == "1" ]]; then
-        echo -e "  IPv4转发: ${ACCENT_SUCCESS}启用${NC}"
-    else
-        echo -e "  IPv4转发: ${ACCENT_ERROR}禁用${NC}"
-    fi
-    if [[ "$ipv6_forward" == "1" ]]; then
-        echo -e "  IPv6转发: ${ACCENT_SUCCESS}启用${NC}"
-    else
-        echo -e "  IPv6转发: ${ACCENT_ERROR}禁用${NC}"
-    fi
+    # 内核模块
+    print_section "相关内核模块"
+    lsmod | grep -E "(nf_tables|nf_nat|nf_conntrack)" || echo -e "${WARNING_YELLOW}未加载相关模块${NC}"
     echo
     
-    # 系统转发日志 (最近5条)
-    print_section "NFTables 服务日志 (最近5条)"
-    journalctl -u nftables.service --no-pager -n 5 --quiet 2>/dev/null | sed 's/^/  /' || echo -e "  ${SECONDARY_LIGHT}无可用日志${NC}"
-    echo
+    # 网络接口状态
+    print_section "网络接口状态"
+    ip addr show | grep -E "(inet |inet6 )" | grep -v "127.0.0.1"
     
-    # 检查内核连接跟踪
-    print_section "连接跟踪状态"
-    if [[ -f /proc/sys/net/netfilter/nf_conntrack_count && -f /proc/sys/net/netfilter/nf_conntrack_max ]]; then
-        local current_conn=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo "0")
-        local max_conn=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo "0")
-        echo -e "  当前连接数: ${ACCENT_SUCCESS}$current_conn${NC} / ${SECONDARY_LIGHT}$max_conn${NC}"
-        
-        # 计算连接使用率
-        if [[ "$max_conn" -gt 0 ]]; then
-            local usage=$((current_conn * 100 / max_conn))
-            local usage_color="${ACCENT_SUCCESS}"
-            if (( usage > 90 )); then
-                usage_color="${ACCENT_ERROR}"
-            elif (( usage > 70 )); then
-                usage_color="${ACCENT_WARNING}"
-            fi
-            echo -e "  使用率: ${usage_color}$usage%${NC}"
-        fi
-    else
-        echo -e "  连接跟踪模块: ${ACCENT_WARNING}状态未知或未启用${NC}"
-    fi
-    echo
-        
     wait_enter
     show_main_menu
 }
@@ -960,7 +1239,7 @@ show_batch_menu() {
     draw_menu_item "9" "返回主菜单" ""
     
     draw_line 40
-    echo -ne "${PRIMARY}请选择操作 [1-4,9]: ${NC}"
+    echo -ne "${ACCENT_BLUE}请选择操作 [1-4,9]: ${NC}"
     
     read -r choice
     case "$choice" in
@@ -977,26 +1256,28 @@ show_batch_menu() {
     esac
 }
 
-# 系统管理菜单
+# 高级功能菜单
 show_advanced_menu() {
     print_header
-    print_section "系统管理"
+    print_section "高级功能"
     
-    draw_menu_item "1" "初始化配置" "重新初始化nftables"
-    draw_menu_item "2" "保存当前规则" "手动保存规则"
-    draw_menu_item "3" "重新加载规则" "从配置文件重新加载"
-    draw_menu_item "4" "查看详细日志" "显示转发和错误日志"
+    draw_menu_item "1" "高级端口转发" "同端口不同协议转发"
+    draw_menu_item "2" "测试转发规则" "测试端口连通性"
+    draw_menu_item "3" "初始化配置" "重新初始化nftables"
+    draw_menu_item "4" "保存当前规则" "手动保存规则"
+    draw_menu_item "5" "重新加载规则" "从配置文件重新加载"
     draw_menu_item "9" "返回主菜单" ""
     
     draw_line 40
-    echo -ne "${PRIMARY}请选择功能 [1-4,9]: ${NC}"
+    echo -ne "${ACCENT_BLUE}请选择功能 [1-5,9]: ${NC}"
     
     read -r choice
     case "$choice" in
-        1) init_nftables_interactive ;;
-        2) save_rules_interactive ;;
-        3) reload_rules_interactive ;;
-        4) show_detailed_logs_interactive ;;
+        1) add_advanced_forward_interactive ;;
+        2) test_forward_rule_interactive ;;
+        3) init_nftables_interactive ;;
+        4) save_rules_interactive ;;
+        5) reload_rules_interactive ;;
         9) show_main_menu ;;
         *) 
             print_error "无效选择"
@@ -1006,203 +1287,69 @@ show_advanced_menu() {
     esac
 }
 
-# 删除转发规则交互函数
-delete_forward_rule_interactive() {
+# 帮助菜单
+show_help_menu() {
     print_header
-    print_section "删除转发规则"
+    print_section "帮助文档"
     
-    if [[ ! -f "${FORWARD_RULES_FILE}" || ! -s "${FORWARD_RULES_FILE}" ]]; then
-        print_warning "没有可删除的规则"
-        wait_enter
-        show_forward_menu
-        return
-    fi
+    echo -e "${PRIMARY_BLUE}${BOLD}NFTables转发管理系统使用说明${NC}"
+    draw_line 60
     
-    list_forward_rules_core
+    echo -e "${LIGHT_BLUE}基本概念:${NC}"
+    echo -e "${LIGHT_GRAY}• 端口转发: 将外部端口的流量转发到内网设备${NC}"
+    echo -e "${LIGHT_GRAY}• 协议支持: TCP、UDP或两者同时${NC}"
+    echo -e "${LIGHT_GRAY}• IP模式: IPv4、IPv6或混合模式${NC}"
     echo
-    echo -ne "${PRIMARY}请输入要删除的规则编号: ${NC}"
-    read -r rule_number
     
-    if delete_forward_rule_core "$rule_number"; then
-        print_success "规则删除成功"
-    else
-        print_error "规则删除失败"
-    fi
+    echo -e "${LIGHT_BLUE}使用流程:${NC}"
+    echo -e "${LIGHT_GRAY}1. 配置IP模式和网络接口${NC}"
+    echo -e "${LIGHT_GRAY}2. 初始化nftables配置${NC}"
+    echo -e "${LIGHT_GRAY}3. 添加转发规则${NC}"
+    echo -e "${LIGHT_GRAY}4. 测试规则是否生效${NC}"
+    echo
     
-    wait_enter
-    show_forward_menu
-}
-
-# 查看转发规则交互函数
-list_forward_rules_interactive() {
-    print_header
-    print_section "转发规则列表"
+    echo -e "${LIGHT_BLUE}常见问题:${NC}"
+    echo -e "${LIGHT_GRAY}Q: 转发不工作？${NC}"
+    echo -e "${LIGHT_GRAY}A: 检查IP转发是否启用: sysctl net.ipv4.ip_forward${NC}"
+    echo
+    echo -e "${LIGHT_GRAY}Q: 规则不生效？${NC}"
+    echo -e "${LIGHT_GRAY}A: 重新加载配置或检查防火墙规则${NC}"
+    echo
     
-    list_forward_rules_core
-    
-    wait_enter
-    show_forward_menu
-}
-
-# 核心规则列表函数
-list_forward_rules_core() {
-    if [[ ! -f "${FORWARD_RULES_FILE}" || ! -s "${FORWARD_RULES_FILE}" ]]; then
-        print_info "当前没有转发规则"
-        return
-    fi
-    
-    local count=1
-    while IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp listen_protocol; do
-        # 检测IP版本
-        local ip_version="IPv4"
-        if [[ "$internal_ip" =~ : ]]; then
-            ip_version="IPv6"
-        fi
-        
-        echo -e "${PRIMARY}[$count]${NC} ${SECONDARY_LIGHT}$protocol $external_port -> $internal_ip:$internal_port${NC} ${ACCENT_SUCCESS}($ip_version)${NC} ${SECONDARY_LIGHT}($rule_name)${NC}"
-        ((count++))
-    done < "${FORWARD_RULES_FILE}"
-}
-
-# 核心删除规则函数
-delete_forward_rule_core() {
-    local rule_number="$1"
-    
-    if ! [[ "$rule_number" =~ ^[0-9]+$ ]]; then
-        print_error "无效的规则编号"
-        return 1
-    fi
-    
-    local total_rules=$(wc -l < "${FORWARD_RULES_FILE}" 2>/dev/null || echo "0")
-    if [[ "$rule_number" -lt 1 || "$rule_number" -gt "$total_rules" ]]; then
-        print_error "规则编号超出范围"
-        return 1
-    fi
-    
-    # 获取要删除的规则信息
-    local rule_line=$(sed -n "${rule_number}p" "${FORWARD_RULES_FILE}")
-    IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp listen_protocol <<< "$rule_line"
-    
-    # 检测IP版本 (用于显示信息)
-    local target_ip_type="ipv4"
-    if [[ "$internal_ip" =~ : ]]; then
-        target_ip_type="ipv6"
-    fi
-    
-    # 根据存储的 listen_protocol 确定 table_family
-    local table_family_to_delete=""
-    if [[ "$listen_protocol" == "ipv4" ]]; then
-        table_family_to_delete="ip"
-    elif [[ "$listen_protocol" == "ipv6" ]]; then
-        table_family_to_delete="ip6"
-    else
-        # 处理旧格式规则文件 (listen_protocol 可能为空)
-        print_warning "规则文件中缺少 listen_protocol，尝试从目标IP推断..."
-        if [[ "$internal_ip" =~ : ]]; then
-            table_family_to_delete="ip6"
-            print_info "推断表簇为 ip6 (目标IP: $internal_ip)"
-        else
-            table_family_to_delete="ip"
-            print_info "推断表簇为 ip (目标IP: $internal_ip)"
-        fi
-    fi
-    
-    # 从NFTables中删除具体规则
-    if [[ -n "$table_family_to_delete" ]]; then
-        if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
-            delete_nft_rule "$table_family_to_delete" "tcp" "$external_port" "$internal_ip" "$internal_port" "$external_ip"
-        fi
-        
-        if [[ "$protocol" == "udp" || "$protocol" == "both" ]]; then
-            delete_nft_rule "$table_family_to_delete" "udp" "$external_port" "$internal_ip" "$internal_port" "$external_ip"
-        fi
-    else
-        print_error "无法确定用于删除规则的表簇。NFTables规则可能未被删除。"
-    fi
-    
-    # 从文件中删除规则
-    sed -i "${rule_number}d" "${FORWARD_RULES_FILE}"
-    
-    print_success "规则已删除: $protocol $external_port -> $internal_ip:$internal_port ($target_ip_type)"
-    print_info "如删除不完整，请使用系统管理->重新加载规则"
-    return 0
-}
-
-# 删除NFTables中的具体规则
-delete_nft_rule() {
-    local table_family="$1"
-    local protocol="$2"
-    local external_port="$3"
-    local internal_ip="$4"
-    local internal_port="$5"
-    local external_ip="$6"
-    
-    # 构建规则匹配条件
-    local rule_pattern=""
-    if [[ "$external_ip" != "any" ]]; then
-        if [[ "$table_family" == "ip" ]]; then
-            rule_pattern="ip saddr $external_ip $protocol dport $external_port dnat to $internal_ip:$internal_port"
-        else
-            rule_pattern="ip6 saddr $external_ip $protocol dport $external_port dnat to $internal_ip:$internal_port"
-        fi
-    else
-        rule_pattern="$protocol dport $external_port dnat to $internal_ip:$internal_port"
-    fi
-    
-    # 获取规则句柄并删除
-    local handle=$(nft -a list table $table_family nat 2>/dev/null | grep "$rule_pattern" | grep -o "handle [0-9]*" | awk '{print $2}' | head -1)
-    
-    if [[ -n "$handle" ]]; then
-        nft delete rule $table_family nat prerouting handle "$handle" 2>/dev/null
-        print_debug "已删除NFTables规则: $table_family nat handle $handle"
-        return 0
-    fi
-    
-    return 1
-}
-
-# 清空所有规则交互函数
-flush_all_rules_interactive() {
-    print_header
-    print_section "清空所有规则"
-    
-    echo -ne "${ACCENT_WARNING}确定要删除所有转发规则吗? [y/N] (谨慎操作): ${NC}"
-    read -r confirm
-    
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        if flush_all_rules_core; then
-            print_success "所有规则已清空"
-        else
-            print_error "清空规则失败"
-        fi
-    else
-        print_info "操作已取消"
-    fi
+    echo -e "${LIGHT_BLUE}安全建议:${NC}"
+    echo -e "${LIGHT_GRAY}• 使用源IP限制减少安全风险${NC}"
+    echo -e "${LIGHT_GRAY}• 定期备份配置文件${NC}"
+    echo -e "${LIGHT_GRAY}• 监控转发规则的使用情况${NC}"
     
     wait_enter
-    show_forward_menu
+    show_main_menu
 }
 
-# 核心清空规则函数
-flush_all_rules_core() {
-    # 清空所有NAT表（IPv4和IPv6）
-    nft flush table ip nat 2>/dev/null || true
-    nft flush table ip6 nat 2>/dev/null || true
+# 核心保存函数
+save_rules_core() {
+    print_debug "保存规则到配置文件..."
     
-    # 清空规则文件
-    > "${FORWARD_RULES_FILE}"
+    # 备份原配置
+    if [[ -f "${NFTABLES_CONF}" ]]; then
+        cp "${NFTABLES_CONF}" "${NFTABLES_CONF}.bak.$(date +%Y%m%d_%H%M%S)"
+    fi
     
-    print_success "已清空IPv4和IPv6 NAT规则"
-    return 0
+    # 导出当前规则集
+    nft list ruleset > "${NFTABLES_CONF}"
+    
+    # 在文件开头添加shebang
+    sed -i '1i#!/usr/sbin/nft -f' "${NFTABLES_CONF}"
+    
+    print_debug "规则已保存到 $NFTABLES_CONF"
 }
 
-# 导出规则交互函数
+# 导出规则交互式函数（示例，其他函数类似实现）
 export_rules_interactive() {
     print_header
     print_section "导出转发规则"
     
     local default_filename="nftables_forward_rules_$(date +%Y%m%d_%H%M%S).txt"
-    echo -ne "${PRIMARY}导出文件名 (默认: $default_filename): ${NC}"
+    echo -ne "${ACCENT_BLUE}导出文件名 (默认: $default_filename): ${NC}"
     read -r export_file
     [[ -z "$export_file" ]] && export_file="$default_filename"
     
@@ -1220,12 +1367,16 @@ export_rules_interactive() {
 export_rules_core() {
     local export_file="$1"
     
+    # 添加头部注释
     cat > "$export_file" << EOF
 # nftables转发规则导出文件
 # 生成时间: $(date)
 # 格式: protocol|external_port|internal_ip|internal_port|external_ip|rule_name
+# 协议: tcp, udp, both
+# external_ip: any 表示不限制源IP
 EOF
     
+    # 复制规则
     if [[ -f "${FORWARD_RULES_FILE}" && -s "${FORWARD_RULES_FILE}" ]]; then
         cat "${FORWARD_RULES_FILE}" >> "$export_file"
         local rule_count=$(wc -l < "${FORWARD_RULES_FILE}")
@@ -1237,12 +1388,12 @@ EOF
     fi
 }
 
-# 导入规则交互函数
+# 导入规则交互式函数
 import_rules_interactive() {
     print_header
     print_section "导入转发规则"
     
-    echo -ne "${PRIMARY}导入文件路径: ${NC}"
+    echo -ne "${ACCENT_BLUE}请输入规则文件路径: ${NC}"
     read -r import_file
     
     if [[ ! -f "$import_file" ]]; then
@@ -1252,10 +1403,17 @@ import_rules_interactive() {
         return
     fi
     
-    if import_rules_core "$import_file"; then
-        print_success "规则导入成功"
+    echo -ne "${WARNING_YELLOW}确认导入规则文件? [y/N]: ${NC}"
+    read -r confirm
+    
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        if import_rules_core "$import_file"; then
+            print_success "规则导入成功"
+        else
+            print_error "规则导入失败"
+        fi
     else
-        print_error "导入失败"
+        print_info "操作已取消"
     fi
     
     wait_enter
@@ -1265,419 +1423,154 @@ import_rules_interactive() {
 # 核心导入函数
 import_rules_core() {
     local import_file="$1"
-    local imported=0
+    local imported_count=0
     
-    while IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp listen_protocol; do
-        # 跳过注释行
-        [[ "$protocol" =~ ^#.*$ ]] && continue
-        [[ -z "$protocol" ]] && continue
+    print_info "正在导入规则..."
+    
+    while IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name create_time; do
+        # 跳过注释和空行
+        [[ -z "$protocol" || "$protocol" =~ ^# ]] && continue
         
-        # 验证IP地址格式
-        if ! validate_ip_format "$internal_ip"; then
-            print_warning "跳过无效IP地址的规则: $internal_ip (规则名: $rule_name)"
-            continue
+        # 检测目标IP类型
+        local target_ip_type="ipv4"
+        if [[ "$internal_ip" =~ ^[0-9a-fA-F:]+$ ]]; then
+            target_ip_type="ipv6"
         fi
         
-        # 处理 listen_protocol (如果从文件读取为空，则根据 internal_ip 推断)
-        local effective_listen_protocol="$listen_protocol"
-        if [[ -z "$effective_listen_protocol" ]]; then
-            if [[ "$internal_ip" =~ : ]]; then # IPv6
-                effective_listen_protocol="ipv6"
-            else # IPv4
-                effective_listen_protocol="ipv4"
-            fi
-            print_info "导入规则 '$rule_name': 文件中缺少 listen_protocol, 已推断为 '$effective_listen_protocol' (基于目标IP $internal_ip)"
-        fi
-        
-        if add_forward_rule_core "$protocol" "$external_port" "$internal_ip" "$internal_port" "$external_ip" "$rule_name" "$effective_listen_protocol"; then
-            ((imported++))
+        if add_forward_rule_core "$protocol" "$external_port" "$internal_ip" "$internal_port" "$external_ip" "$rule_name" "$target_ip_type"; then
+            ((imported_count++))
+            print_success "导入规则: $protocol $external_port -> $internal_ip:$internal_port"
+        else
+            print_error "导入失败: $protocol $external_port -> $internal_ip:$internal_port"
         fi
     done < "$import_file"
     
-    print_info "成功导入 $imported 条规则"
-    return 0
+    print_info "共导入 $imported_count 条规则"
+    [[ $imported_count -gt 0 ]]
 }
 
-# 备份配置函数
+# 备份配置交互式函数
 backup_config_interactive() {
     print_header
     print_section "备份配置"
     
     local backup_dir="/etc/nftables_backup_$(date +%Y%m%d_%H%M%S)"
-    mkdir -p "$backup_dir"
+    echo -ne "${ACCENT_BLUE}备份目录 (默认: $backup_dir): ${NC}"
+    read -r custom_backup_dir
+    [[ -n "$custom_backup_dir" ]] && backup_dir="$custom_backup_dir"
     
-    cp "${NFTABLES_CONF}" "$backup_dir/" 2>/dev/null
-    cp "${FORWARD_RULES_FILE}" "$backup_dir/" 2>/dev/null
-    cp "${CONFIG_FILE}" "$backup_dir/" 2>/dev/null
-    
-    print_success "配置已备份到: $backup_dir"
-    
-    wait_enter
-    show_batch_menu
-}
-
-# 恢复配置函数
-restore_config_interactive() {
-    print_header
-    print_section "恢复配置"
-    
-    echo -ne "${PRIMARY}备份目录路径: ${NC}"
-    read -r backup_dir
-    
-    if [[ ! -d "$backup_dir" ]]; then
-        print_error "备份目录不存在"
-        wait_enter
-        show_batch_menu
-        return
-    fi
-    
-    cp "$backup_dir/nftables.conf" "${NFTABLES_CONF}" 2>/dev/null
-    cp "$backup_dir/nftables_forward_rules.txt" "${FORWARD_RULES_FILE}" 2>/dev/null
-    cp "$backup_dir/nftables_forward_config.conf" "${CONFIG_FILE}" 2>/dev/null
-    
-    load_config
-    nft -f "${NFTABLES_CONF}"
-    
-    print_success "配置已恢复"
-    
-    wait_enter
-    show_batch_menu
-}
-
-# 端口测试菜单
-show_test_menu() {
-    print_header
-    print_section "端口测试"
-    
-    draw_menu_item "1" "测试本地端口" "检查本地端口监听状态"
-    draw_menu_item "2" "测试目标连通性" "检查到目标服务器的连通性"
-    draw_menu_item "3" "测试转发规则" "验证端口转发是否工作"
-    draw_menu_item "9" "返回主菜单" ""
-    
-    draw_line 40
-    echo -ne "${PRIMARY}请选择测试类型 [1-3,9]: ${NC}"
-    
-    read -r choice
-    case "$choice" in
-        1) test_local_port_interactive ;;
-        2) test_target_connectivity_interactive ;;
-        3) test_forwarding_rule_interactive ;;
-        9) show_main_menu ;;
-        *) 
-            print_error "无效选择"
-            wait_enter
-            show_test_menu
-            ;;
-    esac
-}
-
-# 测试本地端口
-test_local_port_interactive() {
-    print_header
-    print_section "测试本地端口"
-    
-    echo -ne "${PRIMARY}请输入要测试的端口: ${NC}"
-    read -r test_port
-    
-    if ! [[ "$test_port" =~ ^[0-9]+$ ]] || [[ "$test_port" -lt 1 || "$test_port" -gt 65535 ]]; then
-        print_error "端口号无效"
-        wait_enter
-        show_test_menu
-        return
-    fi
-    
-    echo
-    print_section "端口监听状态检查"
-    
-    # 检查IPv4监听
-    local ipv4_listen=$(ss -tlnp | grep ":$test_port " | head -1)
-    if [[ -n "$ipv4_listen" ]]; then
-        print_success "IPv4端口 $test_port 正在监听"
-        echo -e "${SECONDARY_LIGHT}$ipv4_listen${NC}"
-    else
-        print_warning "IPv4端口 $test_port 未在监听"
-    fi
-    
-    # 检查IPv6监听
-    local ipv6_listen=$(ss -tlnp | grep "::.*:$test_port " | head -1)
-    if [[ -n "$ipv6_listen" ]]; then
-        print_success "IPv6端口 $test_port 正在监听"
-        echo -e "${SECONDARY_LIGHT}$ipv6_listen${NC}"
-    else
-        print_warning "IPv6端口 $test_port 未在监听"
-    fi
-    
-    wait_enter
-    show_test_menu
-}
-
-# 测试目标连通性
-test_target_connectivity_interactive() {
-    print_header
-    print_section "测试目标连通性"
-    
-    echo -ne "${PRIMARY}目标IP地址: ${NC}"
-    read -r target_ip
-    
-    echo -ne "${PRIMARY}目标端口: ${NC}"
-    read -r target_port
-    
-    if ! [[ "$target_port" =~ ^[0-9]+$ ]] || [[ "$target_port" -lt 1 || "$target_port" -gt 65535 ]]; then
-        print_error "端口号无效"
-        wait_enter
-        show_test_menu
-        return
-    fi
-    
-    echo
-    print_section "连通性测试结果"
-    
-    # 检测IP版本
-    local ip_version="IPv4"
-    if [[ "$target_ip" =~ : ]]; then
-        ip_version="IPv6"
-    fi
-    
-    echo -e "${SECONDARY_LIGHT}测试目标: $target_ip:$target_port ($ip_version)${NC}"
-    echo
-    
-    # 使用nc测试连通性
-    if command -v nc &> /dev/null; then
-        if timeout 5 nc -z "$target_ip" "$target_port" 2>/dev/null; then
-            print_success "目标端口 $target_ip:$target_port 连通正常"
-        else
-            print_error "目标端口 $target_ip:$target_port 连接失败"
-        fi
-    else
-        print_warning "nc命令未安装，无法进行连通性测试"
-        print_info "建议安装: apt install netcat-openbsd"
-    fi
-    
-    wait_enter
-    show_test_menu
-}
-
-# 测试转发规则
-test_forwarding_rule_interactive() {
-    print_header
-    print_section "测试转发规则"
-    
-    # 显示现有规则
-    if [[ ! -f "${FORWARD_RULES_FILE}" || ! -s "${FORWARD_RULES_FILE}" ]]; then
-        print_warning "没有转发规则可测试"
-        wait_enter
-        show_test_menu
-        return
-    fi
-    
-    echo -e "${PRIMARY}现有转发规则:${NC}"
-    list_forward_rules_core
-    echo
-    
-    echo -ne "${PRIMARY}请输入要测试的规则编号: ${NC}"
-    read -r rule_number
-    
-    if ! [[ "$rule_number" =~ ^[0-9]+$ ]]; then
-        print_error "无效的规则编号"
-        wait_enter
-        show_test_menu
-        return
-    fi
-    
-    local total_rules=$(wc -l < "${FORWARD_RULES_FILE}" 2>/dev/null || echo "0")
-    if [[ "$rule_number" -lt 1 || "$rule_number" -gt "$total_rules" ]]; then
-        print_error "规则编号超出范围"
-        wait_enter
-        show_test_menu
-        return
-    fi
-    
-    # 获取规则信息
-    local rule_line=$(sed -n "${rule_number}p" "${FORWARD_RULES_FILE}")
-    IFS='|' read -r protocol external_port internal_ip internal_port external_ip rule_name timestamp listen_protocol <<< "$rule_line"
-    
-    echo
-    print_section "转发规则测试"
-    echo -e "${SECONDARY_LIGHT}规则: $protocol $external_port -> $internal_ip:$internal_port${NC}"
-    echo
-    
-    # 检测IP版本
-    local ip_version="IPv4"
-    if [[ "$internal_ip" =~ : ]]; then
-        ip_version="IPv6"
-    fi
-    
-    # 测试本地端口监听
-    echo -e "${PRIMARY}1. 检查本地端口监听状态:${NC}"
-    local local_listen=$(ss -tlnp | grep ":$external_port ")
-    if [[ -n "$local_listen" ]]; then
-        print_success "本地端口 $external_port 有服务监听"
-    else
-        print_warning "本地端口 $external_port 没有直接监听服务（通过NFTables转发）"
-    fi
-    
-    # 测试目标连通性
-    echo
-    echo -e "${PRIMARY}2. 检查目标服务器连通性:${NC}"
-    if command -v nc &> /dev/null; then
-        if timeout 5 nc -z "$internal_ip" "$internal_port" 2>/dev/null; then
-            print_success "目标服务器 $internal_ip:$internal_port 连通正常"
-        else
-            print_error "目标服务器 $internal_ip:$internal_port 连接失败"
-        fi
-    else
-        print_warning "nc命令未安装，无法测试目标连通性"
-    fi
-    
-    # 检查NFTables规则
-    echo
-    echo -e "${PRIMARY}3. 检查NFTables规则状态:${NC}"
-    local table_family="ip"
-    if [[ "$ip_version" == "IPv6" ]]; then
-        table_family="ip6"
-    fi
-    
-    local nft_rule=$(nft list table $table_family nat 2>/dev/null | grep -E "$protocol.*dport $external_port.*dnat.*$internal_ip")
-    if [[ -n "$nft_rule" ]]; then
-        print_success "NFTables转发规则存在且正确"
-        echo -e "${SECONDARY_LIGHT}规则: $nft_rule${NC}"
-    else
-        print_error "NFTables转发规则缺失或不正确"
-    fi
-    
-    wait_enter
-    show_test_menu
-}
-
-init_nftables_interactive() {
-    print_header
-    print_section "初始化NFTables配置"
-    
-    echo -ne "${ACCENT_WARNING}确定要重新初始化配置吗? [y/N] (将清空现有规则): ${NC}"
+    echo -ne "${ACCENT_BLUE}确认创建备份? [Y/n]: ${NC}"
     read -r confirm
+    [[ -z "$confirm" ]] && confirm="y"
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        if init_nftables; then
-            print_success "NFTables配置初始化成功"
+        if backup_config_core "$backup_dir"; then
+            print_success "配置备份成功: $backup_dir"
         else
-            print_error "初始化失败"
+            print_error "配置备份失败"
         fi
     else
         print_info "操作已取消"
     fi
     
     wait_enter
-    show_advanced_menu
+    show_batch_menu
 }
 
-save_rules_interactive() {
-    print_header
-    print_section "保存当前规则"
+# 核心备份函数
+backup_config_core() {
+    local backup_dir="$1"
     
-    if save_rules_core; then
-        print_success "规则保存成功"
+    if mkdir -p "$backup_dir"; then
+        # 备份配置文件
+        [[ -f "$CONFIG_FILE" ]] && cp "$CONFIG_FILE" "$backup_dir/"
+        [[ -f "$NFTABLES_CONF" ]] && cp "$NFTABLES_CONF" "$backup_dir/"
+        [[ -f "$FORWARD_RULES_FILE" ]] && cp "$FORWARD_RULES_FILE" "$backup_dir/"
+        
+        # 保存当前nftables规则
+        nft list ruleset > "$backup_dir/current_ruleset.nft"
+        
+        # 创建备份信息文件
+        cat > "$backup_dir/backup_info.txt" << EOF
+# NFTables配置备份信息
+备份时间: $(date)
+系统版本: $(lsb_release -ds 2>/dev/null || cat /etc/debian_version)
+脚本版本: $SCRIPT_VERSION
+IP模式: $IP_MODE
+WAN接口: $WAN_INTERFACE
+LAN接口: $LAN_INTERFACE
+规则数量: $(wc -l < "${FORWARD_RULES_FILE}" 2>/dev/null || echo "0")
+EOF
+        
+        print_debug "备份已创建: $backup_dir"
+        return 0
     else
-        print_error "保存失败"
+        print_error "无法创建备份目录: $backup_dir"
+        return 1
+    fi
+}
+
+# 恢复配置交互式函数
+restore_config_interactive() {
+    print_header
+    print_section "恢复配置"
+    
+    echo -ne "${ACCENT_BLUE}请输入备份目录路径: ${NC}"
+    read -r restore_dir
+    
+    if [[ ! -d "$restore_dir" ]]; then
+        print_error "备份目录不存在: $restore_dir"
+        wait_enter
+        show_batch_menu
+        return
+    fi
+    
+    # 显示备份信息
+    if [[ -f "$restore_dir/backup_info.txt" ]]; then
+        echo -e "${LIGHT_BLUE}备份信息:${NC}"
+        cat "$restore_dir/backup_info.txt"
+        echo
+    fi
+    
+    echo -ne "${WARNING_YELLOW}确认恢复配置? 这将覆盖当前配置! [y/N]: ${NC}"
+    read -r confirm
+    
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        if restore_config_core "$restore_dir"; then
+            print_success "配置恢复成功"
+            print_warning "请重新启动脚本以应用恢复的配置"
+        else
+            print_error "配置恢复失败"
+        fi
+    else
+        print_info "操作已取消"
     fi
     
     wait_enter
-    show_advanced_menu
+    show_batch_menu
 }
 
-# 核心保存函数
-save_rules_core() {
-    print_debug "保存规则到配置文件..."
+# 核心恢复函数
+restore_config_core() {
+    local restore_dir="$1"
     
-    if [[ -f "${NFTABLES_CONF}" ]]; then
-        cp "${NFTABLES_CONF}" "${NFTABLES_CONF}.bak.$(date +%Y%m%d_%H%M%S)"
+    print_info "正在恢复配置..."
+    
+    # 恢复配置文件
+    [[ -f "$restore_dir/$(basename "$CONFIG_FILE")" ]] && cp "$restore_dir/$(basename "$CONFIG_FILE")" "$CONFIG_FILE"
+    [[ -f "$restore_dir/$(basename "$NFTABLES_CONF")" ]] && cp "$restore_dir/$(basename "$NFTABLES_CONF")" "$NFTABLES_CONF"
+    [[ -f "$restore_dir/$(basename "$FORWARD_RULES_FILE")" ]] && cp "$restore_dir/$(basename "$FORWARD_RULES_FILE")" "$FORWARD_RULES_FILE"
+    
+    # 恢复nftables规则
+    if [[ -f "$restore_dir/current_ruleset.nft" ]]; then
+        nft -f "$restore_dir/current_ruleset.nft" 2>/dev/null || print_warning "无法恢复nftables规则，请手动重新加载"
     fi
     
-    nft list ruleset > "${NFTABLES_CONF}"
-    sed -i '1i#!/usr/sbin/nft -f' "${NFTABLES_CONF}"
+    # 重新加载配置
+    load_config
     
-    print_debug "规则已保存到 $NFTABLES_CONF"
+    print_debug "配置已恢复: $restore_dir"
     return 0
-}
-
-reload_rules_interactive() {
-    print_header
-    print_section "重新加载规则"
-    
-    if nft -f "${NFTABLES_CONF}"; then
-        print_success "规则重新加载成功"
-    else
-        print_error "加载失败"
-    fi
-    
-    wait_enter
-    show_advanced_menu
-}
-
-# 查看详细日志
-show_detailed_logs_interactive() {
-    print_header
-    print_section "系统详细日志"
-    
-    echo -e "${PRIMARY}选择日志类型:${NC}"
-    echo -e "${PRIMARY}1${NC} NFTables 服务日志"
-    echo -e "${PRIMARY}2${NC} 内核防火墙日志"
-    echo -e "${PRIMARY}3${NC} 网络连接日志"
-    echo -e "${PRIMARY}4${NC} 系统错误日志"
-    echo -e "${PRIMARY}5${NC} 全部日志概览"
-    echo -ne "${PRIMARY}请选择 [1-5] (默认: 5): ${NC}"
-    read -r log_choice
-    [[ -z "$log_choice" ]] && log_choice="5"
-    
-    echo
-    case "$log_choice" in
-        1)
-            print_section "NFTables 服务日志"
-            journalctl -u nftables.service --no-pager -n 20 2>/dev/null || echo -e "${SECONDARY_LIGHT}无可用日志${NC}"
-            ;;
-        2)
-            print_section "内核防火墙日志"
-            dmesg | grep -i -E "(nf_|netfilter|iptables|nftables)" | tail -20 || echo -e "${SECONDARY_LIGHT}无相关内核日志${NC}"
-            ;;
-        3)
-            print_section "网络连接日志"
-            echo -e "${SECONDARY_LIGHT}当前活跃连接:${NC}"
-            ss -tuln | head -20
-            echo
-            echo -e "${SECONDARY_LIGHT}连接统计:${NC}"
-            ss -s
-            ;;
-        4)
-            print_section "系统错误日志"
-            journalctl --priority=err --no-pager -n 10 2>/dev/null || echo -e "${SECONDARY_LIGHT}无错误日志${NC}"
-            ;;
-        5)
-            print_section "全部日志概览"
-            
-            echo -e "${PRIMARY}> NFTables服务状态:${NC}"
-            systemctl status nftables.service --no-pager -l | head -10
-            echo
-            
-            echo -e "${PRIMARY}> 最近错误日志:${NC}"
-            journalctl --priority=err --no-pager -n 3 2>/dev/null || echo -e "${SECONDARY_LIGHT}无错误${NC}"
-            echo
-            
-            echo -e "${PRIMARY}> 连接跟踪摘要:${NC}"
-            if [[ -f /proc/sys/net/netfilter/nf_conntrack_count ]]; then
-                local current_conn=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo "0")
-                local max_conn=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo "0")
-                echo -e "${SECONDARY_LIGHT}连接数: $current_conn / $max_conn${NC}"
-            fi
-            
-            echo -e "${PRIMARY}> 网络接口状态:${NC}"
-            ip link show | grep -E "(UP|DOWN)" | head -5
-            ;;
-        *)
-            print_error "无效选择"
-            ;;
-    esac
-    
-    wait_enter
-    show_advanced_menu
 }
 
 # 安全退出
@@ -1685,12 +1578,12 @@ exit_program() {
     print_header
     print_section "退出程序"
     
-    echo -ne "${PRIMARY}确定要退出程序吗? [y/N] (回车=取消): ${NC}"
+    echo -ne "${WARNING_YELLOW}确定要退出程序吗? [y/N]: ${NC}"
     read -r confirm
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         print_success "感谢使用 NFTables 转发管理系统！"
-        echo -e "${SECONDARY_LIGHT}再见！${NC}"
+        echo -e "${SECONDARY_GRAY}${DIM}再见！${NC}"
         exit 0
     else
         show_main_menu
