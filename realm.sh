@@ -145,6 +145,15 @@ deploy_realm() {
     
     # 创建服务文件
     echo -e "${YELLOW}Creating system service...${NC}"
+    
+    # 创建realm用户（如果不存在）
+    if ! id "realm" &>/dev/null; then
+        echo -e "${YELLOW}Creating realm system user...${NC}"
+        useradd --system --no-create-home --shell /bin/false realm 2>/dev/null || {
+            echo -e "${YELLOW}Failed to create realm user, using nobody${NC}"
+        }
+    fi
+    
     cat <<EOF >/etc/systemd/system/realm.service
 [Unit]
 Description=Realm Service
@@ -153,11 +162,22 @@ Wants=network-online.target systemd-networkd-wait-online.service
 
 [Service]
 Type=simple
-User=root
+User=realm
+Group=realm
 Restart=on-failure
 RestartSec=5s
 WorkingDirectory=${REALM_DIR}
 ExecStart=${REALM_DIR}/realm -c ${CONFIG_PATH}
+# 安全性设置
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# 高并发支持
+LimitNOFILE=infinity
+# 网络权限
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target

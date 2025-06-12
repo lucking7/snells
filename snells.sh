@@ -299,20 +299,32 @@ create_shadow_tls_systemd() {
         strict_option=""
     fi
 
+    # Create shadowtls user if not exists
+    if ! id "shadowtls" &>/dev/null; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin shadowtls
+        msg info "已创建 shadowtls 系统用户"
+    fi
+
     cat > $shadow_tls_service << EOF
 [Unit]
 Description=Shadow-TLS Server Service
-After=network-online.target
-Wants=network-online.target systemd-networkd-wait-online.service
+Documentation=https://github.com/ihciah/shadow-tls
+After=network.target nss-lookup.target network-online.target
+Wants=network-online.target
 
 [Service]
-LimitNOFILE=65535
 Type=simple
-User=root
-Restart=always
-RestartSec=5s
-OOMScoreAdjust=-500
-ExecStart=/usr/local/bin/shadow-tls --fastopen --v3 ${strict_option} server ${wildcard_option} --listen ${listen_addr} --server ${server_addr} --tls ${shadow_tls_tls_domain}:443 --password ${shadow_tls_password} 
+User=shadowtls
+Group=shadowtls
+StateDirectory=shadow-tls
+ExecStart=/usr/local/bin/shadow-tls --fastopen --v3 ${strict_option} server ${wildcard_option} --listen ${listen_addr} --server ${server_addr} --tls ${shadow_tls_tls_domain}:443 --password ${shadow_tls_password}
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=infinity
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=shadow-tls
 
 [Install]
 WantedBy=multi-user.target
@@ -454,6 +466,9 @@ install_snell_without_ip() {
     unzip -o snell-server.zip
     rm snell-server.zip
     chmod +x snell-server
+    
+    # Ensure snell user can execute the binary
+    chown snell:snell snell-server
 
     create_snell_systemd
     create_snell_conf
@@ -706,19 +721,38 @@ manage() {
 
 # Create systemd service file for Snell
 create_snell_systemd() {
+    # Create snell user if not exists
+    if ! id "snell" &>/dev/null; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin snell
+        msg info "已创建 snell 系统用户"
+    fi
+    
+    # Set proper permissions for snell workspace
+    chown -R snell:snell "${snell_workspace}"
+    chmod 755 "${snell_workspace}"
+    chmod 644 "${snell_workspace}/snell-server.conf"
+    
     cat > $snell_service << EOF
 [Unit]
 Description=Snell Proxy Service
-After=network.target
+Documentation=https://manual.nssurge.com/others/snell.html
+After=network.target nss-lookup.target network-online.target
+Wants=network-online.target
 
 [Service]
-User=root
+Type=simple
+User=snell
+Group=snell
+StateDirectory=snell-server
 WorkingDirectory=${snell_workspace}
 ExecStart=${snell_workspace}/snell-server -c snell-server.conf
-Restart=always
-RestartSec=5
-OOMScoreAdjust=-500
-LimitNOFILE=65535
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=infinity
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=snell-server
 
 [Install]
 WantedBy=multi-user.target
@@ -1011,6 +1045,9 @@ update_snell() {
     unzip -o snell-server.zip
     rm snell-server.zip
     chmod +x snell-server
+    
+    # Ensure snell user can execute the binary
+    chown snell:snell snell-server
 
     systemctl start snell
     sleep 2

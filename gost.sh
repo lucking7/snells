@@ -462,6 +462,9 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/log
+# 高并发支持
+LimitNOFILE=infinity
+# 网络权限
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]

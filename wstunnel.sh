@@ -383,6 +383,14 @@ toggle_tunnel() {
 create_service() {
     local service_file="$SERVICE_DIR/wstunnel-client.service"
     
+    # 创建wstunnel用户（如果不存在）
+    if ! id "wstunnel" &>/dev/null; then
+        echo -e "${YELLOW}创建wstunnel系统用户...${NC}"
+        useradd --system --no-create-home --shell /bin/false wstunnel 2>/dev/null || {
+            echo -e "${YELLOW}wstunnel用户创建失败，使用nobody${NC}"
+        }
+    fi
+    
     cat > "$service_file" << EOF
 [Unit]
 Description=wstunnel Client Service
@@ -390,11 +398,22 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+User=wstunnel
+Group=wstunnel
 WorkingDirectory=/etc/wstunnel
 ExecStart=/usr/local/bin/wstunnel-start.sh
 Restart=always
 RestartSec=5
+# 安全性设置
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# 高并发支持
+LimitNOFILE=infinity
+# 网络权限
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target

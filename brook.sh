@@ -273,6 +273,15 @@ create_systemd_service() {
   local service_file="${SERVICE_DIR}/${service_name}.service"
   local brook_exec_command_for_service
 
+  # 创建brook用户（如果不存在）
+  if ! id "brook" &>/dev/null; then
+    printf "${INFO_SYMBOL} 创建brook系统用户...${PLAIN}\n"
+    $SUDO useradd --system --no-create-home --shell /bin/false brook 2>/dev/null || {
+      printf "${WARN_SYMBOL} brook用户创建失败，使用nobody${PLAIN}\n"
+      # 如果创建失败，更新service_content中的用户为nobody
+    }
+  fi
+
   # 简化Brook路径检测，优先使用实际可用的brook路径
   if command -v brook &>/dev/null && brook --help &>/dev/null; then
     brook_exec_command_for_service=$(command -v brook)
@@ -308,14 +317,19 @@ Type=simple
 ExecStart=${brook_relay_cmd_line}
 Restart=always
 RestartSec=5
-User=root
-Group=root
+User=brook
+Group=brook
 Environment=\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"
 # 安全性设置
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+# 高并发支持
+LimitNOFILE=infinity
+# 网络权限
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target"
