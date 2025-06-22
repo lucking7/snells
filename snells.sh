@@ -47,32 +47,32 @@ msg() {
     esac
 }
 
-# 检查Snell服务状态
+# Check Snell service status
 check_snell_status() {
     echo -e "${cyan}═════════════════════════════════════${reset}"
-    echo -e "${cyan}            服务状态检查             ${reset}"
+    echo -e "${cyan}            Service Status Check      ${reset}"
     echo -e "${cyan}═════════════════════════════════════${reset}"
     
     if systemctl is-active --quiet snell; then
-        echo -e "Snell 服务: ${green}运行中${reset}"
+        echo -e "Snell Service: ${green}Running${reset}"
     else
-        echo -e "Snell 服务: ${red}未运行${reset}"
+        echo -e "Snell Service: ${red}Stopped${reset}"
     fi
     
     if systemctl is-active --quiet shadow-tls; then
-        echo -e "Shadow-TLS 服务: ${green}运行中${reset}"
+        echo -e "Shadow-TLS Service: ${green}Running${reset}"
     else
-        echo -e "Shadow-TLS 服务: ${red}未运行${reset} 或 ${yellow}未安装${reset}"
+        echo -e "Shadow-TLS Service: ${red}Stopped${reset} or ${yellow}Not installed${reset}"
     fi
     
-    # 检查端口占用情况
+    # Check port usage
     if [[ -f "${snell_workspace}/snell-server.conf" ]]; then
         local snell_port=$(grep -oP 'listen = .*?:(\d+)' "${snell_workspace}/snell-server.conf" | grep -oP '\d+$')
         if [[ -n "$snell_port" ]]; then
             if ss -tuln | grep -q ":${snell_port} "; then
-                echo -e "Snell 端口 ${snell_port}: ${green}已开放${reset}"
+                echo -e "Snell Port ${snell_port}: ${green}Open${reset}"
             else
-                echo -e "Snell 端口 ${snell_port}: ${red}未开放${reset}"
+                echo -e "Snell Port ${snell_port}: ${red}Closed${reset}"
             fi
         fi
     fi
@@ -82,9 +82,9 @@ check_snell_status() {
 
 # Function to check server IP (supports both IPv4 and IPv6)
 get_ip() {
-    # 为IPv4添加超时
+    # Add timeout for IPv4
     trace_info_v4=$(curl -s4 --connect-timeout 5 https://cloudflare.com/cdn-cgi/trace)
-    # 为IPv6添加超时：--connect-timeout 5秒连接超时, --max-time 10秒总超时
+    # Add timeout for IPv6: --connect-timeout 5s connection timeout, --max-time 10s total timeout
     trace_info_v6=$(curl -s6 --connect-timeout 5 --max-time 10 https://cloudflare.com/cdn-cgi/trace)
     ipv4=$(echo "$trace_info_v4" | grep -oP '(?<=ip=)[^\n]*')
     ipv6=$(echo "$trace_info_v6" | grep -oP '(?<=ip=)[^\n]*')
@@ -94,26 +94,26 @@ get_ip() {
         ip_type="both"
     elif [[ -n $ipv4 ]]; then
         ip_type="ipv4"
-        msg info "IPv6不可用或检测超时."
+        msg info "IPv6 unavailable or detection timeout."
     elif [[ -n $ipv6 ]]; then
         ip_type="ipv6"
     else
-        msg err "无法获取服务器IP地址." && exit 1
+        msg err "Unable to get server IP address." && exit 1
     fi
 
     server_ip=${ipv4:-$ipv6}
 
     if [[ -z $colo ]]; then
-        # 尝试从IPv6信息中获取colo
+        # Try to get colo from IPv6 info
         colo=$(echo "$trace_info_v6" | grep -oP '(?<=colo=)[^\n]*')
         if [[ -z $colo ]]; then
-            msg warn "无法获取数据中心位置，使用默认设置."
+            msg warn "Unable to get datacenter location, using default settings."
             colo="unknown"
         else
-            msg ok "数据中心位置: ${colo}"
+            msg ok "Datacenter location: ${colo}"
         fi
     else
-        msg ok "数据中心位置: ${colo}"
+        msg ok "Datacenter location: ${colo}"
     fi
 }
 
@@ -145,27 +145,27 @@ dependencies="wget unzip jq net-tools curl cron"
 # Simplified installation of missing packages  
 install_pkg() {
     msg info "Checking and installing missing dependencies..."  
-    apt-get update -y
-    apt-get install -y dnsutils ${dependencies[@]}  
+    apt-get update -qq
+    apt-get install -y dnsutils $dependencies
 }
 
 # Function to generate a random PSK
 generate_random_psk() {
-    tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32  
+    echo "$(openssl rand -base64 32)"
 }
 
 # Function to generate a random password  
 generate_random_password() {
-    tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16
+    echo "$(openssl rand -base64 16)"
 }
 
 # Function to find an unused port  
 find_unused_port() {
     local port
-    while :; do  
-        port=$(shuf -i 10000-60000 -n 1)
-        if ! ss -tuln | grep -q ":${port} " ; then
-            echo $port  
+    while true; do  
+        port=$(shuf -i 10000-65535 -n 1)
+        if ! ss -tuln | grep -q ":$port "; then
+            echo "$port"  
             break
         fi
     done
@@ -192,31 +192,31 @@ create_snell_conf() {
     local final_dns=""
     if [[ -n "$custom_dns" ]]; then
         final_dns="$custom_dns"
-        msg info "使用自定义DNS: $final_dns"
+        msg info "Using custom DNS: $final_dns"
     elif [[ -n "$system_dns" ]]; then
         final_dns="$system_dns"
-        msg info "使用系统DNS: $final_dns"
+        msg info "Using system DNS: $final_dns"
     else
-        msg warn "无法从 /etc/resolv.conf 获取系统DNS。使用预设DNS。"
+        msg warn "Unable to get system DNS from /etc/resolv.conf. Using default DNS."
         if [[ $ip_type == "both" || $ip_type == "ipv6" ]]; then
             final_dns="1.1.1.1,2606:4700:4700::1111" # Cloudflare only for IPv6
-            msg info "使用预设DNS (Cloudflare, 含IPv6)"
+            msg info "Using default DNS (Cloudflare, includes IPv6)"
         else
             final_dns="1.1.1.1,8.8.8.8" # Cloudflare + Google for IPv4
-            msg info "使用预设DNS (Cloudflare + Google, 仅IPv4)"
+            msg info "Using default DNS (Cloudflare + Google, IPv4 only)"
         fi
     fi
     dns_config="dns = $final_dns"
 
-    # 询问是否仅监听本地地址
-    read -rp "是否仅监听本地地址？(y/n, 推荐使用Shadow-TLS时选择y): " local_only
+    # Ask if listening on localhost only
+    read -rp "Listen on localhost only? (y/n, recommended when using Shadow-TLS): " local_only
     if [[ $local_only =~ ^[Yy]$ ]]; then
         if [[ $ip_type == "ipv6" ]]; then
             listen_addr="[::1]:$snell_port"
         else
             listen_addr="127.0.0.1:$snell_port"
         fi
-        msg info "配置Snell仅监听本地地址: $listen_addr"
+        msg info "Configuring Snell to listen on localhost: $listen_addr"
     else
         # Configure IPv6 settings
         if [[ $ip_type == "both" ]]; then
@@ -246,23 +246,23 @@ ipv6 = ${ipv6_enabled:-true}
 ${dns_config}
 EOF
 
-    msg ok "Snell 配置文件已创建: ${snell_workspace}/snell-server.conf"
+    msg ok "Snell configuration file created: ${snell_workspace}/snell-server.conf"
     systemctl start snell
-    msg ok "Snell 配置已完成."
+    msg ok "Snell configuration completed."
 }
 
 create_shadow_tls_systemd() {
     if [[ -z ${snell_port} ]]; then
-        read -rp "输入ShadowTLS转发端口 (默认: 随机选择未使用端口): " shadow_tls_f_port
-        [[ -z ${shadow_tls_f_port} ]] && shadow_tls_f_port=$(find_unused_port) && echo "[INFO] 为ShadowTLS转发随机选择端口: $shadow_tls_f_port"
+        read -rp "Input ShadowTLS forwarding port (default: random unused port): " shadow_tls_f_port
+        [[ -z ${shadow_tls_f_port} ]] && shadow_tls_f_port=$(find_unused_port) && echo "[INFO] Randomly selected port for ShadowTLS forwarding: $shadow_tls_f_port"
     else
         shadow_tls_f_port=${snell_port}
-        echo "[INFO] 使用Snell端口作为ShadowTLS转发端口: $shadow_tls_f_port"
+        echo "[INFO] Using Snell port as ShadowTLS forwarding port: $shadow_tls_f_port"
     fi
 
-    # 根据IPv6支持确定监听地址
+    # Determine listening address based on IPv6 support
     if [[ $ip_type == "both" ]]; then
-        read -rp "是否启用IPv6监听? (y/n): " ipv6_listen
+        read -rp "Enable IPv6 listening? (y/n): " ipv6_listen
         if [[ $ipv6_listen =~ ^[Yy]$ ]]; then
             listen_addr="[::]:${shadow_tls_port}"
         else
@@ -274,27 +274,27 @@ create_shadow_tls_systemd() {
         listen_addr="0.0.0.0:${shadow_tls_port}"
     fi
 
-    # 设置转发地址
+    # Set forwarding address
     if [[ $ip_type == "ipv6" ]]; then
         server_addr="[::1]:${shadow_tls_f_port}" 
     else
         server_addr="127.0.0.1:${shadow_tls_f_port}"
     fi
 
-    # 询问是否启用wildcard-sni
-    read -rp "是否启用wildcard-sni? (y/n, 可使客户端自定义SNI): " enable_wildcard
+    # Ask if enabling wildcard-sni
+    read -rp "Enable wildcard-sni? (y/n, allows client to customize SNI): " enable_wildcard
     if [[ $enable_wildcard =~ ^[Yy]$ ]]; then
         wildcard_option="--wildcard-sni=authed"
-        msg info "已启用wildcard-sni，客户端可自定义SNI"
+        msg info "Wildcard-sni enabled, client can customize SNI"
     else
         wildcard_option=""
     fi
 
-    # 询问是否启用strict模式
-    read -rp "是否启用TLS strict模式? (y/n, 增强安全性): " enable_strict
+    # Ask if enabling strict mode
+    read -rp "Enable TLS strict mode? (y/n, enhances security): " enable_strict
     if [[ $enable_strict =~ ^[Yy]$ ]]; then
         strict_option="--strict"
-        msg info "已启用strict模式，增强TLS握手安全性"
+        msg info "Strict mode enabled, enhances TLS handshake security"
     else
         strict_option=""
     fi
@@ -302,7 +302,7 @@ create_shadow_tls_systemd() {
     # Create shadowtls user if not exists
     if ! id "shadowtls" &>/dev/null; then
         useradd --system --no-create-home --shell /usr/sbin/nologin shadowtls
-        msg info "已创建 shadowtls 系统用户"
+        msg info "Created shadowtls system user"
     fi
 
     cat > $shadow_tls_service << EOF
@@ -332,26 +332,26 @@ EOF
 
     systemctl daemon-reload
     systemctl enable shadow-tls
-    msg ok "Shadow-TLS 系统服务已创建."
+    msg ok "Shadow-TLS systemd service created."
 }
 
 # Configure Shadow-TLS  
 config_shadow_tls() { 
-    read -rp "为Shadow-TLS选择端口 (默认: 443): " shadow_tls_port
+    read -rp "Choose port for Shadow-TLS (default: 443): " shadow_tls_port
     if [[ -z ${shadow_tls_port} ]]; then
         shadow_tls_port="443"
-        echo "[INFO] 使用默认端口443作为Shadow-TLS端口"
+        echo "[INFO] Using default port 443 for Shadow-TLS"
     fi
     
-    echo -e "${yellow}推荐的TLS域名列表 (支持TLS 1.3):${reset}"
-    echo -e "1) gateway.icloud.com (苹果服务)"
-    echo -e "2) p11.douyinpic.com (抖音相关，推荐用于免流)"
-    echo -e "3) mp.weixin.qq.com (微信相关)"
-    echo -e "4) sns-img-qc.xhscdn.com (小红书相关)"
-    echo -e "5) p9-dy.byteimg.com (字节相关)"
-    echo -e "6) weather-data.apple.com (苹果天气服务)"
-    echo -e "7) 自定义"
-    read -rp "请选择TLS域名 [1-7]: " domain_choice
+    echo -e "${yellow}Recommended TLS domain list (supports TLS 1.3):${reset}"
+    echo -e "1) gateway.icloud.com (Apple services)"
+    echo -e "2) p11.douyinpic.com (Douyin related, recommended for free flow)"
+    echo -e "3) mp.weixin.qq.com (WeChat related)"
+    echo -e "4) sns-img-qc.xhscdn.com (Xiaohongshu related)"
+    echo -e "5) p9-dy.byteimg.com (Byte related)"
+    echo -e "6) weather-data.apple.com (Apple weather service)"
+    echo -e "7) Custom"
+    read -rp "Select TLS domain [1-7]: " domain_choice
     
     case $domain_choice in
         1) shadow_tls_tls_domain="gateway.icloud.com" ;;
@@ -361,95 +361,101 @@ config_shadow_tls() {
         5) shadow_tls_tls_domain="p9-dy.byteimg.com" ;;
         6) shadow_tls_tls_domain="weather-data.apple.com" ;;
         7) 
-            read -rp "请输入自定义TLS域名: " shadow_tls_tls_domain
+            read -rp "Enter custom TLS domain: " shadow_tls_tls_domain
             [[ -z ${shadow_tls_tls_domain} ]] && shadow_tls_tls_domain="gateway.icloud.com"
             ;;
         *) shadow_tls_tls_domain="gateway.icloud.com" ;;
     esac
     
-    read -rp "输入Shadow-TLS的密码 (留空则随机生成): " shadow_tls_password
-    [[ -z ${shadow_tls_password} ]] && shadow_tls_password=$(generate_random_password) && echo "[INFO] 为Shadow-TLS生成随机密码: $shadow_tls_password"
+    read -rp "Input Shadow-TLS password (leave blank to generate a random one): " shadow_tls_password
+    [[ -z ${shadow_tls_password} ]] && shadow_tls_password=$(generate_random_password) && echo "[INFO] Generated a random password for Shadow-TLS: $shadow_tls_password"
 
-    # 为客户端配置确定Snell PSK
-    local client_snell_psk="${snell_psk}" # 优先使用当前脚本运行中设置的PSK
+    # Determine Snell PSK for client configuration
+    local client_snell_psk="${snell_psk}" # Prioritize PSK set during script execution
     if [[ -z "${client_snell_psk}" && -f "${snell_workspace}/snell-server.conf" ]]; then
-        # 如果当前没有PSK且配置文件存在，则从中读取
+        # If no PSK is set and configuration file exists, read from file
         client_snell_psk=$(grep -oP 'psk = \K.*' "${snell_workspace}/snell-server.conf")
     fi
 
-    # 客户端配置选项
-    read -rp "客户端启用 TFO (TCP Fast Open)? (Y/n): " client_tfo_choice
+    # Client configuration options
+    read -rp "Enable TFO (TCP Fast Open) for client? (Y/n): " client_tfo_choice
     local client_tfo_value="true"
     if [[ $client_tfo_choice =~ ^[Nn]$ ]]; then
         client_tfo_value="false"
     fi
 
-    read -rp "客户端启用 Session Reuse? (y/N): " client_reuse_choice
+    read -rp "Enable Session Reuse for client? (y/N): " client_reuse_choice
     local client_reuse_value="false"
     if [[ $client_reuse_choice =~ ^[Yy]$ ]]; then
         client_reuse_value="true"
     fi
 
     echo -e "${colo} = snell, ${server_ip}, ${shadow_tls_port}, psk=${client_snell_psk}, version=4, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${shadow_tls_password}, shadow-tls-sni=${shadow_tls_tls_domain}, shadow-tls-version=3"
-    msg ok "Shadow-TLS 配置已完成."
+    msg ok "Shadow-TLS configuration completed."
 }
 
 # Install Snell and Shadow-TLS
 install() {
-    echo "1. 安装 Snell 和 Shadow-TLS"
-    echo "2. 仅安装 Snell"
-    read -p "选择一个选项 (1-2): " option
+    clear
+    _blue_bg "┌─────────────────────────────────────────┐"
+    _blue_bg "│  $(printf '%-39s' "Installation Options")│"
+    _blue_bg "└─────────────────────────────────────────┘"
+    echo ""
+    
+    _green "1) Install Snell and Shadow-TLS"
+    _yellow "2) Install Snell Only"
+    _cyan "3) Install Shadow-TLS Only"
+    _red "0) Back to Main Menu"
+    echo ""
+    
+    read -p "Please select an option [0-3]: " option
 
     case $option in
-        1)
-            install_all
-            ;;
-        2)
-            install_snell
-            ;;
-        *)
-            msg err "无效选项"
-            ;;
+        1) install_all ;;
+        2) install_snell ;;
+        3) install_shadow_tls ;;
+        0) menu ;;
+        *) err "Invalid option" && sleep 2 && install ;;
     esac
 }
 
 # Install both Snell and Shadow-TLS
 install_all() {
     if [[ -e "${snell_workspace}/snell-server" ]] || [[ -e "/usr/local/bin/shadow-tls" ]]; then
-        read -rp "Snell 或 Shadow-TLS 已安装。重新安装? (y/n): " input
+        read -rp "Snell or Shadow-TLS is already installed. Reinstall? (y/n): " input
         case "$input" in
             y|Y) uninstall_all ;;
             *) return 0 ;;
         esac
     fi
 
-    # 先检测IP，只检测一次
+    # Detect IP only once
     get_ip
     
-    # 安装Snell (不再在install_snell中检测IP)
+    # Install Snell (no longer detect IP in install_snell)
     install_snell_without_ip
     
-    # 安装Shadow-TLS (不再在install_shadow_tls中检测IP)
+    # Install Shadow-TLS (no longer detect IP in install_shadow_tls)
     install_shadow_tls_without_ip
     
-    # 启动服务
+    # Start services
     run
-    msg ok "Snell 与 Shadow-TLS ${latest_version} 部署成功."
+    msg ok "Snell and Shadow-TLS ${latest_version} deployment successful."
 }
 
 # Install Snell only without IP detection
 install_snell_without_ip() {
     install_pkg
 
-    msg info "下载 Snell..."
+    msg info "Downloading Snell..."
     mkdir -p "${snell_workspace}"
     cd "${snell_workspace}" || exit 1
     
-    # 获取最新Snell版本
+    # Get latest Snell version
     latest_version=$(curl -s https://manual.nssurge.com/others/snell.html | grep -oP 'snell-server-v\K[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
     if [ -z "$latest_version" ]; then
-        latest_version="4.1.1"  # 兜底版本
-        msg warn "无法获取最新版本，使用兜底版本 ${latest_version}"
+        latest_version="4.1.1"  # Fallback version
+        msg warn "Failed to get latest version, using fallback version ${latest_version}"
     fi
     
     arch=$(uname -m)
@@ -458,10 +464,10 @@ install_snell_without_ip() {
     aarch64) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-aarch64.zip" ;;
     armv7l) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-armv7l.zip" ;;
     i386) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-i386.zip" ;;
-    *) msg err "不支持的架构: $arch" && exit 1 ;;
+    *) msg err "Unsupported architecture: $arch" && exit 1 ;;
     esac
 
-    msg info "下载 Snell 版本 ${latest_version}..."
+    msg info "Downloading Snell version ${latest_version}..."
     wget -O snell-server.zip "${snell_url}"
     unzip -o snell-server.zip
     rm snell-server.zip
@@ -473,59 +479,59 @@ install_snell_without_ip() {
     create_snell_systemd
     create_snell_conf
     
-    # 判断服务是否成功启动
+    # Check if service started successfully
     if systemctl is-active --quiet snell; then
-        _green "Snell 服务已成功启动!"
-        echo -e "${cyan}配置信息: ${reset}"
-        echo -e "服务器: ${server_ip}"
-        echo -e "端口: ${snell_port}"
+        _green "Snell service started successfully!"
+        echo -e "${cyan}Configuration information: ${reset}"
+        echo -e "Server: ${server_ip}"
+        echo -e "Port: ${snell_port}"
         echo -e "PSK: ${snell_psk}"
-        echo -e "版本: 4"
+        echo -e "Version: 4"
         echo ""
 
-        # 客户端配置选项
-        msg info "请为生成的客户端配置选择参数:"
-        read -rp "客户端启用 TFO (TCP Fast Open)? (Y/n): " client_tfo_choice
+        # Client configuration options
+        msg info "Please select options for the client configuration:"
+        read -rp "Enable TFO (TCP Fast Open)? (Y/n): " client_tfo_choice
         local client_tfo_value="true"
         if [[ $client_tfo_choice =~ ^[Nn]$ ]]; then
             client_tfo_value="false"
         fi
 
-        read -rp "客户端启用 Session Reuse? (y/N): " client_reuse_choice
+        read -rp "Enable Session Reuse? (y/N): " client_reuse_choice
         local client_reuse_value="false"
         if [[ $client_reuse_choice =~ ^[Yy]$ ]]; then
             client_reuse_value="true"
         fi
 
-        echo -e "${cyan}Surge配置示例: ${reset}"
+        echo -e "${cyan}Surge configuration example: ${reset}"
         echo -e "${colo} = snell, ${server_ip}, ${snell_port}, psk=${snell_psk}, version=4, reuse=${client_reuse_value}, tfo=${client_tfo_value}"
     else
-        _red "Snell 服务启动失败，请检查配置或执行以下命令查看日志:"
+        _red "Snell service failed to start, please check configuration or run the following commands to view logs:"
         echo -e "${yellow}systemctl status snell${reset}"
         echo -e "${yellow}journalctl -u snell -n 50${reset}"
     fi
     
-    msg ok "Snell 安装完成!"
+    msg ok "Snell installation complete!"
 }
 
 # Install Snell only
 install_snell() {
-    # 先检测IP
+    # Detect IP
     get_ip
     
-    # 安装Snell
+    # Install Snell
     install_snell_without_ip
     
-    # 提示是否安装ShadowTLS
-    read -rp "是否同时安装ShadowTLS增强安全性？(y/n): " install_shadow
+    # Ask if installing ShadowTLS
+    read -rp "Do you want to install ShadowTLS for enhanced security? (y/n): " install_shadow
     if [[ "$install_shadow" =~ ^[Yy]$ ]]; then
         install_shadow_tls_without_ip
     else
-        echo -e "${yellow}您可以稍后通过主菜单安装ShadowTLS${reset}"
+        echo -e "${yellow}You can install ShadowTLS later through the main menu${reset}"
     fi
     
-    # 返回菜单
-    read -p "按任意键返回主菜单..." _
+    # Return to menu
+    read -p "Press any key to return to the main menu..." _
     menu
 }
 
@@ -533,18 +539,18 @@ install_snell() {
 install_shadow_tls_without_ip() {
     install_pkg
 
-    msg info "下载 Shadow-TLS..."
+    msg info "Downloading Shadow-TLS..."
     mkdir -p "${shadow_tls_workspace}"
     cd "${shadow_tls_workspace}" || exit 1
 
-    # 获取Shadow-TLS最新版本
+    # Get latest Shadow-TLS version
     latest_release=$(wget -qO- https://api.github.com/repos/ihciah/shadow-tls/releases/latest)
     latest_version=$(echo "$latest_release" | jq -r '.tag_name')
     arch=$(uname -m)
     case $arch in
         x86_64) shadow_tls_url=$(echo "$latest_release" | jq -r '.assets[] | select(.name | contains("x86_64-unknown-linux-musl")) | .browser_download_url') ;;
         aarch64) shadow_tls_url=$(echo "$latest_release" | jq -r '.assets[] | select(.name | contains("aarch64-unknown-linux-musl")) | .browser_download_url') ;;
-        *) msg err "不支持的架构: $arch" && exit 1 ;;
+        *) msg err "Unsupported architecture: $arch" && exit 1 ;;
     esac
 
     wget -O shadow-tls "${shadow_tls_url}"
@@ -557,29 +563,35 @@ install_shadow_tls_without_ip() {
 
 # Install Shadow-TLS only
 install_shadow_tls() {
-    # 先检测IP
+    # Detect IP
     get_ip
     
-    # 安装Shadow-TLS
+    # Install Shadow-TLS
     install_shadow_tls_without_ip
 }
 
 # Uninstall Snell and Shadow-TLS
 uninstall() {
-    echo "1. 卸载 Snell 和 Shadow-TLS"
-    echo "2. 仅卸载 Snell"
-    read -p "选择一个选项 (1-2): " option
+    clear
+    _blue_bg "┌─────────────────────────────────────────┐"
+    _blue_bg "│  $(printf '%-39s' "Uninstall Options")│"
+    _blue_bg "└─────────────────────────────────────────┘"
+    echo ""
+    
+    _red "1) Uninstall Snell and Shadow-TLS"
+    _yellow "2) Uninstall Snell Only"
+    _cyan "3) Uninstall Shadow-TLS Only"
+    _green "0) Back to Main Menu"
+    echo ""
+    
+    read -p "Please select an option [0-3]: " option
 
     case $option in
-        1)
-            uninstall_all
-            ;;
-        2)
-            uninstall_snell
-            ;;
-        *)
-            msg err "无效选项"
-            ;;
+        1) uninstall_all ;;
+        2) uninstall_snell ;;
+        3) uninstall_shadow_tls ;;
+        0) menu ;;
+        *) err "Invalid option" && sleep 2 && uninstall ;;
     esac
 }
 
@@ -587,7 +599,7 @@ uninstall() {
 uninstall_all() {
     uninstall_snell
     uninstall_shadow_tls
-    msg ok "Snell 和 Shadow-TLS 已卸载."
+    msg ok "Snell and Shadow-TLS uninstalled."
 }
 
 # Uninstall Snell only
@@ -597,7 +609,7 @@ uninstall_snell() {
     rm -f "${snell_service}"
     rm -rf "${snell_workspace}"
     systemctl daemon-reload
-    msg ok "Snell 已卸载."
+    msg ok "Snell uninstalled."
 }
 
 # Uninstall Shadow-TLS only
@@ -608,7 +620,7 @@ uninstall_shadow_tls() {
     rm -rf "${shadow_tls_workspace}"
     rm -f "/usr/local/bin/shadow-tls"
     systemctl daemon-reload
-    msg ok "Shadow-TLS 已卸载."
+    msg ok "Shadow-TLS uninstalled."
 }
 
 # Run Snell and Shadow-TLS  
@@ -617,9 +629,9 @@ run() {
     systemctl start shadow-tls
     sleep 2
     if systemctl is-active --quiet snell && systemctl is-active --quiet shadow-tls; then  
-        msg ok "Snell 和 Shadow-TLS 现在正在运行."
+        msg ok "Snell and Shadow-TLS are now running."
     else
-        msg err "启动 Snell 或 Shadow-TLS 失败，请检查日志."  
+        msg err "Failed to start Snell or Shadow-TLS, please check logs."  
     fi
 }
 
@@ -627,7 +639,7 @@ run() {
 stop() {  
     systemctl stop snell
     systemctl stop shadow-tls
-    msg ok "Snell 和 Shadow-TLS 已停止."  
+    msg ok "Snell and Shadow-TLS have been stopped."  
 }
 
 # Restart Snell and Shadow-TLS  
@@ -636,9 +648,9 @@ restart() {
     systemctl restart shadow-tls  
     sleep 2
     if systemctl is-active --quiet snell && systemctl is-active --quiet shadow-tls; then
-        msg ok "Snell 和 Shadow-TLS 已重启."  
+        msg ok "Snell and Shadow-TLS have been restarted."  
     else
-        msg err "重启 Snell 或 Shadow-TLS 失败，请检查日志."
+        msg err "Failed to restart Snell or Shadow-TLS, please check logs."
     fi  
 }
 
@@ -664,58 +676,85 @@ show_snell_log() {
     fi
 }
 
+show_logs() {
+    clear
+    _blue_bg "┌─────────────────────────────────────────┐"
+    _blue_bg "│  $(printf '%-39s' "Service Logs")│"
+    _blue_bg "└─────────────────────────────────────────┘"
+    echo ""
+    
+    echo -e "${cyan}Recent Snell Logs:${reset}"
+    journalctl -u snell --no-pager -n 20
+    echo ""
+    
+    echo -e "${cyan}Recent Shadow-TLS Logs:${reset}"
+    journalctl -u shadow-tls --no-pager -n 20
+    echo ""
+    
+    read -p "Press any key to return..." _
+}
+
 # Modify Snell and Shadow-TLS configuration  
 modify() {
-    _green "1. Modify Snell Configuration"
-    _yellow "2. Modify Shadow-TLS Configuration"
-    echo "3. Back to Main Menu"  
-    read -p "Select operation (1-3): " operation
+    clear
+    _blue_bg "┌─────────────────────────────────────────┐"
+    _blue_bg "│  $(printf '%-39s' "Configuration Editor")│"
+    _blue_bg "└─────────────────────────────────────────┘"
+    echo ""
+    
+    _green "1) Modify Snell Configuration"
+    _yellow "2) Modify Shadow-TLS Configuration"
+    _red "0) Back to Main Menu"
+    echo ""
+    
+    read -p "Please select an option [0-2]: " operation
     
     case $operation in  
         1) nano "${snell_workspace}/snell-server.conf" ;;
         2) nano "${shadow_tls_service}" ;;
-        3) menu ;;  
-        *) msg err "Invalid operation." ;;
+        0) menu ;;  
+        *) err "Invalid operation" && sleep 2 && modify ;;
     esac
 
-    msg ok "Don't forget to restart services to apply changes: ./snell-shadowtls.sh restart"  
+    msg info "Don't forget to restart services to apply changes!"
+    read -p "Press any key to continue..." _
 }
 
 # Manage Snell and Shadow-TLS services  
 manage() {
     clear
     _blue_bg "┌─────────────────────────────────────────┐"
-    _blue_bg "│  $(printf '%-36s' "服务管理")  │"
+    _blue_bg "│  $(printf '%-39s' "Service Management")│"
     _blue_bg "└─────────────────────────────────────────┘"
     echo ""
     
-    # 显示服务状态
+    # Display service status
     check_snell_status
     
     _cyan "═════════════════════════════════════"
-    _bold "$(_yellow "管理选项")"
+    _bold "$(_yellow "Management Options")"
     _cyan "═════════════════════════════════════"
     
-    _green "1) 启动服务" 
-    _red "2) 停止服务"
-    _yellow "3) 重启服务"
-    _cyan "4) 查看详细服务状态"
-    _magenta "5) 查看服务日志"
-    _yellow "6) 修改配置"
-    _red "0) 返回主菜单"
+    _green "1) Start Services" 
+    _red "2) Stop Services"
+    _yellow "3) Restart Services"
+    _cyan "4) View Detailed Service Status"
+    _magenta "5) View Service Logs"
+    _blue_bg "6) Modify Configuration"
+    _red "0) Back to Main Menu"
     echo ""
     
-    read -p "请输入选择 [0-6]: " operation
+    read -p "Please select an option [0-6]: " operation
     
     case $operation in
-        1) run && manage ;;  
-        2) stop && manage ;;
+        1) run && sleep 2 && manage ;;  
+        2) stop && sleep 2 && manage ;;
         3) restart_services ;;
         4) check_service ;; 
-        5) show_snell_log && manage ;;
+        5) show_logs && manage ;;
         6) modify && manage ;; 
         0) menu ;;
-        *) err "无效选择" && sleep 2 && manage ;;
+        *) err "Invalid selection" && sleep 2 && manage ;;
     esac  
 }
 
@@ -724,7 +763,7 @@ create_snell_systemd() {
     # Create snell user if not exists
     if ! id "snell" &>/dev/null; then
         useradd --system --no-create-home --shell /usr/sbin/nologin snell
-        msg info "已创建 snell 系统用户"
+        msg info "Created snell system user"
     fi
     
     # Set proper permissions for snell workspace
@@ -759,36 +798,36 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable snell
-    msg ok "Snell 系统服务已创建."
+    msg ok "Snell systemd service created."
 }
 
-# 显示美化后的主菜单
+# Display beautified main menu
 menu() {  
     clear
     _blue_bg "┌─────────────────────────────────────────┐"
-    _blue_bg "│  $(printf '%-36s' "ShadowTLS + Snell 管理脚本 v${current_version}")  │"
+    _blue_bg "│  $(printf '%-39s' "ShadowTLS + Snell Management v${current_version}")│"
     _blue_bg "└─────────────────────────────────────────┘"
     echo ""
     
-    # 显示服务状态
+    # Display service status
     check_snell_status
     
     _cyan "═════════════════════════════════════"
-    _bold "$(_yellow "主菜单")"
+    _bold "$(_yellow "MAIN MENU")"
     _cyan "═════════════════════════════════════"
     
-    _green "1) 安装"
-    _red "2) 卸载"
-    _yellow "3) 管理"
-    _cyan "4) 修改配置"
-    _magenta "5) 显示配置信息"
-    _green "6) 更新 Snell"
-    _red "0) 退出"
+    _green "1) Install Services"
+    _red "2) Uninstall Services"
+    _yellow "3) Manage Services"
+    _cyan "4) Modify Configuration"
+    _magenta "5) Display Configuration"
+    _blue_bg "6) Update Snell"
+    _red "0) Exit"
     echo ""
     
     echo -e "───────────────────────────────────────"
     
-    read -p "请输入选择 [0-6]: " operation
+    read -p "Please select an option [0-6]: " operation
 
     case $operation in  
         1) install ;;
@@ -797,29 +836,29 @@ menu() {
         4) modify ;;
         5) display_config ;;
         6) update_snell && menu ;;
-        0) echo -e "${green}再见!${reset}" && exit 0 ;;
-        *) err "无效选择" && sleep 2 && menu ;;
+        0) echo -e "${green}Thank you for using this script! Goodbye!${reset}" && exit 0 ;;
+        *) err "Invalid selection" && sleep 2 && menu ;;
     esac
 }
 
-# 新增显示配置信息函数
+# New function to display configuration information
 display_config() {
     clear
     _blue_bg "┌─────────────────────────────────────────┐"
-    _blue_bg "│  $(printf '%-36s' "Snell + ShadowTLS 配置信息")  │"
+    _blue_bg "│  $(printf '%-39s' "Configuration Display")│"
     _blue_bg "└─────────────────────────────────────────┘"
     echo ""
     
     if [[ ! -f "${snell_workspace}/snell-server.conf" ]]; then
-        msg err "Snell未安装或配置文件不存在"
-        read -p "按任意键返回主菜单..." _
+        msg err "Snell not installed or configuration file not found"
+        read -p "Press any key to return to the main menu..." _
         menu
         return
     fi
     
-    # 显示Snell配置
+    # Display Snell configuration
     _cyan "═════════════════════════════════════"
-    _bold "$(_yellow "Snell 配置")"
+    _bold "$(_yellow "Snell Configuration")"
     _cyan "═════════════════════════════════════"
     
     local snell_config=$(cat "${snell_workspace}/snell-server.conf")
@@ -827,14 +866,14 @@ display_config() {
     local snell_psk=$(echo "$snell_config" | grep -oP 'psk = \K.*')
     local snell_ipv6=$(echo "$snell_config" | grep -oP 'ipv6 = \K.*')
     
-    echo -e "${green}监听地址:${reset} $snell_listen"
-    echo -e "${green}PSK密钥:${reset} $snell_psk"
-    echo -e "${green}IPv6支持:${reset} $snell_ipv6"
+    echo -e "${green}Listen Address:${reset} $snell_listen"
+    echo -e "${green}PSK:${reset} $snell_psk"
+    echo -e "${green}IPv6 Support:${reset} $snell_ipv6"
     
-    # 显示ShadowTLS配置（如果存在）
+    # Display ShadowTLS configuration (if exists)
     if systemctl is-active --quiet shadow-tls; then
         _cyan "═════════════════════════════════════"
-        _bold "$(_yellow "ShadowTLS 配置")"
+        _bold "$(_yellow "ShadowTLS Configuration")"
         _cyan "═════════════════════════════════════"
         
         local shadow_tls_config=$(systemctl cat shadow-tls | grep ExecStart)
@@ -843,32 +882,32 @@ display_config() {
         local shadow_tls=$(echo "$shadow_tls_config" | grep -oP '\--tls \K[^ ]+')
         local shadow_password=$(echo "$shadow_tls_config" | grep -oP '\--password \K[^ ]+')
         
-        echo -e "${green}监听地址:${reset} $shadow_listen"
-        echo -e "${green}服务器地址:${reset} $shadow_server"
-        echo -e "${green}TLS域名:${reset} $shadow_tls"
-        echo -e "${green}密码:${reset} $shadow_password"
+        echo -e "${green}Listen Address:${reset} $shadow_listen"
+        echo -e "${green}Server Address:${reset} $shadow_server"
+        echo -e "${green}TLS Domain:${reset} $shadow_tls"
+        echo -e "${green}Password:${reset} $shadow_password"
         
-        # 检查是否启用了wildcard-sni
+        # Check if wildcard-sni is enabled
         if echo "$shadow_tls_config" | grep -q "wildcard-sni"; then
-            echo -e "${green}通配符SNI:${reset} 已启用 (客户端可自定义SNI)"
+            echo -e "${green}Wildcard SNI:${reset} Enabled (Client can customize SNI)"
         else
-            echo -e "${green}通配符SNI:${reset} 未启用"
+            echo -e "${green}Wildcard SNI:${reset} Disabled"
         fi
         
-        # 检查是否启用了strict模式
+        # Check if strict mode is enabled
         if echo "$shadow_tls_config" | grep -q "\--strict"; then
-            echo -e "${green}Strict模式:${reset} 已启用"
+            echo -e "${green}Strict Mode:${reset} Enabled"
         else
-            echo -e "${green}Strict模式:${reset} 未启用"
+            echo -e "${green}Strict Mode:${reset} Disabled"
         fi
     fi
     
-    # 显示客户端配置
+    # Display client configuration
     _cyan "═════════════════════════════════════"
-    _bold "$(_yellow "客户端配置示例")"
+    _bold "$(_yellow "Client Configuration Example")"
     _cyan "═════════════════════════════════════"
     
-    # 获取服务器IP
+    # Get server IP
     local server_ip=$(curl -s4 --connect-timeout 5 https://api.ipify.org)
     if [[ -z "$server_ip" ]]; then
         server_ip=$(curl -s6 --connect-timeout 5 https://api6.ipify.org)
@@ -876,15 +915,15 @@ display_config() {
     
     local port=$(echo "$snell_listen" | grep -oP ':\K\d+$')
     
-    # 客户端配置选项
-    msg info "请为生成的客户端配置选择参数:"
-    read -rp "客户端启用 TFO (TCP Fast Open)? (Y/n): " client_tfo_choice
+    # Client configuration options
+    msg info "Please select options for the client configuration:"
+    read -rp "Enable TFO (TCP Fast Open)? (Y/n): " client_tfo_choice
     local client_tfo_value="true"
     if [[ $client_tfo_choice =~ ^[Nn]$ ]]; then
         client_tfo_value="false"
     fi
 
-    read -rp "客户端启用 Session Reuse? (y/N): " client_reuse_choice
+    read -rp "Enable Session Reuse? (y/N): " client_reuse_choice
     local client_reuse_value="false"
     if [[ $client_reuse_choice =~ ^[Yy]$ ]]; then
         client_reuse_value="true"
@@ -892,135 +931,137 @@ display_config() {
     
     if systemctl is-active --quiet shadow-tls; then
         local shadow_port=$(echo "$shadow_listen" | grep -oP ':\K\d+$')
-        echo -e "${cyan}Surge配置:${reset}"
+        echo -e "${cyan}Surge Configuration:${reset}"
         echo -e "[Proxy]"
         echo -e "Snell = snell, ${server_ip}, ${shadow_port}, psk=${snell_psk}, version=4, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${shadow_password}, shadow-tls-sni=${shadow_tls%%:*}, shadow-tls-version=3"
     else
-        echo -e "${cyan}Surge配置:${reset}"
+        echo -e "${cyan}Surge Configuration:${reset}"
         echo -e "[Proxy]"
         echo -e "Snell = snell, ${server_ip}, ${port}, psk=${snell_psk}, version=4, reuse=${client_reuse_value}, tfo=${client_tfo_value}"
     fi
     
     echo ""
-    _yellow "注意: 请将配置中的服务器地址替换为实际可用的地址"
+    _yellow "Note: Please replace the server address in the configuration with the actual available address"
     
     echo ""
-    read -p "按任意键返回主菜单..." _
+    read -p "Press any key to return to the main menu..." _
     menu
 }
 
-# 检查Snell和ShadowTLS服务状态命令
+# Check Snell and ShadowTLS service status command
 check_service() {
     clear
-    echo -e "${cyan}═════════════════════════════════════${reset}"
-    echo -e "${cyan}          服务状态详细信息           ${reset}"
-    echo -e "${cyan}═════════════════════════════════════${reset}"
+    _blue_bg "┌─────────────────────────────────────────┐"
+    _blue_bg "│  $(printf '%-39s' "Detailed Service Status")│"
+    _blue_bg "└─────────────────────────────────────────┘"
+    echo ""
     
-    echo -e "${yellow}Snell 服务状态:${reset}"
+    echo -e "${yellow}Snell Service Status:${reset}"
     systemctl status snell
     
-    echo -e "\n${yellow}ShadowTLS 服务状态:${reset}"
+    echo -e "\n${yellow}ShadowTLS Service Status:${reset}"
     if systemctl is-active --quiet shadow-tls; then
         systemctl status shadow-tls
     else
-        echo -e "${red}ShadowTLS 未安装或未运行${reset}"
+        echo -e "${red}ShadowTLS is not installed or not running${reset}"
     fi
     
-    echo -e "\n${yellow}端口监听状态:${reset}"
+    echo -e "\n${yellow}Port Listening Status:${reset}"
     ss -tuln | grep -E ':(10000|2000|8388|443)'
     
-    echo -e "\n${yellow}系统资源使用:${reset}"
-    echo -e "${green}CPU和内存使用:${reset}"
+    echo -e "\n${yellow}System Resource Usage:${reset}"
+    echo -e "${green}CPU and Memory Usage:${reset}"
     ps -o pid,ppid,%cpu,%mem,cmd -p $(pgrep -f "snell-server") $(pgrep -f "shadow-tls")
     
-    echo -e "\n${yellow}最近日志:${reset}"
+    echo -e "\n${yellow}Recent Logs:${reset}"
     if [[ -f "/var/log/snell.log" ]]; then
-        echo -e "${green}Snell 日志 (最后10行):${reset}"
+        echo -e "${green}Snell Server Log (Last 10 lines):${reset}"
         tail -n 10 /var/log/snell.log
     fi
     
-    echo -e "\n${green}检查完成!${reset}"
+    echo -e "\n${green}Check completed!${reset}"
     
-    read -p "按任意键返回..." _
+    read -p "Press any key to return..." _
     manage
 }
 
-# 重启服务
+# Restart services
 restart_services() {
     clear
-    echo -e "${cyan}═════════════════════════════════════${reset}"
-    echo -e "${cyan}            重启服务                 ${reset}"
-    echo -e "${cyan}═════════════════════════════════════${reset}"
+    _blue_bg "┌─────────────────────────────────────────┐"
+    _blue_bg "│  $(printf '%-39s' "Restart Services")│"
+    _blue_bg "└─────────────────────────────────────────┘"
+    echo ""
     
-    echo -e "${yellow}正在重启服务...${reset}"
+    echo -e "${yellow}Restarting services...${reset}"
     
-    # 重启Snell
+    # Restart Snell
     if systemctl is-active --quiet snell; then
         systemctl restart snell
         if systemctl is-active --quiet snell; then
-            echo -e "${green}Snell 服务已成功重启${reset}"
+            echo -e "${green}Snell service restarted successfully${reset}"
         else
-            echo -e "${red}Snell 服务重启失败${reset}"
+            echo -e "${red}Snell service restart failed${reset}"
         fi
     else
-        echo -e "${red}Snell 服务未运行${reset}"
+        echo -e "${red}Snell service is not running${reset}"
     fi
     
-    # 重启ShadowTLS
+    # Restart ShadowTLS
     if systemctl is-active --quiet shadow-tls; then
         systemctl restart shadow-tls
         if systemctl is-active --quiet shadow-tls; then
-            echo -e "${green}ShadowTLS 服务已成功重启${reset}"
+            echo -e "${green}ShadowTLS service restarted successfully${reset}"
         else
-            echo -e "${red}ShadowTLS 服务重启失败${reset}"
+            echo -e "${red}ShadowTLS service restart failed${reset}"
         fi
     else
-        echo -e "${yellow}ShadowTLS 服务未安装或未运行${reset}"
+        echo -e "${yellow}ShadowTLS service is not installed or not running${reset}"
     fi
     
     echo -e "${cyan}═════════════════════════════════════${reset}"
     check_snell_status
     
-    read -p "按任意键返回..." _
+    read -p "Press any key to return..." _
     manage
 }
 
 # Update Snell
 update_snell() {
     if [[ ! -f "${snell_workspace}/snell-server" ]]; then
-        msg err "Snell 未安装，无法更新。"
+        msg err "Snell is not installed, cannot update."
         return
     fi
 
-    # 获取当前版本
+    # Get current version
     current_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+')
     if [ -z "$current_version" ]; then
-        msg err "无法获取当前 Snell 版本。"
+        msg err "Failed to get current Snell version."
         return
     fi
-    msg info "当前 Snell 版本: $current_version"
+    msg info "Current Snell version: $current_version"
 
-    # 获取最新版本
+    # Get latest version
     latest_version=$(curl -s https://manual.nssurge.com/others/snell.html | grep -oP 'snell-server-v\K[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
     if [ -z "$latest_version" ]; then
-        msg err "无法获取最新 Snell 版本号。"
+        msg err "Failed to get latest Snell version."
         return
     fi
-    msg info "最新 Snell 版本: $latest_version"
+    msg info "Latest Snell version: $latest_version"
 
     if [[ "$current_version" == "$latest_version" ]]; then
-        msg ok "Snell 已是最新版本。"
+        msg ok "Snell is already up-to-date."
         return
     fi
 
-    msg info "发现新版本 Snell ($latest_version)。"
-    read -rp "是否更新? (y/n): " confirm
+    msg info "New version of Snell found ($latest_version)."
+    read -rp "Update now? (y/n): " confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        msg info "已取消更新。"
+        msg info "Update cancelled."
         return
     fi
 
-    msg info "正在更新 Snell..."
+    msg info "Updating Snell..."
     systemctl stop snell
 
     cd "${snell_workspace}" || exit 1
@@ -1031,13 +1072,13 @@ update_snell() {
     aarch64) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-aarch64.zip" ;;
     armv7l) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-armv7l.zip" ;;
     i386) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-i386.zip" ;;
-    *) msg err "不支持的架构: $arch" && exit 1 ;;
+    *) msg err "Unsupported architecture: $arch" && exit 1 ;;
     esac
 
-    msg info "下载 Snell 版本 ${latest_version}..."
+    msg info "Downloading Snell version ${latest_version}..."
     wget -O snell-server.zip "${snell_url}"
     if [ $? -ne 0 ]; then
-        msg err "下载 Snell 失败。正在重启旧版服务。"
+        msg err "Failed to download Snell. Restarting old version."
         systemctl start snell
         return
     fi
@@ -1053,9 +1094,9 @@ update_snell() {
     sleep 2
     if systemctl is-active --quiet snell; then
         new_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+')
-        msg ok "Snell 更新成功，当前版本: $new_version"
+        msg ok "Snell updated successfully, current version: $new_version"
     else
-        msg err "Snell 更新后启动失败，请检查日志。"
+        msg err "Failed to start Snell after update, please check logs."
     fi
 }
 
