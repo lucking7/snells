@@ -117,6 +117,23 @@ get_ip() {
     fi
 }
 
+# Detect server IP (wrapper for get_ip)
+detect_server_ip() {
+    get_ip
+}
+
+# Check IPv6 support
+check_ipv6_support() {
+    msg info "Checking IPv6 support..."
+    if [[ $ip_type == "both" ]] || [[ $ip_type == "ipv6" ]]; then
+        ipv6_enabled="true"
+        msg ok "IPv6 is supported on this server"
+    else
+        ipv6_enabled="false"
+        msg info "IPv6 is not available on this server"
+    fi
+}
+
 check_preconditions() {
     # Check for root privileges
     [[ $EUID -ne 0 ]] && err "Root privileges are required to run this script."
@@ -177,12 +194,37 @@ create_snell_conf() {
     read -rp "Assign a port for Snell (Leave it blank for a random one): " snell_port
     [[ -z ${snell_port} ]] && snell_port=$(find_unused_port) && echo "[INFO] Assigned a random port for Snell: $snell_port"
     
+    # Determine listen address based on whether Shadow-TLS will be installed
+    local listen_addr
+    if [[ "${install_with_shadow_tls}" == "true" ]]; then
+        # If installing with Shadow-TLS, Snell should listen on localhost only
+        if [[ $ipv6_enabled == "true" ]] && [[ $ip_type == "ipv6" ]]; then
+            listen_addr="[::1]:${snell_port}"
+        else
+            listen_addr="127.0.0.1:${snell_port}"
+        fi
+        msg info "Installing with Shadow-TLS, Snell will listen on localhost: ${listen_addr}"
+    else
+        # If installing Snell only, listen on all interfaces
+        if [[ $ipv6_enabled == "true" ]] && [[ $ip_type != "ipv4" ]]; then
+            listen_addr="::0:${snell_port}"
+        else
+            listen_addr="0.0.0.0:${snell_port}"
+        fi
+    fi
+    
     # Get PSK
     read -rp "Enter PSK for Snell (Leave it blank to generate a random one): " snell_psk
     [[ -z ${snell_psk} ]] && snell_psk=$(generate_random_psk) && echo "[INFO] Generated a random PSK for Snell: $snell_psk"
     
     # Get DNS settings
-    system_dns=$(grep -oP '(?<=nameserver\s)\S+' /etc/resolv.conf | sort -u | tr '\n' ',' | sed 's/,$//')
+    system_dns=$(grep -oP '(?<=nameserver\s)\S+' /etc/resolv.conf | grep -v '^127\.0\.0\.' | sort -u | tr '\n' ',' | sed 's/,$//')
+    
+    # If system DNS is empty or only contains local addresses, try to get real DNS from systemd-resolved
+    if [[ -z "$system_dns" ]] && command -v resolvectl &>/dev/null; then
+        system_dns=$(resolvectl status | grep -oP '(?<=DNS Servers:\s)[\d\.:a-f]+' | tr '\n' ',' | sed 's/,$//')
+    fi
+    
     prompt_dns="Enter custom DNS servers (leave blank for default): "
     if [[ -n "$system_dns" ]]; then
         prompt_dns="Enter custom DNS servers (comma-separated, leave blank for system DNS [${system_dns}]): "
@@ -207,35 +249,6 @@ create_snell_conf() {
         fi
     fi
     dns_config="dns = $final_dns"
-
-    # Ask if listening on localhost only
-    read -rp "Listen on localhost only? (y/n, recommended when using Shadow-TLS): " local_only
-    if [[ $local_only =~ ^[Yy]$ ]]; then
-        if [[ $ip_type == "ipv6" ]]; then
-            listen_addr="[::1]:$snell_port"
-        else
-            listen_addr="127.0.0.1:$snell_port"
-        fi
-        msg info "Configuring Snell to listen on localhost: $listen_addr"
-    else
-        # Configure IPv6 settings
-        if [[ $ip_type == "both" ]]; then
-            read -rp "Enable IPv6 support? (y/n): " enable_ipv6
-            if [[ $enable_ipv6 =~ ^[Yy]$ ]]; then
-                listen_addr="::0:$snell_port"
-                ipv6_enabled="true"
-            else
-                listen_addr="0.0.0.0:$snell_port"
-                ipv6_enabled="false"
-            fi
-        elif [[ $ip_type == "ipv6" ]]; then
-            listen_addr="::0:$snell_port"
-            ipv6_enabled="true"
-        else
-            listen_addr="0.0.0.0:$snell_port"
-            ipv6_enabled="false"
-        fi
-    fi
 
     # Write the configuration file
     cat > "${snell_workspace}/snell-server.conf" << EOF
@@ -390,154 +403,163 @@ config_shadow_tls() {
         client_reuse_value="true"
     fi
 
-    echo -e "${colo} = snell, ${server_ip}, ${shadow_tls_port}, psk=${client_snell_psk}, version=4, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${shadow_tls_password}, shadow-tls-sni=${shadow_tls_tls_domain}, shadow-tls-version=3"
+    # Get Snell version
+    local snell_version_num="4"
+    if [[ -f "${snell_workspace}/snell-server" ]]; then
+        local installed_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+')
+        if [[ "$installed_version" == "5" ]]; then
+            snell_version_num="5"
+        fi
+    fi
+
+    echo -e "${colo} = snell, ${server_ip}, ${shadow_tls_port}, psk=${client_snell_psk}, version=${snell_version_num}, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${shadow_tls_password}, shadow-tls-sni=${shadow_tls_tls_domain}, shadow-tls-version=3"
     msg ok "Shadow-TLS configuration completed."
 }
 
-# Install Snell and Shadow-TLS
-install() {
-    clear
-    _blue_bg "┌─────────────────────────────────────────┐"
-    _blue_bg "│  $(printf '%-39s' "Installation Options")│"
-    _blue_bg "└─────────────────────────────────────────┘"
-    echo ""
-    
-    _green "1) Install Snell and Shadow-TLS"
-    _yellow "2) Install Snell Only"
-    _cyan "3) Install Shadow-TLS Only"
-    _red "0) Back to Main Menu"
-    echo ""
-    
-    read -p "Please select an option [0-3]: " option
-
-    case $option in
-        1) install_all ;;
-        2) install_snell ;;
-        3) install_shadow_tls ;;
-        0) menu ;;
-        *) err "Invalid option" && sleep 2 && install ;;
-    esac
-}
-
-# Install both Snell and Shadow-TLS
-install_all() {
-    if [[ -e "${snell_workspace}/snell-server" ]] || [[ -e "/usr/local/bin/shadow-tls" ]]; then
-        read -rp "Snell or Shadow-TLS is already installed. Reinstall? (y/n): " input
-        case "$input" in
-            y|Y) uninstall_all ;;
-            *) return 0 ;;
-        esac
-    fi
-
-    # Detect IP only once
-    get_ip
-    
-    # Install Snell (no longer detect IP in install_snell)
-    install_snell_without_ip
-    
-    # Install Shadow-TLS (no longer detect IP in install_shadow_tls)
-    install_shadow_tls_without_ip
-    
-    # Start services
-    run
-    msg ok "Snell and Shadow-TLS ${latest_version} deployment successful."
-}
-
-# Install Snell only without IP detection
+# Install Snell without IP detection (core installation function)
 install_snell_without_ip() {
     install_pkg
-
-    msg info "Downloading Snell..."
+    
+    # Ask for Snell version
+    msg info "Choose Snell version to install:"
+    echo -e "${green}1) Snell v4 (Stable)${reset}"
+    echo -e "${yellow}2) Snell v5 (Beta)${reset}"
+    read -rp "Select version [1-2] (default: 1): " version_choice
+    
+    local snell_version=""
+    local is_beta=false
+    
+    case ${version_choice:-1} in
+        1)
+            # Get latest v4 version from official page
+            snell_version=$(curl -s https://manual.nssurge.com/others/snell.html | grep -oP 'snell-server-v\K[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+            if [[ -z "$snell_version" ]]; then
+                msg err "Failed to get latest Snell v4 version"
+                return 1
+            fi
+            msg info "Installing Snell v${snell_version} (Stable)"
+            ;;
+        2)
+            snell_version="5.0.0b1"
+            is_beta=true
+            msg info "Installing Snell v${snell_version} (Beta)"
+            ;;
+        *)
+            msg err "Invalid selection"
+            return 1
+            ;;
+    esac
+    
     mkdir -p "${snell_workspace}"
     cd "${snell_workspace}" || exit 1
     
-    # Get latest Snell version
-    latest_version=$(curl -s https://manual.nssurge.com/others/snell.html | grep -oP 'snell-server-v\K[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
-    if [ -z "$latest_version" ]; then
-        latest_version="4.1.1"  # Fallback version
-        msg warn "Failed to get latest version, using fallback version ${latest_version}"
-    fi
-    
+    # Download Snell based on architecture and version
     arch=$(uname -m)
     case $arch in
-    x86_64) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-amd64.zip" ;;
-    aarch64) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-aarch64.zip" ;;
-    armv7l) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-armv7l.zip" ;;
-    i386) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-i386.zip" ;;
-    *) msg err "Unsupported architecture: $arch" && exit 1 ;;
+        x86_64) snell_url="https://dl.nssurge.com/snell/snell-server-v${snell_version}-linux-amd64.zip" ;;
+        aarch64) snell_url="https://dl.nssurge.com/snell/snell-server-v${snell_version}-linux-aarch64.zip" ;;
+        armv7l) snell_url="https://dl.nssurge.com/snell/snell-server-v${snell_version}-linux-armv7l.zip" ;;
+        i386) snell_url="https://dl.nssurge.com/snell/snell-server-v${snell_version}-linux-i386.zip" ;;
+        *) msg err "Unsupported architecture: $arch" && exit 1 ;;
     esac
-
-    msg info "Downloading Snell version ${latest_version}..."
+    
+    msg info "Downloading Snell from: ${snell_url}"
     wget -O snell-server.zip "${snell_url}"
+    
+    if [ $? -ne 0 ]; then
+        msg err "Failed to download Snell. Please check your network connection."
+        return 1
+    fi
+    
     unzip -o snell-server.zip
     rm snell-server.zip
     chmod +x snell-server
     
-    # Ensure snell user can execute the binary
-    chown snell:snell snell-server
-
-    create_snell_systemd
-    create_snell_conf
-    
-    # Check if service started successfully
-    if systemctl is-active --quiet snell; then
-        _green "Snell service started successfully!"
-        echo -e "${cyan}Configuration information: ${reset}"
-        echo -e "Server: ${server_ip}"
-        echo -e "Port: ${snell_port}"
-        echo -e "PSK: ${snell_psk}"
-        echo -e "Version: 4"
-        echo ""
-
-        # Client configuration options
-        msg info "Please select options for the client configuration:"
-        read -rp "Enable TFO (TCP Fast Open)? (Y/n): " client_tfo_choice
-        local client_tfo_value="true"
-        if [[ $client_tfo_choice =~ ^[Nn]$ ]]; then
-            client_tfo_value="false"
-        fi
-
-        read -rp "Enable Session Reuse? (y/N): " client_reuse_choice
-        local client_reuse_value="false"
-        if [[ $client_reuse_choice =~ ^[Yy]$ ]]; then
-            client_reuse_value="true"
-        fi
-
-        echo -e "${cyan}Surge configuration example: ${reset}"
-        echo -e "${colo} = snell, ${server_ip}, ${snell_port}, psk=${snell_psk}, version=4, reuse=${client_reuse_value}, tfo=${client_tfo_value}"
+    # Verify installation
+    if [[ -f snell-server ]]; then
+        local installed_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+\.[0-9]+(\.[0-9]+)?')
+        msg ok "Snell server binary installed successfully (version: ${installed_version})"
     else
-        _red "Snell service failed to start, please check configuration or run the following commands to view logs:"
-        echo -e "${yellow}systemctl status snell${reset}"
-        echo -e "${yellow}journalctl -u snell -n 50${reset}"
+        msg err "Failed to install Snell server binary"
+        return 1
     fi
     
-    msg ok "Snell installation complete!"
+    # Create configuration
+    create_snell_conf
+    
+    # Create systemd service
+    create_snell_systemd
+    
+    # Start service
+    systemctl start snell
+    sleep 2
+    
+    if systemctl is-active --quiet snell; then
+        msg ok "Snell service started successfully"
+    else
+        msg err "Failed to start Snell service, please check logs with: journalctl -u snell"
+    fi
 }
 
-# Install Snell only
-install_snell() {
-    # Detect IP
-    get_ip
+# Install Snell and Shadow-TLS
+install_snell_and_shadow_tls() {
+    msg info "Installing Snell and Shadow-TLS..."
+    
+    # Detect IP and check IPv6
+    detect_server_ip
+    check_ipv6_support
+    
+    # Set flag for create_snell_conf
+    install_with_shadow_tls="true"
     
     # Install Snell
     install_snell_without_ip
     
-    # Ask if installing ShadowTLS
-    read -rp "Do you want to install ShadowTLS for enhanced security? (y/n): " install_shadow
-    if [[ "$install_shadow" =~ ^[Yy]$ ]]; then
-        install_shadow_tls_without_ip
-    else
-        echo -e "${yellow}You can install ShadowTLS later through the main menu${reset}"
-    fi
+    # Install Shadow-TLS
+    install_shadow_tls_without_ip
+}
+
+# Install Snell only with IP detection
+install_snell() {
+    msg info "Installing Snell..."
     
-    # Return to menu
-    read -p "Press any key to return to the main menu..." _
-    menu
+    # Detect IP and check IPv6
+    detect_server_ip
+    check_ipv6_support
+    
+    # Set flag for create_snell_conf
+    install_with_shadow_tls="false"
+    
+    # Install Snell
+    install_snell_without_ip
 }
 
 # Install Shadow-TLS only without IP detection
 install_shadow_tls_without_ip() {
     install_pkg
+
+    # Check if Snell is installed and get its configuration
+    local need_update_snell=false
+    local current_snell_port=""
+    local current_snell_listen=""
+    
+    if [[ -f "${snell_workspace}/snell-server.conf" ]]; then
+        current_snell_listen=$(grep -oP 'listen = \K.*' "${snell_workspace}/snell-server.conf")
+        current_snell_port=$(echo "$current_snell_listen" | grep -oP ':\K\d+$')
+        
+        # Check if Snell is listening on public interface
+        if [[ "$current_snell_listen" =~ ^(0\.0\.0\.0|::0): ]]; then
+            msg warn "Detected Snell is listening on public interface"
+            msg info "When using Shadow-TLS, Snell should listen on localhost only"
+            read -rp "Update Snell to listen on localhost only? (Y/n): " update_choice
+            if [[ ! "$update_choice" =~ ^[Nn]$ ]]; then
+                need_update_snell=true
+            fi
+        fi
+    else
+        msg err "Snell is not installed. Please install Snell first."
+        return
+    fi
 
     msg info "Downloading Shadow-TLS..."
     mkdir -p "${shadow_tls_workspace}"
@@ -557,6 +579,47 @@ install_shadow_tls_without_ip() {
     chmod +x shadow-tls
     mv shadow-tls /usr/local/bin/
 
+    # Update Snell configuration if needed
+    if [[ "$need_update_snell" == true ]]; then
+        msg info "Updating Snell configuration to listen on localhost..."
+        
+        # Stop Snell service
+        systemctl stop snell
+        
+        # Update Snell configuration
+        local new_listen_addr
+        if [[ $ip_type == "ipv6" ]]; then
+            new_listen_addr="[::1]:${current_snell_port}"
+        else
+            new_listen_addr="127.0.0.1:${current_snell_port}"
+        fi
+        
+        # Backup current configuration
+        cp "${snell_workspace}/snell-server.conf" "${snell_workspace}/snell-server.conf.bak"
+        
+        # Update listen address
+        sed -i "s/^listen = .*/listen = ${new_listen_addr}/" "${snell_workspace}/snell-server.conf"
+        
+        msg ok "Snell configuration updated to listen on: ${new_listen_addr}"
+        
+        # Restart Snell
+        systemctl start snell
+        sleep 2
+        
+        if systemctl is-active --quiet snell; then
+            msg ok "Snell service restarted successfully"
+        else
+            msg err "Failed to restart Snell service"
+            msg info "Restoring original configuration..."
+            mv "${snell_workspace}/snell-server.conf.bak" "${snell_workspace}/snell-server.conf"
+            systemctl start snell
+            return
+        fi
+    fi
+
+    # Set snell_port for Shadow-TLS configuration
+    snell_port="${current_snell_port}"
+    
     config_shadow_tls
     create_shadow_tls_systemd
 }
@@ -568,6 +631,31 @@ install_shadow_tls() {
     
     # Install Shadow-TLS
     install_shadow_tls_without_ip
+}
+
+# Install menu
+install() {
+    clear
+    _blue_bg "┌─────────────────────────────────────────┐"
+    _blue_bg "│  $(printf '%-39s' "Installation Options")│"
+    _blue_bg "└─────────────────────────────────────────┘"
+    echo ""
+    
+    _green "1) Install Snell Only"
+    _yellow "2) Install Snell + Shadow-TLS"
+    _cyan "3) Install Shadow-TLS Only (Snell must be installed)"
+    _red "0) Back to Main Menu"
+    echo ""
+    
+    read -p "Please select an option [0-3]: " option
+    
+    case $option in
+        1) install_snell ;;
+        2) install_snell_and_shadow_tls ;;
+        3) install_shadow_tls ;;
+        0) menu ;;
+        *) err "Invalid option" && sleep 2 && install ;;
+    esac
 }
 
 # Uninstall Snell and Shadow-TLS
@@ -870,6 +958,18 @@ display_config() {
     echo -e "${green}PSK:${reset} $snell_psk"
     echo -e "${green}IPv6 Support:${reset} $snell_ipv6"
     
+    # Get Snell version
+    local snell_version_num="4"
+    if [[ -f "${snell_workspace}/snell-server" ]]; then
+        local installed_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+')
+        if [[ "$installed_version" == "5" ]]; then
+            snell_version_num="5"
+            echo -e "${green}Version:${reset} Snell v5 (Beta)"
+        else
+            echo -e "${green}Version:${reset} Snell v4"
+        fi
+    fi
+    
     # Display ShadowTLS configuration (if exists)
     if systemctl is-active --quiet shadow-tls; then
         _cyan "═════════════════════════════════════"
@@ -933,11 +1033,11 @@ display_config() {
         local shadow_port=$(echo "$shadow_listen" | grep -oP ':\K\d+$')
         echo -e "${cyan}Surge Configuration:${reset}"
         echo -e "[Proxy]"
-        echo -e "Snell = snell, ${server_ip}, ${shadow_port}, psk=${snell_psk}, version=4, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${shadow_password}, shadow-tls-sni=${shadow_tls%%:*}, shadow-tls-version=3"
+        echo -e "Snell = snell, ${server_ip}, ${shadow_port}, psk=${snell_psk}, version=${snell_version_num}, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${shadow_password}, shadow-tls-sni=${shadow_tls%%:*}, shadow-tls-version=3"
     else
         echo -e "${cyan}Surge Configuration:${reset}"
         echo -e "[Proxy]"
-        echo -e "Snell = snell, ${server_ip}, ${port}, psk=${snell_psk}, version=4, reuse=${client_reuse_value}, tfo=${client_tfo_value}"
+        echo -e "Snell = snell, ${server_ip}, ${port}, psk=${snell_psk}, version=${snell_version_num}, reuse=${client_reuse_value}, tfo=${client_tfo_value}"
     fi
     
     echo ""
@@ -1034,28 +1134,47 @@ update_snell() {
     fi
 
     # Get current version
-    current_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+')
+    current_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+\.[0-9]+(\.[0-9]+[a-zA-Z0-9]*)?')
     if [ -z "$current_version" ]; then
         msg err "Failed to get current Snell version."
         return
     fi
     msg info "Current Snell version: $current_version"
 
-    # Get latest version
-    latest_version=$(curl -s https://manual.nssurge.com/others/snell.html | grep -oP 'snell-server-v\K[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
-    if [ -z "$latest_version" ]; then
-        msg err "Failed to get latest Snell version."
+    # Ask which version to update to
+    msg info "Choose version to update to:"
+    echo -e "${green}1) Latest Snell v4 (Stable)${reset}"
+    echo -e "${yellow}2) Snell v5 Beta (v5.0.0b1)${reset}"
+    read -rp "Select version [1-2]: " update_choice
+
+    local target_version=""
+    case $update_choice in
+        1)
+            # Get latest v4 version
+            target_version=$(curl -s https://manual.nssurge.com/others/snell.html | grep -oP 'snell-server-v\K[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+            if [ -z "$target_version" ]; then
+                msg err "Failed to get latest Snell v4 version."
+                return
+            fi
+            msg info "Latest Snell v4 version: $target_version"
+            ;;
+        2)
+            target_version="5.0.0b1"
+            msg info "Target Snell v5 Beta version: $target_version"
+            ;;
+        *)
+            msg err "Invalid selection"
+            return
+            ;;
+    esac
+
+    if [[ "$current_version" == "$target_version" ]]; then
+        msg ok "Snell is already at version $target_version."
         return
     fi
-    msg info "Latest Snell version: $latest_version"
 
-    if [[ "$current_version" == "$latest_version" ]]; then
-        msg ok "Snell is already up-to-date."
-        return
-    fi
-
-    msg info "New version of Snell found ($latest_version)."
-    read -rp "Update now? (y/n): " confirm
+    msg info "Will update from v$current_version to v$target_version"
+    read -rp "Continue? (y/n): " confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         msg info "Update cancelled."
         return
@@ -1068,14 +1187,14 @@ update_snell() {
     
     arch=$(uname -m)
     case $arch in
-    x86_64) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-amd64.zip" ;;
-    aarch64) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-aarch64.zip" ;;
-    armv7l) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-armv7l.zip" ;;
-    i386) snell_url="https://dl.nssurge.com/snell/snell-server-v${latest_version}-linux-i386.zip" ;;
+    x86_64) snell_url="https://dl.nssurge.com/snell/snell-server-v${target_version}-linux-amd64.zip" ;;
+    aarch64) snell_url="https://dl.nssurge.com/snell/snell-server-v${target_version}-linux-aarch64.zip" ;;
+    armv7l) snell_url="https://dl.nssurge.com/snell/snell-server-v${target_version}-linux-armv7l.zip" ;;
+    i386) snell_url="https://dl.nssurge.com/snell/snell-server-v${target_version}-linux-i386.zip" ;;
     *) msg err "Unsupported architecture: $arch" && exit 1 ;;
     esac
 
-    msg info "Downloading Snell version ${latest_version}..."
+    msg info "Downloading Snell version ${target_version}..."
     wget -O snell-server.zip "${snell_url}"
     if [ $? -ne 0 ]; then
         msg err "Failed to download Snell. Restarting old version."
@@ -1093,7 +1212,7 @@ update_snell() {
     systemctl start snell
     sleep 2
     if systemctl is-active --quiet snell; then
-        new_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+')
+        new_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+\.[0-9]+(\.[0-9]+[a-zA-Z0-9]*)?')
         msg ok "Snell updated successfully, current version: $new_version"
     else
         msg err "Failed to start Snell after update, please check logs."
