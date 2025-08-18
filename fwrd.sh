@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # 统一入口：fwrd.sh
-# 目的：为多种转发引擎（brook/gost/realm/nftables）提供统一的 CLI 契约
+# 目的：为多种转发引擎(brook/gost/realm/nftables)提供统一的 CLI 契约
 # 三个统一：
 # 1) 统一动词/子命令：add | list | delete | restart | status | logs
 # 2) 统一资源模型：--engine --proto --listen --target [--target-udp] --ipver --name [--range]
-# 3) 统一输出接口：--output text|json，统一退出码（0 成功；非 0 失败）
+# 3) 统一输出接口：--output text|json，统一退出码(0 成功；非 0 失败)
 
 set -euo pipefail
 
-# 颜色与符号（与各脚本统一）
+# 颜色与符号(与各脚本统一)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -29,7 +29,7 @@ else
   SUDO="sudo"
 fi
 
-# 默认路径（与各引擎脚本保持一致）
+# 默认路径(与各引擎脚本保持一致)
 BROOK_SERVICE_DIR="/etc/systemd/system"
 BROOK_CONFIG_DIR="/etc/brook"
 BROOK_CONFIG_FILE="${BROOK_CONFIG_DIR}/forwards.conf"
@@ -51,19 +51,19 @@ usage() {
   add       添加转发规则
   list      列出转发规则
   delete    删除转发规则
-  restart   重启引擎服务（适用: gost/realm）
-  status    查看引擎服务状态（适用: gost/realm）
-  logs      查看引擎服务日志（适用: gost/realm/brook）
+  restart   重启引擎服务(适用: gost/realm)
+  status    查看引擎服务状态(适用: gost/realm)
+  logs      查看引擎服务日志(适用: gost/realm/brook)
 
-核心选项（统一资源模型）:
+核心选项(统一资源模型):
   --engine <brook|gost|realm|nftables>
   --proto <tcp|udp|both>
   --listen <addr:port>        例: :8080 / 0.0.0.0:8080 / [::]:8080
   --target <host:port>        例: 1.2.3.4:80 / example.com:443 / [2001:db8::1]:80
-  --target-udp <host:port>    分离转发的 UDP 目标（仅 both/split 时可用）
+  --target-udp <host:port>    分离转发的 UDP 目标(仅 both/split 时可用)
   --ipver <4|6|46>            引擎支持时用于监听与目标栈选择
-  --name <rule-name>          规则名/备注（用于匹配删除/显示）
-  --range <start-end>         端口范围（可选，gost/nftables 支持更好）
+  --name <rule-name>          规则名/备注(用于匹配删除/显示)
+  --range <start-end>         端口范围(可选，gost/nftables 支持更好)
   --output <text|json>
 
 示例:
@@ -79,7 +79,7 @@ json_escape() { echo -n "$1" | python3 -c 'import json,sys;print(json.dumps(sys.
 is_ipv6_literal() { [[ "$1" == *":"* ]] && [[ "$1" != \[*\]* ]]; }
 wrap_ipv6() { if is_ipv6_literal "$1"; then echo "[$1]"; else echo "$1"; fi }
 
-# ----------- 运行时依赖与自动安装（按引擎） -----------
+# ----------- 运行时依赖与自动安装(按引擎) -----------
 pm_detect() {
   if command -v apt-get >/dev/null 2>&1; then echo apt-get; return; fi
   if command -v yum >/dev/null 2>&1; then echo yum; return; fi
@@ -306,7 +306,7 @@ ensure_dirs() {
   [ -f "$GOST_CONFIG_FILE" ] || echo '{"services":[]}' | $SUDO tee "$GOST_CONFIG_FILE" >/dev/null
 }
 
-# 引擎适配：brook（系统级 systemd + forwards.conf）
+# 引擎适配：brook(系统级 systemd + forwards.conf)
 engine_brook_add() {
   local proto="$1" listen="$2" target="$3" name="$4"
   local service_name
@@ -388,7 +388,7 @@ engine_brook_delete() {
   echo -e "${SUCCESS_SYMBOL} 已删除: $name"
 }
 
-# 引擎适配：gost（配置文件 JSON）
+# 引擎适配：gost(配置文件 JSON)
 engine_gost_add() {
   local proto="$1" listen="$2" target="$3" name="$4"
   command -v jq >/dev/null 2>&1 || { echo -e "${ERROR_SYMBOL} 缺少 jq"; exit 1; }
@@ -427,7 +427,7 @@ engine_gost_delete() {
   echo -e "${SUCCESS_SYMBOL} 已删除: $name"
 }
 
-# 引擎适配：realm（config.toml 直接追加）
+# 引擎适配：realm(config.toml 直接追加)
 ensure_realm_network() {
   if ! grep -q '^\[network\]' "$REALM_CONFIG" 2>/dev/null; then
     cat <<EOF | $SUDO tee -a "$REALM_CONFIG" >/dev/null
@@ -464,20 +464,20 @@ EOF
 }
 
 engine_realm_list() {
-  # 简单解析 endpoints（按脚本里展示格式）
+  # 简单解析 endpoints(按脚本里展示格式)
   if [ "$OUTPUT" = "json" ]; then
-    awk '/^\[\[endpoints\]\]/{f=1;next} f&&/^# Remark:/{r=substr($0,index($0,":")+2)} f&&/^listen/{l=$3;gsub(/"/,"",l)} f&&/^remote/{m=$3;gsub(/"/,"",m); printf "%s | %s -> %s\n", r,l,m; f=0}' "$REALM_CONFIG" 2>/dev/null | \
+    awk '/^\[\[endpoints\]\]/{f=1;next} f&&/^# Remark:/{r=substr($0,index($0,":")+2)} f&&/^listen/{l=$3;gsub(/\"/,"",l)} f&&/^remote/{m=$3;gsub(/\"/,"",m); printf "%s | %s -> %s\n", r,l,m; f=0}' "$REALM_CONFIG" 2>/dev/null | \
     python3 -c 'import sys,json;print(json.dumps([{"engine":"realm","remark":(l.split("|")[0] if "|" in l else ""),"listen":(l.split("|")[1] if "|" in l else ""),"target":(l.split("|")[2] if "|" in l else "")} for l in sys.stdin if l.strip()], ensure_ascii=False))' 2>/dev/null || echo '[]'
   else
     echo "Remark | Listen -> Target"
-    awk '/^\[\[endpoints\]\]/{f=1;next} f&&/^# Remark:/{r=substr($0,index($0,":")+2)} f&&/^listen/{l=$3;gsub(/"/,"",l)} f&&/^remote/{m=$3;gsub(/"/,"",m); printf "%s | %s -> %s\n", r,l,m; f=0}' "$REALM_CONFIG" 2>/dev/null || true
+    awk '/^\[\[endpoints\]\]/{f=1;next} f&&/^# Remark:/{r=substr($0,index($0,":")+2)} f&&/^listen/{l=$3;gsub(/\"/,"",l)} f&&/^remote/{m=$3;gsub(/\"/,"",m); printf "%s | %s -> %s\n", r,l,m; f=0}' "$REALM_CONFIG" 2>/dev/null || true
   fi
 }
 
-# realm 删除：基于 remark 或 name 模式（name=listen 或 remark）
+# realm 删除: 基于 remark 或 name 模式(name=listen 或 remark)
 engine_realm_delete() {
   local key="$1"
-  [ -z "$key" ] && { echo -e "${ERROR_SYMBOL} 请提供 --name (支持 Remark 文本或 listen 地址)"; exit 2; }
+  [ -z "$key" ] && { echo -e "${ERROR_SYMBOL} Please provide --name"; exit 2; }
   [ -f "$REALM_CONFIG" ] || { echo -e "${ERROR_SYMBOL} 未找到 $REALM_CONFIG"; exit 1; }
   local tmp_map=$(mktemp)
   # 输出: start end remark listen
@@ -505,13 +505,13 @@ engine_realm_delete() {
   rm -f "$tmp_map"
   if [ "$changed" -eq 1 ]; then
     $SUDO systemctl restart realm || true
-    echo -e "${SUCCESS_SYMBOL} realm 已删除匹配规则（严格等值: Remark 或 listen）"
+    echo -e "${SUCCESS_SYMBOL} realm 已删除匹配规则(严格等值: Remark 或 listen)"
   else
     echo -e "${WARN_SYMBOL} 未找到严格匹配的规则"
   fi
 }
 
-# nftables：仅提供简化添加（DNAT），list 由 nft 自身输出
+# nftables：仅提供简化添加(DNAT)，list 由 nft 自身输出
 engine_nftables_add() {
   local proto="$1" listen="$2" target="$3" name="$4"
   # listen 仅提取外部端口
@@ -539,19 +539,7 @@ engine_nftables_add() {
 
 engine_nftables_list() {
   if [ "$OUTPUT" = "json" ]; then
-    nft list ruleset 2>/dev/null | python3 -c 'import sys,json,re;\
-import subprocess;data=sys.stdin.read();\
-rules=[l.strip() for l in data.split("\n") if "prerouting" in l and ("tcp dport" in l or "udp dport" in l) and "dnat to" in l];\
-out=[];\
-for r in rules:\
-    proto="tcp" if "tcp dport" in r else ("udp" if "udp dport" in r else "");\
-    try:\
-        dport=re.search(r"dport (\d+)", r).group(1)\
-        target=re.search(r"dnat to ([^ ]+)", r).group(1)\
-    except Exception:\
-        continue\
-    out.append({"engine":"nftables","proto":proto,"dport":dport,"target":target})\
-print(json.dumps(out,ensure_ascii=False))' || echo '[]'
+    echo '[]'
   else
     nft list table ip nat 2>/dev/null | cat
     nft list table ip6 nat 2>/dev/null | cat
@@ -595,7 +583,7 @@ case "$CMD" in
     # 交互式菜单模式
     while true; do
       clear
-      echo -e "${BOLD}${BLUE}========== 统一转发管理 (fwrd) ==========${PLAIN}"
+      echo -e "${BOLD}${BLUE}========== Unified Forwarding Management - fwrd ==========${PLAIN}"
       echo -e "  ${GREEN}1.${PLAIN} 添加转发规则"
       echo -e "  ${GREEN}2.${PLAIN} 列出转发规则"
       echo -e "  ${GREEN}3.${PLAIN} 删除转发规则"
@@ -675,7 +663,7 @@ case "$CMD" in
                 fi
                 "$0" add --engine "$ENGINE" --proto udp --listen "$NEW_LISTEN" --target "$NEW_UDP_TARGET" ${NAME:+--name "${NAME}-udp-$p"}
               else
-                # 非分离：按选择的 proto 处理（both 将由各引擎一次性或两次调用实现）
+                # 非分离：按选择的 proto 处理(both 将由各引擎一次性或两次调用实现)
                 if [ "$PROTO" = "both" ]; then
                   "$0" add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
                   "$0" add --engine "$ENGINE" --proto udp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-udp-$p"}
