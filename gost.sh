@@ -56,11 +56,11 @@ SERVICE_DIR="/etc/systemd/system"
 CONFIG_DIR="./gost_config"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 
-# Symbols for messages
-SUCCESS_SYMBOL="[+]"
-ERROR_SYMBOL="[x]"
-INFO_SYMBOL="[i]"
-WARN_SYMBOL="[!]"
+# 统一符号（与其他脚本一致风格）
+SUCCESS_SYMBOL="${BOLD}${GREEN}[+]${PLAIN}"
+ERROR_SYMBOL="${BOLD}${RED}[x]${PLAIN}"
+INFO_SYMBOL="${BOLD}${BLUE}[i]${PLAIN}"
+WARN_SYMBOL="${BOLD}${YELLOW}[!]${PLAIN}"
 
 # Function to check and install essential dependencies and gost
 check_and_install_dependencies_and_gost() {
@@ -296,30 +296,57 @@ add_forward_to_config() {
 
   ensure_config_dir
   local temp_file=$(mktemp)
+  # 判断是否传入的是 JSON 数组（用于端口范围多目标场景）
+  local is_nodes_array=false
+  if [[ "$node0_addr_str" == \[* ]]; then
+    is_nodes_array=true
+  fi
 
-  if [ "$proto" = "tcp-udp" ]; then # This case is for option 3 (Both TCP & UDP to SAME single target)
+  if [ "$proto" = "tcp-udp" ]; then # Both TCP & UDP to SAME target(s)
     # name_arg is base name like "forward-localport-to-targetport"
     local tcp_service_name="${name_arg}-tcp"
     local udp_service_name="${name_arg}-udp"
 
-    jq --arg tcp_name "$tcp_service_name" \
-       --arg udp_name "$udp_service_name" \
-       --arg common_addr "$listen_addr" \
-       --arg node0_addr "$node0_addr_str" \
-       '.services += [
-         {name: $tcp_name, addr: $common_addr, handler: {type: "tcp"}, listener: {type: "tcp"}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}] }},
-         {name: $udp_name, addr: $common_addr, handler: {type: "udp"}, listener: {type: "udp"}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}] }}
-       ]' "$CONFIG_FILE" > "$temp_file"
+    if $is_nodes_array; then
+      # 端口范围：传入的第三参是一个 JSON 数组 → 整体设置 forwarder.nodes
+      jq --arg tcp_name "$tcp_service_name" \
+         --arg udp_name "$udp_service_name" \
+         --arg common_addr "$listen_addr" \
+         --argjson nodes "$node0_addr_str" \
+         '.services += [
+           {name: $tcp_name, addr: $common_addr, handler: {type: "tcp"}, listener: {type: "tcp"}, forwarder: {nodes: $nodes}},
+           {name: $udp_name, addr: $common_addr, handler: {type: "udp"}, listener: {type: "udp"}, forwarder: {nodes: $nodes}}
+         ]' "$CONFIG_FILE" > "$temp_file"
+    else
+      # 单目标：仅设置 nodes[0].addr
+      jq --arg tcp_name "$tcp_service_name" \
+         --arg udp_name "$udp_service_name" \
+         --arg common_addr "$listen_addr" \
+         --arg node0_addr "$node0_addr_str" \
+         '.services += [
+           {name: $tcp_name, addr: $common_addr, handler: {type: "tcp"}, listener: {type: "tcp"}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}]}},
+           {name: $udp_name, addr: $common_addr, handler: {type: "udp"}, listener: {type: "udp"}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}]}}
+         ]' "$CONFIG_FILE" > "$temp_file"
+    fi
   else 
     # This path is for single protocol services (proto is "tcp" or "udp").
     # This includes Option 1, Option 2, and each leg of Option 4 (Split TCP/UDP).
     # name_arg is already the final, suffixed service name (e.g., "forward-...-tcp").
-    jq --arg service_name "$name_arg" \
-       --arg service_addr "$listen_addr" \
-       --arg service_proto "$proto" \
-       --arg node0_addr "$node0_addr_str" \
-       '.services += [{name: $service_name, addr: $service_addr, handler: {type: $service_proto}, listener: {type: $service_proto}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}] }}]' \
-       "$CONFIG_FILE" > "$temp_file"
+    if $is_nodes_array; then
+      jq --arg service_name "$name_arg" \
+         --arg service_addr "$listen_addr" \
+         --arg service_proto "$proto" \
+         --argjson nodes "$node0_addr_str" \
+         '.services += [{name: $service_name, addr: $service_addr, handler: {type: $service_proto}, listener: {type: $service_proto}, forwarder: {nodes: $nodes} }]' \
+         "$CONFIG_FILE" > "$temp_file"
+    else
+      jq --arg service_name "$name_arg" \
+         --arg service_addr "$listen_addr" \
+         --arg service_proto "$proto" \
+         --arg node0_addr "$node0_addr_str" \
+         '.services += [{name: $service_name, addr: $service_addr, handler: {type: $service_proto}, listener: {type: $service_proto}, forwarder: {nodes: [{name: "target-0", addr: $node0_addr}] }}]' \
+         "$CONFIG_FILE" > "$temp_file"
+    fi
   fi
   
   local jq_exit_code=$?
@@ -1318,31 +1345,30 @@ check_gost_status() {
 
 main_menu() {
   while true; do
-    # clear # Consider making clear optional or less frequent
     get_ip_info
-    printf "${BOLD}${BLUE}==================== Gost Port Forwarding Management ====================${PLAIN}\n"
-    printf "  ${CYAN}IPv4: ${WHITE}%s ${YELLOW}(%s)${PLAIN}\n" "$IPV4" "$COUNTRY_V4"
-    printf "  ${CYAN}IPv6: ${WHITE}%s ${YELLOW}(%s)${PLAIN}\n" "$IPV6" "$COUNTRY_V6"
-    printf "${BOLD}${BLUE}=========================================================================${PLAIN}\n"
-    printf "${GREEN}1.${PLAIN} Create Single Port Forwarding\n"
-    printf "${GREEN}2.${PLAIN} Create Port Range Forwarding\n"
-    printf "${GREEN}3.${PLAIN} Manage Forwarding Services\n"
-    printf "${GREEN}4.${PLAIN} Configuration File Management\n"
-    printf "${GREEN}5.${PLAIN} Clean Up Old Systemd Services\n"
-    printf "${GREEN}6.${PLAIN} Exit\n"
-    printf "${BOLD}${BLUE}=========================================================================${PLAIN}\n"
-    read -p "$(printf "${YELLOW}Please select [1-6]: ${PLAIN}")" choice
+    printf "\n${BOLD}${BLUE}========== GOST 端口转发管理 ==========${PLAIN}\n"
+    printf "${INFO_SYMBOL} IPv4: ${WHITE}%s ${YELLOW}(%s)${PLAIN}\n" "$IPV4" "$COUNTRY_V4"
+    printf "${INFO_SYMBOL} IPv6: ${WHITE}%s ${YELLOW}(%s)${PLAIN}\n" "$IPV6" "$COUNTRY_V6"
+    printf "${BOLD}${BLUE}--------------------------------------${PLAIN}\n"
+    printf "  ${GREEN}1.${PLAIN} 添加单端口转发\n"
+    printf "  ${GREEN}2.${PLAIN} 端口范围转发\n"
+    printf "  ${GREEN}3.${PLAIN} 管理转发服务\n"
+    printf "  ${GREEN}4.${PLAIN} 配置文件管理\n"
+    printf "  ${GREEN}5.${PLAIN} 清理旧 systemd 服务\n"
+    printf "  ${GREEN}6.${PLAIN} 退出\n"
+    printf "${BOLD}${BLUE}======================================${PLAIN}\n"
+    read -p "$(printf "${YELLOW}请选择 [1-6]: ${PLAIN}")" choice
 
     case $choice in
-    1) create_forward_service ;; 
-    2) create_port_range_forward ;; 
-    3) manage_forward_services ;; 
-    4) config_file_management ;; 
-    5) cleanup_old_services ;; 
-    6) printf "${GREEN}${SUCCESS_SYMBOL}Thank you for using. Goodbye!${PLAIN}\n"; exit 0 ;; 
-    *) printf "${RED} ${ERROR_SYMBOL}Invalid selection. Please try again.${PLAIN}\n" ;; 
+    1) create_forward_service ;;
+    2) create_port_range_forward ;;
+    3) manage_forward_services ;;
+    4) config_file_management ;;
+    5) cleanup_old_services ;;
+    6) printf "${GREEN}${SUCCESS_SYMBOL} 感谢使用，再见！${PLAIN}\n"; exit 0 ;;
+    *) printf "${ERROR_SYMBOL} 无效的选择，请重试${PLAIN}\n" ;;
     esac
-    read -n1 -r -p "Press any key to return to the main menu..."
+    read -n1 -r -p "按任意键返回主菜单..."
   done
 }
 
