@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 统一入口：fwrd.sh
-# 目的：为多种转发引擎(brook/gost/realm/nftables)提供统一的 CLI 契约
+# 目的：为多种转发引擎提供统一的 CLI 契约
 # 三个统一：
 # 1) 统一动词/子命令：add | list | delete | restart | status | logs
 # 2) 统一资源模型：--engine --proto --listen --target [--target-udp] --ipver --name [--range]
@@ -48,9 +48,9 @@ usage() {
 用法: fwrd.sh <command> [选项]
 
 命令:
-  add       添加转发规则
-  list      列出转发规则
-  delete    删除转发规则
+  add       Add forwarding rule
+  list      List forwarding rules
+  delete    Delete forwarding rule
   restart   重启引擎服务(适用: gost/realm)
   status    查看引擎服务状态(适用: gost/realm)
   logs      查看引擎服务日志(适用: gost/realm/brook)
@@ -60,10 +60,10 @@ usage() {
   --proto <tcp|udp|both>
   --listen <addr:port>        例: :8080 / 0.0.0.0:8080 / [::]:8080
   --target <host:port>        例: 1.2.3.4:80 / example.com:443 / [2001:db8::1]:80
-  --target-udp <host:port>    分离转发的 UDP 目标(仅 both/split 时可用)
-  --ipver <4|6|46>            引擎支持时用于监听与目标栈选择
-  --name <rule-name>          规则名/备注(用于匹配删除/显示)
-  --range <start-end>         端口范围(可选，gost/nftables 支持更好)
+  --target-udp <host:port>    分离转发的 UDP Target(仅 both/split 时可用)
+  --ipver <4|6|46>            引擎支持时用于监听与Target栈选择
+  --name <rule-name>          Rule name/备注(用于匹配删除/显示)
+  --range <start-end>         端口范围(optional，gost/nftables 支持更好)
   --output <text|json>
 
 示例:
@@ -505,9 +505,9 @@ engine_realm_delete() {
   rm -f "$tmp_map"
   if [ "$changed" -eq 1 ]; then
     $SUDO systemctl restart realm || true
-    echo -e "${SUCCESS_SYMBOL} realm 已删除匹配规则(严格等值: Remark 或 listen)"
+    echo -e "${SUCCESS_SYMBOL} realm rules deleted - exact match by Remark or listen"
   else
-    echo -e "${WARN_SYMBOL} 未找到严格匹配的规则"
+    echo -e "${WARN_SYMBOL} No exact matching rule found"
   fi
 }
 
@@ -584,34 +584,34 @@ case "$CMD" in
     while true; do
       clear
       echo -e "${BOLD}${BLUE}========== Unified Forwarding Management - fwrd ==========${PLAIN}"
-      echo -e "  ${GREEN}1.${PLAIN} 添加转发规则"
-      echo -e "  ${GREEN}2.${PLAIN} 列出转发规则"
-      echo -e "  ${GREEN}3.${PLAIN} 删除转发规则"
-      echo -e "  ${GREEN}4.${PLAIN} 重启服务 (gost/realm)"
-      echo -e "  ${GREEN}5.${PLAIN} 查看状态"
-      echo -e "  ${GREEN}6.${PLAIN} 查看日志"
+      echo -e "  ${GREEN}1.${PLAIN} Add forwarding rule"
+      echo -e "  ${GREEN}2.${PLAIN} List forwarding rules"
+      echo -e "  ${GREEN}3.${PLAIN} Delete forwarding rule"
+      echo -e "  ${GREEN}4.${PLAIN} Restart service "
+      echo -e "  ${GREEN}5.${PLAIN} Status"
+      echo -e "  ${GREEN}6.${PLAIN} View logs"
       echo -e "  ${GREEN}0.${PLAIN} 退出"
       echo -e "${BOLD}${BLUE}=========================================${PLAIN}"
-      read -rp "请选择 [0-6]: " msel
+      read -rp "Please select : " msel
       case "$msel" in
         1)
-          read -rp "引擎(brook/gost/realm/nftables): " ENGINE
-          read -rp "协议(tcp/udp/both) [tcp]: " PROTO; PROTO=${PROTO:-tcp}
-          read -rp "监听地址(例 :8080 / 0.0.0.0:8080 / [::]:8080): " LISTEN
-          read -rp "目标(例 1.2.3.4:80 / example.com:443 / [2001:db8::1]:80): " TARGET
+          read -rp "Engine: " ENGINE
+          read -rp "Protocol : " PROTO; PROTO=${PROTO:-tcp}
+          read -rp "Listen address (e.g. :8080 or 0.0.0.0:8080): " LISTEN
+          read -rp "Target(例 1.2.3.4:80 / example.com:443 / [2001:db8::1]:80): " TARGET
           SPLIT_UDP="n"
           if [ "$PROTO" = "both" ]; then
-            read -rp "是否为 UDP 使用不同目标(分离 UDP 目标)? (y/N): " SPLIT_UDP
+            read -rp "是否为 UDP 使用不同Target(分离 UDP Target)? : " SPLIT_UDP
             if [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
-              read -rp "UDP 目标(例 1.2.3.4:53 / [2001:db8::1]:53): " TARGET_UDP
+              read -rp "UDP Target(例 1.2.3.4:53 / [2001:db8::1]:53): " TARGET_UDP
             fi
           fi
-          read -rp "是否使用端口范围? (y/N): " USE_RANGE
-          read -rp "规则名(可选): " NAME
+          read -rp "Use port range?? : " USE_RANGE
+          read -rp "Rule name(optional): " NAME
 
           if [[ "$USE_RANGE" =~ ^[Yy]$ ]]; then
-            read -rp "本地端口范围 起-止 (例 8000-8003): " RANGE
-            read -rp "范围映射类型: 1) 多对一(全部映射到同一目标端口)  2) 一一对应(递增对齐) [1]: " MAP_TYPE
+            read -rp "Local port range start-end (例 8000-8003): " RANGE
+            read -rp "Range mapping type: 1) Many-to-one(全部映射到同一Target端口)  2) One-to-one(递增对齐) [1]: " MAP_TYPE
             MAP_TYPE=${MAP_TYPE:-1}
 
             # 解析 listen 主机与端口
@@ -629,8 +629,8 @@ case "$CMD" in
             fi
 
             if [ "$MAP_TYPE" = "2" ]; then
-              read -rp "目标起始端口(用于一一对应): " T_START
-              if ! [[ "$T_START" =~ ^[0-9]+$ ]]; then echo -e "${ERROR_SYMBOL} 目标起始端口无效"; read -n1 -r -p "按任意键继续..."; break; fi
+              read -rp "Target起始端口(用于One-to-one): " T_START
+              if ! [[ "$T_START" =~ ^[0-9]+$ ]]; then echo -e "${ERROR_SYMBOL} Target起始端口无效"; read -n1 -r -p "按任意键继续..."; break; fi
             fi
 
             # 循环创建
@@ -688,16 +688,16 @@ case "$CMD" in
           if [ -n "$ENGINE" ]; then "$0" list --engine "$ENGINE"; else "$0" list; fi
           read -n1 -r -p "按任意键继续..." ;;
         3)
-          read -rp "引擎(brook/gost): " ENGINE
-          read -rp "规则名(service/name): " NAME
+          read -rp "Engine: " ENGINE
+          read -rp "Rule name(service/name): " NAME
           "$0" delete --engine "$ENGINE" --name "$NAME"
           read -n1 -r -p "按任意键继续..." ;;
         4)
-          read -rp "引擎(gost/realm): " ENGINE
+          read -rp "Engine: " ENGINE
           "$0" restart --engine "$ENGINE"
           read -n1 -r -p "按任意键继续..." ;;
         5)
-          read -rp "引擎(brook/gost/realm/nftables): " ENGINE
+          read -rp "Engine: " ENGINE
           "$0" status --engine "$ENGINE"
           read -n1 -r -p "按任意键继续..." ;;
         6)
@@ -720,7 +720,7 @@ case "$CMD" in
     if [ -n "${RANGE}" ]; then
       L_HOST="${LISTEN%:*}"; L_PORT_BASE="${LISTEN##*:}"
       T_HOST="${TARGET%:*}"; T_PORT="${TARGET##*:}"
-      # 目标端口是否提供范围
+      # Target端口是否提供范围
       if [[ "$T_PORT" =~ ^[0-9]+-[0-9]+$ ]]; then
         T_START="${T_PORT%-*}"
         MAP_TYPE=2
@@ -765,7 +765,7 @@ case "$CMD" in
             nftables) engine_nftables_add udp "$NEW_LISTEN" "$NEW_UDP_TARGET" ${NAME:+"${NAME}-udp-$p"} ;;
           esac
         else
-          # 非分离：按协议处理
+          # 非分离：按Protocol处理
           if [ "$PROTO" = "both" ]; then
             case "$ENGINE" in
               brook) engine_brook_add tcp "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-tcp-$p"} ; engine_brook_add udp "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-udp-$p"} ;;
@@ -792,7 +792,7 @@ case "$CMD" in
           gost) engine_gost_add tcp "$LISTEN" "$TARGET" ${NAME:+"${NAME}-tcp"} ; engine_gost_add udp "$LISTEN" "$TARGET_UDP" ${NAME:+"${NAME}-udp"} ;;
           realm) engine_realm_add tcp "$LISTEN" "$TARGET" ${NAME:+"${NAME}-tcp"} ; engine_realm_add udp "$LISTEN" "$TARGET_UDP" ${NAME:+"${NAME}-udp"} ;;
           nftables) engine_nftables_add tcp "$LISTEN" "$TARGET" ${NAME:+"${NAME}-tcp"} ; engine_nftables_add udp "$LISTEN" "$TARGET_UDP" ${NAME:+"${NAME}-udp"} ;;
-          *) echo -e "${ERROR_SYMBOL} 不支持的引擎: $ENGINE"; exit 2 ;;
+          *) echo -e "${ERROR_SYMBOL} 不支持的Engine: $ENGINE"; exit 2 ;;
         esac
       else
         case "$ENGINE" in
@@ -800,7 +800,7 @@ case "$CMD" in
           gost) engine_gost_add "$PROTO" "$LISTEN" "$TARGET" "$NAME" ;;
           realm) engine_realm_add "$PROTO" "$LISTEN" "$TARGET" "$NAME" ;;
           nftables) engine_nftables_add "$PROTO" "$LISTEN" "$TARGET" "$NAME" ;;
-          *) echo -e "${ERROR_SYMBOL} 不支持的引擎: $ENGINE"; exit 2 ;;
+          *) echo -e "${ERROR_SYMBOL} 不支持的Engine: $ENGINE"; exit 2 ;;
         esac
       fi
     fi
@@ -833,7 +833,7 @@ case "$CMD" in
     case "$ENGINE" in
       gost) $SUDO systemctl restart gost && echo -e "${SUCCESS_SYMBOL} gost 重启完成" ;;
       realm) $SUDO systemctl restart realm && echo -e "${SUCCESS_SYMBOL} realm 重启完成" ;;
-      *) echo -e "${ERROR_SYMBOL} 不支持的引擎: $ENGINE"; exit 2 ;;
+      *) echo -e "${ERROR_SYMBOL} 不支持的Engine: $ENGINE"; exit 2 ;;
     esac
     ;;
   status)
@@ -842,7 +842,7 @@ case "$CMD" in
       realm) systemctl status realm --no-pager | cat ;;
       brook) systemctl list-units | grep brook-forward | cat ;;
       nftables) systemctl status nftables --no-pager | cat ;;
-      *) echo -e "${ERROR_SYMBOL} 不支持的引擎: $ENGINE"; exit 2 ;;
+      *) echo -e "${ERROR_SYMBOL} 不支持的Engine: $ENGINE"; exit 2 ;;
     esac
     ;;
   logs)
@@ -850,7 +850,7 @@ case "$CMD" in
       gost) journalctl -u gost -n 50 --no-pager | cat ;;
       realm) journalctl -u realm -n 50 --no-pager | cat ;;
       brook) journalctl -u "brook-forward*" -n 20 --no-pager | cat || true ;;
-      *) echo -e "${ERROR_SYMBOL} 不支持的引擎: $ENGINE"; exit 2 ;;
+      *) echo -e "${ERROR_SYMBOL} 不支持的Engine: $ENGINE"; exit 2 ;;
     esac
     ;;
   * ) usage; exit 2 ;;
