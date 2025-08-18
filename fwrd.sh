@@ -580,11 +580,135 @@ engine_nftables_delete() {
 ensure_dirs
 case "$CMD" in
   menu|"")
-    echo -e "${INFO_SYMBOL} Use command line interface. Examples:"
-    echo -e "${INFO_SYMBOL}   $0 add --engine brook --proto tcp --listen :8080 --target 1.2.3.4:80"
-    echo -e "${INFO_SYMBOL}   $0 list --engine gost"
-    echo -e "${INFO_SYMBOL}   $0 delete --engine realm --name myforwarder"
-    usage
+    # 交互式菜单模式
+    while true; do
+      clear
+      echo -e "${BOLD}${BLUE}========== Unified Forwarding Management - fwrd ==========${PLAIN}"
+      echo -e "  ${GREEN}1.${PLAIN} Add forwarding rule"
+      echo -e "  ${GREEN}2.${PLAIN} List forwarding rules" 
+      echo -e "  ${GREEN}3.${PLAIN} Delete forwarding rule"
+      echo -e "  ${GREEN}4.${PLAIN} Restart service"
+      echo -e "  ${GREEN}5.${PLAIN} View status"
+      echo -e "  ${GREEN}6.${PLAIN} View logs"
+      echo -e "  ${GREEN}0.${PLAIN} Exit"
+      echo -e "${BOLD}${BLUE}=========================================${PLAIN}"
+      read -rp "Please select [0-6]: " msel
+      case "$msel" in
+        1)
+          read -rp "Engine [brook/gost/realm/nftables]: " ENGINE
+          [ -n "$ENGINE" ] && ensure_engine_ready "$ENGINE" || true
+          read -rp "Protocol [tcp/udp/both] (default: tcp): " PROTO; PROTO=${PROTO:-tcp}
+          read -rp "Listen address (e.g. :8080 or 0.0.0.0:8080): " LISTEN
+          read -rp "Target (e.g. 1.2.3.4:80 or example.com:443): " TARGET
+          SPLIT_UDP="n"
+          if [ "$PROTO" = "both" ]; then
+            read -rp "Use different target for UDP? [y/N]: " SPLIT_UDP
+            if [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
+              read -rp "UDP target (e.g. 1.2.3.4:53): " TARGET_UDP
+            fi
+          fi
+          read -rp "Use port range? [y/N]: " USE_RANGE
+          read -rp "Rule name (optional): " NAME
+
+          if [[ "$USE_RANGE" =~ ^[Yy]$ ]]; then
+            read -rp "Local port range start-end (e.g. 8000-8003): " RANGE
+            read -rp "Range mapping type: 1) Many-to-one 2) One-to-one [1]: " MAP_TYPE
+            MAP_TYPE=${MAP_TYPE:-1}
+
+            # 解析 listen 主机与端口
+            L_HOST="${LISTEN%:*}"; L_PORT_BASE="${LISTEN##*:}"
+            # 解析 target 主机与端口
+            T_HOST="${TARGET%:*}"; T_PORT="${TARGET##*:}"
+            # 如果 UDP 分离
+            if [ -n "${TARGET_UDP:-}" ]; then
+              TU_HOST="${TARGET_UDP%:*}"; TU_PORT="${TARGET_UDP##*:}"
+            fi
+
+            L_START="${RANGE%-*}"; L_END="${RANGE#*-}"
+            if ! [[ "$L_START" =~ ^[0-9]+$ && "$L_END" =~ ^[0-9]+$ && "$L_START" -le "$L_END" ]]; then
+              echo -e "${ERROR_SYMBOL} Invalid port range"; read -n1 -r -p "Press any key to continue..."; continue
+            fi
+
+            if [ "$MAP_TYPE" = "2" ]; then
+              read -rp "Target start port (for one-to-one): " T_START
+              if ! [[ "$T_START" =~ ^[0-9]+$ ]]; then echo -e "${ERROR_SYMBOL} Invalid target start port"; read -n1 -r -p "Press any key to continue..."; continue; fi
+            fi
+
+            # 循环创建
+            p=$L_START
+            while [ "$p" -le "$L_END" ]; do
+              # 构造 listen
+              if [ -z "$L_HOST" ] || [ "$L_HOST" = "$LISTEN" ]; then NEW_LISTEN=":$p"; else NEW_LISTEN="${L_HOST}:$p"; fi
+              # 构造 target
+              if [ "$MAP_TYPE" = "2" ]; then
+                CUR_T_PORT=$(( T_START + p - L_START ))
+              else
+                CUR_T_PORT="$T_PORT"
+              fi
+              NEW_TARGET="${T_HOST}:${CUR_T_PORT}"
+
+              # 处理 split UDP
+              if [ "$PROTO" = "both" ] && [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
+                # TCP
+                "$0" add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
+                # UDP
+                if [ -n "${TARGET_UDP:-}" ]; then
+                  if [ "$MAP_TYPE" = "2" ]; then
+                    CUR_U_PORT=$(( ${TU_PORT:-$CUR_T_PORT} + p - L_START ))
+                  else
+                    CUR_U_PORT="${TU_PORT:-$CUR_T_PORT}"
+                  fi
+                  NEW_UDP_TARGET="${TU_HOST:-$T_HOST}:${CUR_U_PORT}"
+                else
+                  NEW_UDP_TARGET="$NEW_TARGET"
+                fi
+                "$0" add --engine "$ENGINE" --proto udp --listen "$NEW_LISTEN" --target "$NEW_UDP_TARGET" ${NAME:+--name "${NAME}-udp-$p"}
+              else
+                # 非分离：按选择的 proto 处理
+                if [ "$PROTO" = "both" ]; then
+                  "$0" add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
+                  "$0" add --engine "$ENGINE" --proto udp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-udp-$p"}
+                else
+                  "$0" add --engine "$ENGINE" --proto "$PROTO" --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-$p"}
+                fi
+              fi
+              p=$((p+1))
+            done
+          else
+            # 非范围：单条
+            if [ "$PROTO" = "both" ] && [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
+              "$0" add --engine "$ENGINE" --proto tcp --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "${NAME}-tcp"}
+              "$0" add --engine "$ENGINE" --proto udp --listen "$LISTEN" --target "${TARGET_UDP:-$TARGET}" ${NAME:+--name "${NAME}-udp"}
+            else
+              "$0" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
+            fi
+          fi
+          read -n1 -r -p "Press any key to continue..." ;;
+        2)
+          read -rp "Engine (press Enter to show all): " ENGINE
+          if [ -n "$ENGINE" ]; then "$0" list --engine "$ENGINE"; else "$0" list; fi
+          read -n1 -r -p "Press any key to continue..." ;;
+        3)
+          read -rp "Engine [brook/gost/realm/nftables]: " ENGINE
+          read -rp "Rule name or service name: " NAME
+          "$0" delete --engine "$ENGINE" --name "$NAME"
+          read -n1 -r -p "Press any key to continue..." ;;
+        4)
+          read -rp "Engine [gost/realm]: " ENGINE
+          "$0" restart --engine "$ENGINE"
+          read -n1 -r -p "Press any key to continue..." ;;
+        5)
+          read -rp "Engine [brook/gost/realm/nftables]: " ENGINE
+          "$0" status --engine "$ENGINE"
+          read -n1 -r -p "Press any key to continue..." ;;
+        6)
+          read -rp "Engine [brook/gost/realm]: " ENGINE
+          "$0" logs --engine "$ENGINE"
+          read -n1 -r -p "Press any key to continue..." ;;
+        0) echo -e "${SUCCESS_SYMBOL} Goodbye!"; exit 0 ;;
+        *) echo -e "${ERROR_SYMBOL} Invalid selection"; sleep 1 ;;
+      esac
+    done
     ;;
   add)
     [ -n "$ENGINE" ] && ensure_engine_ready "$ENGINE" || true
