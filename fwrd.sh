@@ -353,6 +353,110 @@ quick_add() {
   echo -e "${SUCCESS_SYMBOL} Quick forward created"
 }
 
+# 选择引擎（数字简化）
+select_engine() {
+  echo "  1) brook"
+  echo "  2) gost"
+  echo "  3) realm"
+  echo "  4) nftables"
+  read -rp "Select engine [1-4] (default: 2): " _e
+  case "${_e:-2}" in
+    1) echo brook ;;
+    2) echo gost ;;
+    3) echo realm ;;
+    4) echo nftables ;;
+    *) echo gost ;;
+  esac
+}
+
+# 场景：快速 Web 转发（HTTP/HTTPS）
+menu_quick_web() {
+  clear
+  echo -e "${BOLD}${BLUE}========== Quick Web Forward ==========${PLAIN}"
+  ENGINE=$(select_engine)
+  ensure_engine_ready "$ENGINE"
+  read -rp "Target host or IP: " target_host
+  [ -z "$target_host" ] && { echo -e "${ERROR_SYMBOL} Target required"; return; }
+
+  echo "  1) HTTP (80)"
+  echo "  2) HTTPS (443)"
+  echo "  3) Both"
+  echo "  4) Custom port"
+  read -rp "Select [1-4] (default: 3): " web_choice
+  web_choice=${web_choice:-3}
+  case "$web_choice" in
+    1)
+      local_port=$(find_available_port 8000 8999)
+      "$0" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:80" --name "web-http-$local_port"
+      echo -e "${SUCCESS_SYMBOL} http -> :$local_port => ${target_host}:80" ;;
+    2)
+      local_port=$(find_available_port 8400 8499)
+      "$0" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:443" --name "web-https-$local_port"
+      echo -e "${SUCCESS_SYMBOL} https -> :$local_port => ${target_host}:443" ;;
+    3)
+      http_port=$(find_available_port 8000 8099)
+      https_port=$(find_available_port 8400 8499)
+      "$0" add --engine "$ENGINE" --proto tcp --listen ":$http_port" --target "${target_host}:80" --name "web-http-$http_port"
+      "$0" add --engine "$ENGINE" --proto tcp --listen ":$https_port" --target "${target_host}:443" --name "web-https-$https_port"
+      echo -e "${SUCCESS_SYMBOL} http -> :$http_port => ${target_host}:80"
+      echo -e "${SUCCESS_SYMBOL} https -> :$https_port => ${target_host}:443" ;;
+    4)
+      read -rp "Target port: " t_port
+      [ -z "$t_port" ] && { echo -e "${ERROR_SYMBOL} Port required"; return; }
+      local_port=$(find_available_port 8000 8999)
+      "$0" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "web-custom-$local_port"
+      echo -e "${SUCCESS_SYMBOL} web -> :$local_port => ${target_host}:$t_port" ;;
+  esac
+}
+
+# 场景：快速 DNS 转发
+menu_quick_dns() {
+  clear
+  echo -e "${BOLD}${BLUE}========== Quick DNS Forward ==========${PLAIN}"
+  ENGINE=$(select_engine)
+  ensure_engine_ready "$ENGINE"
+  echo "  1) Cloudflare (1.1.1.1)"
+  echo "  2) Google (8.8.8.8)"
+  echo "  3) Quad9 (9.9.9.9)"
+  echo "  4) Custom"
+  read -rp "Select [1-4] (default: 1): " dns_choice
+  dns_choice=${dns_choice:-1}
+  case "$dns_choice" in
+    1) target_ip="1.1.1.1"; dns_name=cloudflare ;;
+    2) target_ip="8.8.8.8"; dns_name=google ;;
+    3) target_ip="9.9.9.9"; dns_name=quad9 ;;
+    4) read -rp "DNS server IP: " target_ip; dns_name=custom ;;
+  esac
+  [ -z "$target_ip" ] && { echo -e "${ERROR_SYMBOL} DNS IP required"; return; }
+  local_port=$(find_available_port 10053 15053)
+  "$0" add --engine "$ENGINE" --proto both --listen ":$local_port" --target "${target_ip}:53" --name "dns-$dns_name-$local_port"
+  echo -e "${SUCCESS_SYMBOL} dns -> :$local_port => ${target_ip}:53 (tcp+udp)"
+}
+
+# 场景：快速远程访问（SSH/RDP/VNC）
+menu_quick_remote() {
+  clear
+  echo -e "${BOLD}${BLUE}========== Quick Remote Forward ==========${PLAIN}"
+  ENGINE=$(select_engine)
+  ensure_engine_ready "$ENGINE"
+  read -rp "Target host or IP: " target_host
+  [ -z "$target_host" ] && { echo -e "${ERROR_SYMBOL} Target required"; return; }
+  echo "  1) SSH (22)"
+  echo "  2) RDP (3389)"
+  echo "  3) VNC (5901)"
+  echo "  4) Custom"
+  read -rp "Select [1-4] (default: 1): " svc
+  svc=${svc:-1}
+  case "$svc" in
+    1) local_port=$(find_available_port 2200 2299); t_port=22; name=ssh ;;
+    2) local_port=$(find_available_port 3300 3399); t_port=3389; name=rdp ;;
+    3) local_port=$(find_available_port 5900 5999); t_port=5901; name=vnc ;;
+    4) read -rp "Target port: " t_port; local_port=$(find_available_port 10000 19999); name=custom ;;
+  esac
+  "$0" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "remote-$name-$local_port"
+  echo -e "${SUCCESS_SYMBOL} remote -> :$local_port => ${target_host}:$t_port"
+}
+
 # 解析参数
 CMD="${1:-}"
 if [ $# -gt 0 ]; then shift || true; fi
@@ -658,22 +762,34 @@ case "$CMD" in
     # 交互式菜单模式
     while true; do
       clear
-      echo -e "${BOLD}${BLUE}========== Unified Forwarding Management - fwrd ==========${PLAIN}"
+      echo -e "${BOLD}${BLUE}========== Smart Forwarding (fwrd) ==========${PLAIN}"
       echo -e "  ${GREEN}1.${PLAIN} Quick add (engine + protocol only)"
-      echo -e "  ${GREEN}2.${PLAIN} Add forwarding rule"
-      echo -e "  ${GREEN}3.${PLAIN} List forwarding rules" 
-      echo -e "  ${GREEN}4.${PLAIN} Delete forwarding rule"
-      echo -e "  ${GREEN}5.${PLAIN} Restart service"
-      echo -e "  ${GREEN}6.${PLAIN} View status"
-      echo -e "  ${GREEN}7.${PLAIN} View logs"
+      echo -e "  ${GREEN}2.${PLAIN} Quick Web forward (HTTP/HTTPS)"
+      echo -e "  ${GREEN}3.${PLAIN} Quick DNS forward (popular DNS)"
+      echo -e "  ${GREEN}4.${PLAIN} Quick Remote forward (SSH/RDP/VNC)"
+      echo -e "  ${GREEN}5.${PLAIN} Add forwarding rule (advanced)"
+      echo -e "  ${GREEN}6.${PLAIN} List forwarding rules" 
+      echo -e "  ${GREEN}7.${PLAIN} Delete forwarding rule"
+      echo -e "  ${GREEN}8.${PLAIN} Restart service"
+      echo -e "  ${GREEN}9.${PLAIN} View status"
+      echo -e "  ${GREEN}10.${PLAIN} View logs"
       echo -e "  ${GREEN}0.${PLAIN} Exit"
       echo -e "${BOLD}${BLUE}=========================================${PLAIN}"
-      read -rp "Please select [0-7]: " msel
+      read -rp "Please select [0-10]: " msel
       case "$msel" in
         1)
           quick_add
           read -n1 -r -p "Press any key to continue..." ;;
         2)
+          menu_quick_web
+          read -n1 -r -p "Press any key to continue..." ;;
+        3)
+          menu_quick_dns
+          read -n1 -r -p "Press any key to continue..." ;;
+        4)
+          menu_quick_remote
+          read -n1 -r -p "Press any key to continue..." ;;
+        5)
           read -rp "Engine [brook/gost/realm/nftables]: " ENGINE
           [ -n "$ENGINE" ] && ensure_engine_ready "$ENGINE" || true
           read -rp "Protocol [tcp/udp/both] (default: tcp): " PROTO; PROTO=${PROTO:-tcp}
@@ -763,24 +879,24 @@ case "$CMD" in
             fi
           fi
           read -n1 -r -p "Press any key to continue..." ;;
-        3)
+        6)
           read -rp "Engine (press Enter to show all): " ENGINE
           if [ -n "$ENGINE" ]; then "$0" list --engine "$ENGINE"; else "$0" list; fi
           read -n1 -r -p "Press any key to continue..." ;;
-        4)
+        7)
           read -rp "Engine [brook/gost/realm/nftables]: " ENGINE
           read -rp "Rule name or service name: " NAME
           "$0" delete --engine "$ENGINE" --name "$NAME"
           read -n1 -r -p "Press any key to continue..." ;;
-        5)
+        8)
           read -rp "Engine [gost/realm]: " ENGINE
           "$0" restart --engine "$ENGINE"
           read -n1 -r -p "Press any key to continue..." ;;
-        6)
+        9)
           read -rp "Engine [brook/gost/realm/nftables]: " ENGINE
           "$0" status --engine "$ENGINE"
           read -n1 -r -p "Press any key to continue..." ;;
-        7)
+        10)
           read -rp "Engine [brook/gost/realm]: " ENGINE
           "$0" logs --engine "$ENGINE"
           read -n1 -r -p "Press any key to continue..." ;;
