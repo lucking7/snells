@@ -764,32 +764,20 @@ case "$CMD" in
       clear
       echo -e "${BOLD}${BLUE}========== Smart Forwarding (fwrd) ==========${PLAIN}"
       echo -e "  ${GREEN}1.${PLAIN} Quick add (engine + protocol only)"
-      echo -e "  ${GREEN}2.${PLAIN} Quick Web forward (HTTP/HTTPS)"
-      echo -e "  ${GREEN}3.${PLAIN} Quick DNS forward (popular DNS)"
-      echo -e "  ${GREEN}4.${PLAIN} Quick Remote forward (SSH/RDP/VNC)"
-      echo -e "  ${GREEN}5.${PLAIN} Add forwarding rule (advanced)"
-      echo -e "  ${GREEN}6.${PLAIN} List forwarding rules" 
-      echo -e "  ${GREEN}7.${PLAIN} Delete forwarding rule"
-      echo -e "  ${GREEN}8.${PLAIN} Restart service"
-      echo -e "  ${GREEN}9.${PLAIN} View status"
-      echo -e "  ${GREEN}10.${PLAIN} View logs"
+      echo -e "  ${GREEN}2.${PLAIN} Add forwarding rule (advanced)"
+      echo -e "  ${GREEN}3.${PLAIN} List forwarding rules"
+      echo -e "  ${GREEN}4.${PLAIN} Delete forwarding rule"
+      echo -e "  ${GREEN}5.${PLAIN} Restart service"
+      echo -e "  ${GREEN}6.${PLAIN} View status"
+      echo -e "  ${GREEN}7.${PLAIN} View logs"
       echo -e "  ${GREEN}0.${PLAIN} Exit"
       echo -e "${BOLD}${BLUE}=========================================${PLAIN}"
-      read -rp "Please select [0-10]: " msel
+      read -rp "Please select [0-7]: " msel
       case "$msel" in
         1)
           quick_add
           read -n1 -r -p "Press any key to continue..." ;;
         2)
-          menu_quick_web
-          read -n1 -r -p "Press any key to continue..." ;;
-        3)
-          menu_quick_dns
-          read -n1 -r -p "Press any key to continue..." ;;
-        4)
-          menu_quick_remote
-          read -n1 -r -p "Press any key to continue..." ;;
-        5)
           read -rp "Engine [brook/gost/realm/nftables]: " ENGINE
           [ -n "$ENGINE" ] && ensure_engine_ready "$ENGINE" || true
           read -rp "Protocol [tcp/udp/both] (default: tcp): " PROTO; PROTO=${PROTO:-tcp}
@@ -879,24 +867,24 @@ case "$CMD" in
             fi
           fi
           read -n1 -r -p "Press any key to continue..." ;;
-        6)
+        3)
           read -rp "Engine (press Enter to show all): " ENGINE
           if [ -n "$ENGINE" ]; then "$0" list --engine "$ENGINE"; else "$0" list; fi
           read -n1 -r -p "Press any key to continue..." ;;
-        7)
+        4)
           read -rp "Engine [brook/gost/realm/nftables]: " ENGINE
           read -rp "Rule name or service name: " NAME
           "$0" delete --engine "$ENGINE" --name "$NAME"
           read -n1 -r -p "Press any key to continue..." ;;
-        8)
+        5)
           read -rp "Engine [gost/realm]: " ENGINE
           "$0" restart --engine "$ENGINE"
           read -n1 -r -p "Press any key to continue..." ;;
-        9)
+        6)
           read -rp "Engine [brook/gost/realm/nftables]: " ENGINE
           "$0" status --engine "$ENGINE"
           read -n1 -r -p "Press any key to continue..." ;;
-        10)
+        7)
           read -rp "Engine [brook/gost/realm]: " ENGINE
           "$0" logs --engine "$ENGINE"
           read -n1 -r -p "Press any key to continue..." ;;
