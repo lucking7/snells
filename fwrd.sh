@@ -539,18 +539,22 @@ engine_brook_list() {
       [ -z "$s" ] && continue
       [ $first -eq 0 ] && echo -n ','
       first=0
-      local active
+      local active th tp
       active=$(systemctl is-active "$s" 2>/dev/null || echo "unknown")
-      echo -n "{\"engine\":\"brook\",\"service\":$(json_escape "$s"),\"listen\":$(json_escape "$l"),\"target\":$(json_escape "$r"),\"proto\":\"$p\",\"active\":\"$active\"}"
+      th=$(echo "$r" | sed -E 's/^\[?([^\]]+)\]?:(.+)$/\1/')
+      tp=$(echo "$r" | sed -E 's/^\[?([^\]]+)\]?:(.+)$/\2/')
+      echo -n "{\"engine\":\"brook\",\"service\":$(json_escape \"$s\"),\"listen\":$(json_escape \"$l\"),\"target\":$(json_escape \"$r\"),\"target_host\":$(json_escape \"$th\"),\"target_port\":$(json_escape \"$tp\"),\"proto\":\"$p\",\"active\":\"$active\"}"
     done < "$BROOK_CONFIG_FILE"
     echo ']'
   else
-    printf "%-28s %-20s %-24s %-6s %-8s\n" "SERVICE" "LISTEN" "TARGET" "PROTO" "ACTIVE"
+    printf "%-28s %-20s %-25s %-6s %-6s %-8s\n" "SERVICE" "LISTEN" "T_HOST" "T_PORT" "PROTO" "ACTIVE"
     if [ -f "$BROOK_CONFIG_FILE" ]; then
       while IFS='|' read -r s l r p; do
         [ -z "$s" ] && continue
         active=$(systemctl is-active "$s" 2>/dev/null || echo "unknown")
-        printf "%-28s %-20s %-24s %-6s %-8s\n" "$s" "$l" "$r" "$p" "$active"
+        th=$(echo "$r" | sed -E 's/^\[?([^\]]+)\]?:(.+)$/\1/')
+        tp=$(echo "$r" | sed -E 's/^\[?([^\]]+)\]?:(.+)$/\2/')
+        printf "%-28s %-20s %-25s %-6s %-6s %-8s\n" "$s" "$l" "$th" "$tp" "$p" "$active"
       done < "$BROOK_CONFIG_FILE"
     fi
   fi
