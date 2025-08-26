@@ -79,6 +79,27 @@ json_escape() { echo -n "$1" | python3 -c 'import json,sys;print(json.dumps(sys.
 is_ipv6_literal() { [[ "$1" == *":"* ]] && [[ "$1" != \[*\]* ]]; }
 wrap_ipv6() { if is_ipv6_literal "$1"; then echo "[$1]"; else echo "$1"; fi }
 
+# Robust script path resolver to avoid /dev/fd and pipe paths under TTY/pipe contexts
+resolve_self() {
+  local src
+  if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    src="${BASH_SOURCE[0]}"
+  else
+    src="$0"
+  fi
+  # Fallback to which if path is a fd or pipe
+  if echo "$src" | grep -Eq '^/proc/|^/dev/fd/' || echo "$src" | grep -q 'pipe:'; then
+    if command -v fwrd.sh >/dev/null 2>&1; then
+      src="$(command -v fwrd.sh)"
+    fi
+  fi
+  case "$src" in
+    /*) : ;;
+    *) src="$PWD/$src" ;;
+  esac
+  realpath "$src" 2>/dev/null || readlink -f "$src" 2>/dev/null || echo "$src"
+}
+
 # 输入验证函数
 validate_port() {
   local port="$1"
@@ -410,7 +431,7 @@ quick_add() {
   read -rp "Rule name (optional): " NAME
 
   # 复用统一 add 逻辑
-  SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+  SCRIPT_PATH="$(resolve_self)"
   if [ -n "$UDP_TARGET" ]; then
     "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" --target-udp "$UDP_TARGET" ${NAME:+--name "$NAME"}
   else
@@ -439,7 +460,7 @@ select_engine() {
 menu_quick_web() {
   clear
   echo -e "${BOLD}${BLUE}========== Quick Web Forward ==========${PLAIN}"
-  local SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+  local SCRIPT_PATH="$(resolve_self)"
   ENGINE=$(select_engine)
   ensure_engine_ready "$ENGINE"
   read -rp "Target host or IP: " target_host
@@ -480,7 +501,7 @@ menu_quick_web() {
 menu_quick_dns() {
   clear
   echo -e "${BOLD}${BLUE}========== Quick DNS Forward ==========${PLAIN}"
-  local SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+  local SCRIPT_PATH="$(resolve_self)"
   ENGINE=$(select_engine)
   ensure_engine_ready "$ENGINE"
   echo "  1) Cloudflare (1.1.1.1)"
@@ -505,7 +526,7 @@ menu_quick_dns() {
 menu_quick_remote() {
   clear
   echo -e "${BOLD}${BLUE}========== Quick Remote Forward ==========${PLAIN}"
-  local SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+  local SCRIPT_PATH="$(resolve_self)"
   ENGINE=$(select_engine)
   ensure_engine_ready "$ENGINE"
   read -rp "Target host or IP: " target_host
