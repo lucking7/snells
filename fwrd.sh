@@ -858,7 +858,7 @@ case "$CMD" in
     }
     
     while true; do
-      clear
+      clear 2>/dev/null || true
       show_system_info
       
       echo -e "${BOLD}${YELLOW}QUICK SCENARIOS${PLAIN}"
@@ -883,7 +883,12 @@ case "$CMD" in
       echo -e "${BOLD}${RED}0.${PLAIN} Exit"
       echo ""
       echo -e "${BOLD}${BLUE}============================================================${PLAIN}"
-      read -rp "$(echo -e "${BOLD}${GREEN}Please select operation [0-10]:${PLAIN} ")" msel
+      if [ -t 0 ]; then
+        read -rp "$(echo -e "${BOLD}${GREEN}Please select operation [0-10]:${PLAIN} ")" msel || msel=""
+      else
+        printf "Non-interactive mode. Type: fwrd.sh add|list|delete|restart|status|logs\n"
+        exit 0
+      fi
       case "$msel" in
         1)
           menu_quick_web
