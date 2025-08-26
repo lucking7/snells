@@ -37,8 +37,8 @@ BROOK_CONFIG_FILE="${BROOK_CONFIG_DIR}/forwards.conf"
 GOST_CONFIG_DIR="/etc/gost"
 GOST_CONFIG_FILE="${GOST_CONFIG_DIR}/config.json"
 
-REALM_DIR="/root/realm"
-REALM_CONFIG="/root/.realm/config.toml"
+REALM_DIR="/opt/realm"
+REALM_CONFIG="/etc/realm/config.toml"
 
 # nftables 相关
 NFTABLES_CONF="/etc/nftables.conf"
@@ -79,6 +79,54 @@ json_escape() { echo -n "$1" | python3 -c 'import json,sys;print(json.dumps(sys.
 is_ipv6_literal() { [[ "$1" == *":"* ]] && [[ "$1" != \[*\]* ]]; }
 wrap_ipv6() { if is_ipv6_literal "$1"; then echo "[$1]"; else echo "$1"; fi }
 
+# 输入验证函数
+validate_port() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+}
+
+validate_host_port() {
+  local addr="$1"
+  local host port
+  # 提取主机和端口
+  if [[ "$addr" == \[*\]:* ]]; then
+    # IPv6格式 [host]:port
+    host="${addr%:*}"; host="${host#[}"; host="${host%]}"
+    port="${addr##*:}"
+  elif [[ "$addr" == *:* ]]; then
+    host="${addr%:*}"
+    port="${addr##*:}"
+  else
+    return 1  # 无效格式
+  fi
+  
+  # 验证端口
+  validate_port "$port" || return 1
+  
+  # 验证主机名/IP（简单检查）
+  if [ -z "$host" ] || [ "$host" = "0.0.0.0" ] || [ "$host" = "::" ]; then
+    return 0  # 通配符地址
+  fi
+  
+  # 简单的主机名/IP验证
+  if [[ "$host" =~ ^[a-zA-Z0-9.-]+$ ]] || [[ "$host" =~ ^[0-9a-fA-F:]+$ ]]; then
+    return 0
+  fi
+  
+  return 1
+}
+
+validate_listen_addr() {
+  local addr="$1"
+  # 监听地址可以是 :port 格式
+  if [[ "$addr" == :* ]]; then
+    local port="${addr#:}"
+    validate_port "$port"
+  else
+    validate_host_port "$addr"
+  fi
+}
+
 # ----------- 运行时依赖与自动安装（按引擎） -----------
 pm_detect() {
   if command -v apt-get >/dev/null 2>&1; then echo apt-get; return; fi
@@ -115,13 +163,13 @@ install_brook_binary() {
     x86_64|amd64) brook_arch="amd64";;
     aarch64|arm64) brook_arch="arm64";;
     i386|i686) brook_arch="386";;
-    *) echo -e "${ERROR_SYMBOL} 不支持的架构: $arch"; return 1;;
+    *) echo -e "${ERROR_SYMBOL} Unsupported architecture: $arch"; return 1;;
   esac
   os=$(uname -s | tr '[:upper:]' '[:lower:]')
   case "$os" in
     linux) brook_os="linux";;
     darwin) brook_os="darwin";;
-    *) echo -e "${ERROR_SYMBOL} 不支持的操作系统: $os"; return 1;;
+    *) echo -e "${ERROR_SYMBOL} Unsupported operating system: $os"; return 1;;
   esac
   ver=$(curl -s --connect-timeout 8 https://api.github.com/repos/txthinking/brook/releases/latest | grep -o '"tag_name": "v[^"]*' | sed 's/"tag_name": "v//' | head -1 || true)
   [ -z "$ver" ] && ver="20250202"
@@ -138,9 +186,9 @@ install_brook_binary() {
 
 ensure_brook_installed() {
   if ! command -v brook >/dev/null 2>&1 || ! brook --help >/dev/null 2>&1; then
-    echo -e "${INFO_SYMBOL} 正在安装 brook..."
+    echo -e "${INFO_SYMBOL} Installing brook..."
     install_pkgs curl >/dev/null 2>&1 || true
-    install_brook_binary || { echo -e "${ERROR_SYMBOL} 安装 brook 失败"; return 1; }
+    install_brook_binary || { echo -e "${ERROR_SYMBOL} Failed to install brook"; return 1; }
   fi
   ensure_user brook
 }
@@ -186,8 +234,8 @@ EOF
 ensure_gost_installed() {
   ensure_jq
   if ! command -v gost >/dev/null 2>&1; then
-    echo -e "${INFO_SYMBOL} 正在安装 gost..."
-    install_gost_binary || { echo -e "${ERROR_SYMBOL} 安装 gost 失败"; return 1; }
+    echo -e "${INFO_SYMBOL} Installing gost..."
+    install_gost_binary || { echo -e "${ERROR_SYMBOL} Failed to install gost"; return 1; }
   fi
   ensure_gost_service
 }
@@ -254,15 +302,15 @@ EOF
 
 ensure_realm_installed() {
   if [ ! -x "${REALM_DIR}/realm" ]; then
-    echo -e "${INFO_SYMBOL} 正在安装 realm..."
-    install_realm_binary || { echo -e "${ERROR_SYMBOL} 安装 realm 失败"; return 1; }
+    echo -e "${INFO_SYMBOL} Installing realm..."
+    install_realm_binary || { echo -e "${ERROR_SYMBOL} Failed to install realm"; return 1; }
   fi
   ensure_realm_service
 }
 
 ensure_nftables_ready() {
   if ! command -v nft >/dev/null 2>&1; then
-    echo -e "${INFO_SYMBOL} 正在安装 nftables..."
+    echo -e "${INFO_SYMBOL} Installing nftables..."
     install_pkgs nftables >/dev/null 2>&1 || true
   fi
   $SUDO systemctl enable nftables >/dev/null 2>&1 || true
@@ -322,33 +370,51 @@ quick_add() {
     *) PROTO="tcp" ;;
   esac
 
-  read -rp "Target host:port (e.g. 1.2.3.4:80): " TARGET
-  if ! echo "$TARGET" | grep -q ":"; then
-    echo -e "${ERROR_SYMBOL} Invalid target format"; return 1
+  read -rp "Target host (e.g. 1.2.3.4 or example.com): " TGT_HOST
+  read -rp "Target port (1-65535): " TGT_PORT
+  if [ -z "$TGT_HOST" ]; then
+    echo -e "${ERROR_SYMBOL} Target host cannot be empty"; return 1
   fi
+  if ! validate_port "$TGT_PORT"; then
+    echo -e "${ERROR_SYMBOL} Invalid port format, please enter a number between 1-65535"; return 1
+  fi
+  TARGET="${TGT_HOST}:${TGT_PORT}"
 
-  read -rp "Listen port (blank = auto): " _lp
+  read -rp "Listen port (blank=auto): " _lp
   if [ -z "${_lp}" ]; then
     _lp=$(find_available_port 10000 65000)
+    echo -e "${INFO_SYMBOL} Auto-selected port: ${YELLOW}$_lp${PLAIN}"
+  else
+    if ! validate_port "$_lp"; then
+      echo -e "${ERROR_SYMBOL} Invalid listen port format, please enter a number between 1-65535"; return 1
+    fi
   fi
   LISTEN=":${_lp}"
 
   UDP_TARGET=""
   if [ "$PROTO" = "both" ]; then
-    read -rp "Separate UDP target? [y/N]: " _s
+    read -rp "Use separate target for UDP? [y/N]: " _s
     if [[ "${_s}" =~ ^[Yy]$ ]]; then
-      read -rp "UDP target host:port: " UDP_TARGET
-      if [ -z "$UDP_TARGET" ]; then UDP_TARGET=""; fi
+      read -rp "UDP target host: " UDP_HOST
+      read -rp "UDP target port (1-65535): " UDP_PORT
+      if [ -z "$UDP_HOST" ]; then
+        echo -e "${ERROR_SYMBOL} UDP target host cannot be empty"; return 1
+      fi
+      if ! validate_port "$UDP_PORT"; then
+        echo -e "${ERROR_SYMBOL} Invalid UDP port format, please enter a number between 1-65535"; return 1
+      fi
+      UDP_TARGET="${UDP_HOST}:${UDP_PORT}"
     fi
   fi
 
   read -rp "Rule name (optional): " NAME
 
   # 复用统一 add 逻辑
+  SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
   if [ -n "$UDP_TARGET" ]; then
-    "$0" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" --target-udp "$UDP_TARGET" ${NAME:+--name "$NAME"}
+    "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" --target-udp "$UDP_TARGET" ${NAME:+--name "$NAME"}
   else
-    "$0" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
+    "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
   fi
   echo -e "${SUCCESS_SYMBOL} Quick forward created"
 }
@@ -373,6 +439,7 @@ select_engine() {
 menu_quick_web() {
   clear
   echo -e "${BOLD}${BLUE}========== Quick Web Forward ==========${PLAIN}"
+  local SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
   ENGINE=$(select_engine)
   ensure_engine_ready "$ENGINE"
   read -rp "Target host or IP: " target_host
@@ -387,24 +454,24 @@ menu_quick_web() {
   case "$web_choice" in
     1)
       local_port=$(find_available_port 8000 8999)
-      "$0" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:80" --name "web-http-$local_port"
+      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:80" --name "web-http-$local_port"
       echo -e "${SUCCESS_SYMBOL} http -> :$local_port => ${target_host}:80" ;;
     2)
       local_port=$(find_available_port 8400 8499)
-      "$0" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:443" --name "web-https-$local_port"
+      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:443" --name "web-https-$local_port"
       echo -e "${SUCCESS_SYMBOL} https -> :$local_port => ${target_host}:443" ;;
     3)
       http_port=$(find_available_port 8000 8099)
       https_port=$(find_available_port 8400 8499)
-      "$0" add --engine "$ENGINE" --proto tcp --listen ":$http_port" --target "${target_host}:80" --name "web-http-$http_port"
-      "$0" add --engine "$ENGINE" --proto tcp --listen ":$https_port" --target "${target_host}:443" --name "web-https-$https_port"
+      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$http_port" --target "${target_host}:80" --name "web-http-$http_port"
+      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$https_port" --target "${target_host}:443" --name "web-https-$https_port"
       echo -e "${SUCCESS_SYMBOL} http -> :$http_port => ${target_host}:80"
       echo -e "${SUCCESS_SYMBOL} https -> :$https_port => ${target_host}:443" ;;
     4)
       read -rp "Target port: " t_port
       [ -z "$t_port" ] && { echo -e "${ERROR_SYMBOL} Port required"; return; }
       local_port=$(find_available_port 8000 8999)
-      "$0" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "web-custom-$local_port"
+      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "web-custom-$local_port"
       echo -e "${SUCCESS_SYMBOL} web -> :$local_port => ${target_host}:$t_port" ;;
   esac
 }
@@ -413,6 +480,7 @@ menu_quick_web() {
 menu_quick_dns() {
   clear
   echo -e "${BOLD}${BLUE}========== Quick DNS Forward ==========${PLAIN}"
+  local SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
   ENGINE=$(select_engine)
   ensure_engine_ready "$ENGINE"
   echo "  1) Cloudflare (1.1.1.1)"
@@ -429,7 +497,7 @@ menu_quick_dns() {
   esac
   [ -z "$target_ip" ] && { echo -e "${ERROR_SYMBOL} DNS IP required"; return; }
   local_port=$(find_available_port 10053 15053)
-  "$0" add --engine "$ENGINE" --proto both --listen ":$local_port" --target "${target_ip}:53" --name "dns-$dns_name-$local_port"
+  "$SCRIPT_PATH" add --engine "$ENGINE" --proto both --listen ":$local_port" --target "${target_ip}:53" --name "dns-$dns_name-$local_port"
   echo -e "${SUCCESS_SYMBOL} dns -> :$local_port => ${target_ip}:53 (tcp+udp)"
 }
 
@@ -437,6 +505,7 @@ menu_quick_dns() {
 menu_quick_remote() {
   clear
   echo -e "${BOLD}${BLUE}========== Quick Remote Forward ==========${PLAIN}"
+  local SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
   ENGINE=$(select_engine)
   ensure_engine_ready "$ENGINE"
   read -rp "Target host or IP: " target_host
@@ -453,7 +522,7 @@ menu_quick_remote() {
     3) local_port=$(find_available_port 5900 5999); t_port=5901; name=vnc ;;
     4) read -rp "Target port: " t_port; local_port=$(find_available_port 10000 19999); name=custom ;;
   esac
-  "$0" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "remote-$name-$local_port"
+  "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "remote-$name-$local_port"
   echo -e "${SUCCESS_SYMBOL} remote -> :$local_port => ${target_host}:$t_port"
 }
 
@@ -528,7 +597,7 @@ EOF
   $SUDO systemctl enable "$service_name" >/dev/null 2>&1 || true
   $SUDO systemctl restart "$service_name"
   echo "${service_name}|${listen}|${target}|${proto}" | $SUDO tee -a "$BROOK_CONFIG_FILE" >/dev/null
-  echo -e "${SUCCESS_SYMBOL} brook 添加成功: $service_name"
+  echo -e "${SUCCESS_SYMBOL} Brook rule added successfully: $service_name"
 }
 
 engine_brook_list() {
@@ -539,22 +608,18 @@ engine_brook_list() {
       [ -z "$s" ] && continue
       [ $first -eq 0 ] && echo -n ','
       first=0
-      local active th tp
+      local active
       active=$(systemctl is-active "$s" 2>/dev/null || echo "unknown")
-      th=$(echo "$r" | sed -E 's/^\[?([^\]]+)\]?:(.+)$/\1/')
-      tp=$(echo "$r" | sed -E 's/^\[?([^\]]+)\]?:(.+)$/\2/')
-      echo -n "{\"engine\":\"brook\",\"service\":$(json_escape \"$s\"),\"listen\":$(json_escape \"$l\"),\"target\":$(json_escape \"$r\"),\"target_host\":$(json_escape \"$th\"),\"target_port\":$(json_escape \"$tp\"),\"proto\":\"$p\",\"active\":\"$active\"}"
+      echo -n "{\"engine\":\"brook\",\"service\":$(json_escape "$s"),\"listen\":$(json_escape "$l"),\"target\":$(json_escape "$r"),\"proto\":\"$p\",\"active\":\"$active\"}"
     done < "$BROOK_CONFIG_FILE"
     echo ']'
   else
-    printf "%-28s %-20s %-25s %-6s %-6s %-8s\n" "SERVICE" "LISTEN" "T_HOST" "T_PORT" "PROTO" "ACTIVE"
+    printf "%-28s %-20s %-24s %-6s %-8s\n" "SERVICE" "LISTEN" "TARGET" "PROTO" "ACTIVE"
     if [ -f "$BROOK_CONFIG_FILE" ]; then
       while IFS='|' read -r s l r p; do
         [ -z "$s" ] && continue
         active=$(systemctl is-active "$s" 2>/dev/null || echo "unknown")
-        th=$(echo "$r" | sed -E 's/^\[?([^\]]+)\]?:(.+)$/\1/')
-        tp=$(echo "$r" | sed -E 's/^\[?([^\]]+)\]?:(.+)$/\2/')
-        printf "%-28s %-20s %-25s %-6s %-6s %-8s\n" "$s" "$l" "$th" "$tp" "$p" "$active"
+        printf "%-28s %-20s %-24s %-6s %-8s\n" "$s" "$l" "$r" "$p" "$active"
       done < "$BROOK_CONFIG_FILE"
     fi
   fi
@@ -574,7 +639,7 @@ engine_brook_delete() {
 # 引擎适配：gost（配置文件 JSON）
 engine_gost_add() {
   local proto="$1" listen="$2" target="$3" name="$4"
-  command -v jq >/dev/null 2>&1 || { echo -e "${ERROR_SYMBOL} 缺少 jq"; exit 1; }
+  command -v jq >/dev/null 2>&1 || { echo -e "${ERROR_SYMBOL} Missing jq"; exit 1; }
   [ -f "$GOST_CONFIG_FILE" ] || echo '{"services":[]}' | $SUDO tee "$GOST_CONFIG_FILE" >/dev/null
   local tmp=$(mktemp)
   local svc_name
@@ -585,11 +650,11 @@ engine_gost_add() {
   $SUDO mv "$tmp" "$GOST_CONFIG_FILE"
   $SUDO chown root:root "$GOST_CONFIG_FILE"; $SUDO chmod 644 "$GOST_CONFIG_FILE"
   $SUDO systemctl restart gost || $SUDO systemctl start gost || true
-  echo -e "${SUCCESS_SYMBOL} gost 添加成功: $svc_name"
+  echo -e "${SUCCESS_SYMBOL} Gost rule added successfully: $svc_name"
 }
 
 engine_gost_list() {
-  command -v jq >/dev/null 2>&1 || { echo -e "${ERROR_SYMBOL} 缺少 jq"; exit 1; }
+  command -v jq >/dev/null 2>&1 || { echo -e "${ERROR_SYMBOL} Missing jq"; exit 1; }
   if [ "$OUTPUT" = "json" ]; then
     jq -r '.services[] | {engine:"gost", name:.name, listen:.addr, proto:(.handler.type), target:(.forwarder.nodes[0].addr // "") }' "$GOST_CONFIG_FILE" 2>/dev/null | \
     python3 -c 'import sys,json; print(json.dumps([json.loads(l) for l in sys.stdin if l.strip()], ensure_ascii=False))' 2>/dev/null || echo '[]'
@@ -602,7 +667,7 @@ engine_gost_list() {
 
 engine_gost_delete() {
   local name="$1" tmp=$(mktemp)
-  command -v jq >/dev/null 2>&1 || { echo -e "${ERROR_SYMBOL} 缺少 jq"; exit 1; }
+  command -v jq >/dev/null 2>&1 || { echo -e "${ERROR_SYMBOL} Missing jq"; exit 1; }
   [ -z "$name" ] && { echo -e "${ERROR_SYMBOL} 请提供 --name"; exit 2; }
   jq --arg n "$name" '.services = [.services[] | select(.name != $n)]' "$GOST_CONFIG_FILE" > "$tmp"
   $SUDO mv "$tmp" "$GOST_CONFIG_FILE"
@@ -643,7 +708,7 @@ use_tcp = ${use_tcp}
 use_udp = ${use_udp}
 EOF
   $SUDO systemctl restart realm || $SUDO systemctl start realm || true
-  echo -e "${SUCCESS_SYMBOL} realm 添加成功"
+  echo -e "${SUCCESS_SYMBOL} Realm rule added successfully"
 }
 
 engine_realm_list() {
@@ -764,42 +829,143 @@ ensure_dirs
 case "$CMD" in
   menu|"")
     # 交互式菜单模式
+    SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+    
+    # Show system information function
+    show_system_info() {
+      echo -e "${BOLD}${BLUE}============================================================${PLAIN}"
+      echo -e "${BOLD}${GREEN}                Smart Forwarding Management (fwrd)                ${PLAIN}"
+      echo -e "${BOLD}${BLUE}============================================================${PLAIN}"
+      echo ""
+      
+      # Show current active forwarding rules count
+      local brook_count=0 gost_count=0 realm_count=0
+      [ -f "$BROOK_CONFIG_FILE" ] && brook_count=$(grep -v '^$' "$BROOK_CONFIG_FILE" 2>/dev/null | wc -l)
+      [ -f "$GOST_CONFIG_FILE" ] && gost_count=$(jq '.services | length' "$GOST_CONFIG_FILE" 2>/dev/null || echo 0)
+      [ -f "$REALM_CONFIG" ] && realm_count=$(grep -c '^\[\[endpoints\]\]' "$REALM_CONFIG" 2>/dev/null || echo 0)
+      
+      local total_rules=$((brook_count + gost_count + realm_count))
+      echo -e "${INFO_SYMBOL} ${BOLD}System Status:${PLAIN}"
+      echo -e "  * Total forwarding rules: ${YELLOW}$total_rules${PLAIN}"
+      echo -e "  * Brook: ${GREEN}$brook_count${PLAIN} | Gost: ${GREEN}$gost_count${PLAIN} | Realm: ${GREEN}$realm_count${PLAIN}"
+      
+      # Check service status
+      local gost_status="stopped" realm_status="stopped"
+      systemctl is-active gost >/dev/null 2>&1 && gost_status="running"
+      systemctl is-active realm >/dev/null 2>&1 && realm_status="running"
+      echo -e "  * Gost service: ${GREEN}$gost_status${PLAIN} | Realm service: ${GREEN}$realm_status${PLAIN}"
+      echo ""
+    }
+    
     while true; do
       clear
-      echo -e "${BOLD}${BLUE}========== Smart Forwarding (fwrd) ==========${PLAIN}"
-      echo -e "  ${GREEN}1.${PLAIN} Quick add (engine + protocol only)"
-      echo -e "  ${GREEN}2.${PLAIN} Add forwarding rule (advanced)"
-      echo -e "  ${GREEN}3.${PLAIN} List forwarding rules"
-      echo -e "  ${GREEN}4.${PLAIN} Delete forwarding rule"
-      echo -e "  ${GREEN}5.${PLAIN} Restart service"
-      echo -e "  ${GREEN}6.${PLAIN} View status"
-      echo -e "  ${GREEN}7.${PLAIN} View logs"
-      echo -e "  ${GREEN}0.${PLAIN} Exit"
-      echo -e "${BOLD}${BLUE}=========================================${PLAIN}"
-      read -rp "Please select [0-7]: " msel
+      show_system_info
+      
+      echo -e "${BOLD}${YELLOW}QUICK SCENARIOS${PLAIN}"
+      echo -e "  ${GREEN}1.${PLAIN} Web Forwarding (HTTP/HTTPS)"
+      echo -e "  ${GREEN}2.${PLAIN} DNS Forwarding (port 53)"
+      echo -e "  ${GREEN}3.${PLAIN} Remote Access (SSH/RDP/VNC)"
+      echo ""
+      
+      echo -e "${BOLD}${YELLOW}GENERAL MANAGEMENT${PLAIN}"
+      echo -e "  ${GREEN}4.${PLAIN} Quick Add Rule"
+      echo -e "  ${GREEN}5.${PLAIN} Advanced Add (port range/split UDP)"
+      echo -e "  ${GREEN}6.${PLAIN} List Forwarding Rules"
+      echo -e "  ${GREEN}7.${PLAIN} Delete Forwarding Rule"
+      echo ""
+      
+      echo -e "${BOLD}${YELLOW}SYSTEM MANAGEMENT${PLAIN}"
+      echo -e "  ${GREEN}8.${PLAIN} Restart Service"
+      echo -e "  ${GREEN}9.${PLAIN} View Status"
+      echo -e "  ${GREEN}10.${PLAIN} View Logs"
+      echo ""
+      
+      echo -e "${BOLD}${RED}0.${PLAIN} Exit"
+      echo ""
+      echo -e "${BOLD}${BLUE}============================================================${PLAIN}"
+      read -rp "$(echo -e "${BOLD}${GREEN}Please select operation [0-10]:${PLAIN} ")" msel
       case "$msel" in
         1)
-          quick_add
-          read -n1 -r -p "Press any key to continue..." ;;
+          menu_quick_web
+          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
         2)
-          read -rp "Engine [brook/gost/realm/nftables]: " ENGINE
-          [ -n "$ENGINE" ] && ensure_engine_ready "$ENGINE" || true
-          read -rp "Protocol [tcp/udp/both] (default: tcp): " PROTO; PROTO=${PROTO:-tcp}
-          read -rp "Listen address (e.g. :8080 or 0.0.0.0:8080): " LISTEN
-          read -rp "Target (e.g. 1.2.3.4:80 or example.com:443): " TARGET
+          menu_quick_dns
+          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
+        3)
+          menu_quick_remote
+          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
+        4)
+          quick_add
+          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
+        5)
+          echo -e "${BOLD}${BLUE}Advanced Add Forwarding Rule${PLAIN}"
+          echo -e "${YELLOW}Select forwarding engine:${PLAIN}"
+          echo -e "  1) brook   (stable & efficient)  2) gost    (feature-rich)"
+          echo -e "  3) realm   (high-perf Rust)      4) nftables (kernel-level)"
+          read -rp "Select [1-4]: " engine_choice
+          case "${engine_choice:-2}" in
+            1) ENGINE="brook" ;;
+            2) ENGINE="gost" ;;
+            3) ENGINE="realm" ;;
+            4) ENGINE="nftables" ;;
+            *) echo -e "${ERROR_SYMBOL} Invalid selection, using default gost"; ENGINE="gost" ;;
+          esac
+          [ -n "$ENGINE" ] && ensure_engine_ready "$ENGINE"
+          
+          echo -e "${YELLOW}Select protocol:${PLAIN}"
+          echo -e "  1) tcp (default)  2) udp  3) both (tcp+udp)"
+          read -rp "Select [1-3]: " proto_choice
+          case "${proto_choice:-1}" in
+            1) PROTO="tcp" ;;
+            2) PROTO="udp" ;;
+            3) PROTO="both" ;;
+            *) PROTO="tcp" ;;
+          esac
+          
+          read -rp "$(echo -e "${YELLOW}Listen address${PLAIN} (e.g. :8080 or 0.0.0.0:8080): ")" LISTEN
+          [ -z "$LISTEN" ] && { echo -e "${ERROR_SYMBOL} Listen address cannot be empty"; read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"; continue; }
+          if ! validate_listen_addr "$LISTEN"; then
+            echo -e "${ERROR_SYMBOL} Invalid listen address format, please use format: :port or IP:port"
+            read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"
+            continue
+          fi
+          
+          read -rp "$(echo -e "${YELLOW}Target address${PLAIN} (e.g. 1.2.3.4:80 or example.com:443): ")" TARGET
+          [ -z "$TARGET" ] && { echo -e "${ERROR_SYMBOL} Target address cannot be empty"; read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"; continue; }
+          if ! validate_host_port "$TARGET"; then
+            echo -e "${ERROR_SYMBOL} Invalid target address format, please use format: host:port"
+            read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"
+            continue
+          fi
           SPLIT_UDP="n"
           if [ "$PROTO" = "both" ]; then
-            read -rp "Use different target for UDP? [y/N]: " SPLIT_UDP
+            echo -e "${YELLOW}TCP+UDP mode options:${PLAIN}"
+            read -rp "Use different target address for UDP? [y/N]: " SPLIT_UDP
             if [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
-              read -rp "UDP target (e.g. 1.2.3.4:53): " TARGET_UDP
+              read -rp "$(echo -e "${YELLOW}UDP target address${PLAIN} (e.g. 1.2.3.4:53): ")" TARGET_UDP
+              if [ -z "$TARGET_UDP" ]; then
+                echo -e "${WARN_SYMBOL} UDP target address is empty, will use TCP target address"
+              elif ! validate_host_port "$TARGET_UDP"; then
+                echo -e "${ERROR_SYMBOL} Invalid UDP target address format, please use format: host:port"
+                read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"
+                continue
+              fi
             fi
           fi
+          
+          echo -e "${YELLOW}Advanced options:${PLAIN}"
           read -rp "Use port range? [y/N]: " USE_RANGE
-          read -rp "Rule name (optional): " NAME
+          read -rp "$(echo -e "${YELLOW}Rule name${PLAIN} (optional): ")" NAME
 
           if [[ "$USE_RANGE" =~ ^[Yy]$ ]]; then
-            read -rp "Local port range start-end (e.g. 8000-8003): " RANGE
-            read -rp "Range mapping type: 1) Many-to-one 2) One-to-one [1]: " MAP_TYPE
+            echo -e "${BOLD}${BLUE}Port Range Configuration${PLAIN}"
+            read -rp "$(echo -e "${YELLOW}Local port range${PLAIN} (e.g. 8000-8003): ")" RANGE
+            [ -z "$RANGE" ] && { echo -e "${ERROR_SYMBOL} Port range cannot be empty"; read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"; continue; }
+            
+            echo -e "${YELLOW}Mapping type:${PLAIN}"
+            echo -e "  1) Many-to-one (all local ports -> single target port)"
+            echo -e "  2) One-to-one (local port range -> target port range)"
+            read -rp "Select [1-2]: " MAP_TYPE
             MAP_TYPE=${MAP_TYPE:-1}
 
             # 解析 listen 主机与端口
@@ -813,15 +979,38 @@ case "$CMD" in
 
             L_START="${RANGE%-*}"; L_END="${RANGE#*-}"
             if ! [[ "$L_START" =~ ^[0-9]+$ && "$L_END" =~ ^[0-9]+$ && "$L_START" -le "$L_END" ]]; then
-              echo -e "${ERROR_SYMBOL} Invalid port range"; read -n1 -r -p "Press any key to continue..."; continue
+              echo -e "${ERROR_SYMBOL} Invalid port range format, please use format: start_port-end_port (e.g. 8000-8003)"; read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"; continue
             fi
 
             if [ "$MAP_TYPE" = "2" ]; then
-              read -rp "Target start port (for one-to-one): " T_START
-              if ! [[ "$T_START" =~ ^[0-9]+$ ]]; then echo -e "${ERROR_SYMBOL} Invalid target start port"; read -n1 -r -p "Press any key to continue..."; continue; fi
+              read -rp "$(echo -e "${YELLOW}Target start port${PLAIN} (for one-to-one mapping): ")" T_START
+              if ! [[ "$T_START" =~ ^[0-9]+$ ]]; then echo -e "${ERROR_SYMBOL} Invalid target start port format"; read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"; continue; fi
             fi
 
-            # 循环创建
+            # Show preview of rules to be created
+            echo -e "${BOLD}${BLUE}Rule Preview (port range: $L_START-$L_END)${PLAIN}"
+            rule_count=$((L_END - L_START + 1))
+            if [ "$PROTO" = "both" ] && [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
+              rule_count=$((rule_count * 2))  # TCP + UDP split
+            elif [ "$PROTO" = "both" ]; then
+              rule_count=$((rule_count * 2))  # TCP + UDP same target
+            fi
+            echo -e "${INFO_SYMBOL} Will create ${YELLOW}$rule_count${PLAIN} forwarding rules"
+            echo -e "${INFO_SYMBOL} Engine: ${GREEN}$ENGINE${PLAIN} | Protocol: ${GREEN}$PROTO${PLAIN}"
+            if [ "$MAP_TYPE" = "2" ]; then
+              echo -e "${INFO_SYMBOL} Mapping: ${YELLOW}one-to-one${PLAIN} (port $L_START -> ${T_START})"
+            else
+              echo -e "${INFO_SYMBOL} Mapping: ${YELLOW}many-to-one${PLAIN} (ports $L_START-$L_END -> ${T_PORT})"
+            fi
+            read -rp "$(echo -e "${BOLD}${GREEN}Confirm creation? [Y/n]:${PLAIN} ")" confirm
+            if [[ "$confirm" =~ ^[Nn]$ ]]; then
+              echo -e "${WARN_SYMBOL} Operation cancelled"
+              read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"
+              continue
+            fi
+
+            # Loop creation
+            echo -e "${INFO_SYMBOL} Starting rule creation..."
             p=$L_START
             while [ "$p" -le "$L_END" ]; do
               # 构造 listen
@@ -837,7 +1026,7 @@ case "$CMD" in
               # 处理 split UDP
               if [ "$PROTO" = "both" ] && [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
                 # TCP
-                "$0" add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
+                "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
                 # UDP
                 if [ -n "${TARGET_UDP:-}" ]; then
                   if [ "$MAP_TYPE" = "2" ]; then
@@ -849,60 +1038,121 @@ case "$CMD" in
                 else
                   NEW_UDP_TARGET="$NEW_TARGET"
                 fi
-                "$0" add --engine "$ENGINE" --proto udp --listen "$NEW_LISTEN" --target "$NEW_UDP_TARGET" ${NAME:+--name "${NAME}-udp-$p"}
+                "$SCRIPT_PATH" add --engine "$ENGINE" --proto udp --listen "$NEW_LISTEN" --target "$NEW_UDP_TARGET" ${NAME:+--name "${NAME}-udp-$p"}
               else
                 # 非分离：按选择的 proto 处理
                 if [ "$PROTO" = "both" ]; then
-                  "$0" add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
-                  "$0" add --engine "$ENGINE" --proto udp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-udp-$p"}
+                  "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
+                  "$SCRIPT_PATH" add --engine "$ENGINE" --proto udp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-udp-$p"}
                 else
-                  "$0" add --engine "$ENGINE" --proto "$PROTO" --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-$p"}
+                  "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-$p"}
                 fi
               fi
               p=$((p+1))
             done
+            echo -e "${SUCCESS_SYMBOL} Port range rules creation completed!"
           else
-            # 非范围：单条
+            # Non-range: single rule
+            echo -e "${BOLD}${BLUE}Rule Preview${PLAIN}"
+            echo -e "${INFO_SYMBOL} Engine: ${GREEN}$ENGINE${PLAIN} | Protocol: ${GREEN}$PROTO${PLAIN}"
+            echo -e "${INFO_SYMBOL} Listen: ${YELLOW}$LISTEN${PLAIN} -> Target: ${YELLOW}$TARGET${PLAIN}"
+            if [ "$PROTO" = "both" ] && [[ "$SPLIT_UDP" =~ ^[Yy]$ ]] && [ -n "${TARGET_UDP:-}" ]; then
+              echo -e "${INFO_SYMBOL} UDP target: ${YELLOW}$TARGET_UDP${PLAIN} (split mode)"
+            fi
+            [ -n "$NAME" ] && echo -e "${INFO_SYMBOL} Rule name: ${GREEN}$NAME${PLAIN}"
+            
+            read -rp "$(echo -e "${BOLD}${GREEN}Confirm creation? [Y/n]:${PLAIN} ")" confirm
+            if [[ "$confirm" =~ ^[Nn]$ ]]; then
+              echo -e "${WARN_SYMBOL} Operation cancelled"
+              read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"
+              continue
+            fi
+            
             if [ "$PROTO" = "both" ] && [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
-              "$0" add --engine "$ENGINE" --proto tcp --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "${NAME}-tcp"}
-              "$0" add --engine "$ENGINE" --proto udp --listen "$LISTEN" --target "${TARGET_UDP:-$TARGET}" ${NAME:+--name "${NAME}-udp"}
+              "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "${NAME}-tcp"}
+              "$SCRIPT_PATH" add --engine "$ENGINE" --proto udp --listen "$LISTEN" --target "${TARGET_UDP:-$TARGET}" ${NAME:+--name "${NAME}-udp"}
+              echo -e "${SUCCESS_SYMBOL} TCP/UDP split rules creation completed!"
             else
-              "$0" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
+              "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
+              echo -e "${SUCCESS_SYMBOL} Forwarding rule creation completed!"
             fi
           fi
-          read -n1 -r -p "Press any key to continue..." ;;
-        3)
-          read -rp "Engine (press Enter to show all): " ENGINE
-          if [ -n "$ENGINE" ]; then "$0" list --engine "$ENGINE"; else "$0" list; fi
-          read -n1 -r -p "Press any key to continue..." ;;
-        4)
-          read -rp "Engine [brook/gost/realm/nftables]: " ENGINE
-          read -rp "Rule name or service name: " NAME
-          "$0" delete --engine "$ENGINE" --name "$NAME"
-          read -n1 -r -p "Press any key to continue..." ;;
-        5)
-          read -rp "Engine [gost/realm]: " ENGINE
-          "$0" restart --engine "$ENGINE"
-          read -n1 -r -p "Press any key to continue..." ;;
+          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
         6)
-          read -rp "Engine [brook/gost/realm/nftables]: " ENGINE
-          "$0" status --engine "$ENGINE"
-          read -n1 -r -p "Press any key to continue..." ;;
+          echo -e "${BOLD}${BLUE}List Forwarding Rules${PLAIN}"
+          echo -e "${YELLOW}Select engine (press enter to show all):${PLAIN}"
+          echo -e "  1) brook  2) gost  3) realm  4) nftables  5) all"
+          read -rp "Select [1-5]: " engine_choice
+          case "${engine_choice:-5}" in
+            1) ENGINE="brook" ;;
+            2) ENGINE="gost" ;;
+            3) ENGINE="realm" ;;
+            4) ENGINE="nftables" ;;
+            5) ENGINE="" ;;
+          esac
+          if [ -n "$ENGINE" ]; then "$SCRIPT_PATH" list --engine "$ENGINE"; else "$SCRIPT_PATH" list; fi
+          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
         7)
-          read -rp "Engine [brook/gost/realm]: " ENGINE
-          "$0" logs --engine "$ENGINE"
-          read -n1 -r -p "Press any key to continue..." ;;
+          echo -e "${BOLD}${BLUE}Delete Forwarding Rule${PLAIN}"
+          echo -e "${YELLOW}Select engine:${PLAIN}"
+          echo -e "  1) brook  2) gost  3) realm  4) nftables"
+          read -rp "Select [1-4]: " engine_choice
+          case "${engine_choice:-1}" in
+            1) ENGINE="brook" ;;
+            2) ENGINE="gost" ;;
+            3) ENGINE="realm" ;;
+            4) ENGINE="nftables" ;;
+          esac
+          read -rp "Rule name or service name: " NAME
+          [ -n "$NAME" ] && "$SCRIPT_PATH" delete --engine "$ENGINE" --name "$NAME" || echo -e "${ERROR_SYMBOL} Rule name cannot be empty"
+          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
+        8)
+          echo -e "${BOLD}${BLUE}Restart Service${PLAIN}"
+          echo -e "${YELLOW}Select service to restart:${PLAIN}"
+          echo -e "  1) gost  2) realm"
+          read -rp "Select [1-2]: " service_choice
+          case "${service_choice:-1}" in
+            1) ENGINE="gost" ;;
+            2) ENGINE="realm" ;;
+          esac
+          "$SCRIPT_PATH" restart --engine "$ENGINE"
+          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
+        9)
+          echo -e "${BOLD}${BLUE}View Status${PLAIN}"
+          echo -e "${YELLOW}Select engine:${PLAIN}"
+          echo -e "  1) brook  2) gost  3) realm  4) nftables"
+          read -rp "Select [1-4]: " engine_choice
+          case "${engine_choice:-2}" in
+            1) ENGINE="brook" ;;
+            2) ENGINE="gost" ;;
+            3) ENGINE="realm" ;;
+            4) ENGINE="nftables" ;;
+          esac
+          "$SCRIPT_PATH" status --engine "$ENGINE"
+          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
+        10)
+          echo -e "${BOLD}${BLUE}View Logs${PLAIN}"
+          echo -e "${YELLOW}Select engine:${PLAIN}"
+          echo -e "  1) brook  2) gost  3) realm"
+          read -rp "Select [1-3]: " engine_choice
+          case "${engine_choice:-2}" in
+            1) ENGINE="brook" ;;
+            2) ENGINE="gost" ;;
+            3) ENGINE="realm" ;;
+          esac
+          "$SCRIPT_PATH" logs --engine "$ENGINE"
+          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
         0) echo -e "${SUCCESS_SYMBOL} Goodbye!"; exit 0 ;;
-        *) echo -e "${ERROR_SYMBOL} Invalid selection"; sleep 1 ;;
+        *) echo -e "${ERROR_SYMBOL} Invalid selection, please enter 0-10"; sleep 1 ;;
       esac
     done
     ;;
   add)
     [ -n "$ENGINE" ] && ensure_engine_ready "$ENGINE" || true
-    [ -z "$ENGINE" ] && { echo -e "${ERROR_SYMBOL} 需要 --engine"; usage; exit 2; }
-    [ -z "$PROTO" ] && { echo -e "${ERROR_SYMBOL} 需要 --proto"; usage; exit 2; }
-    [ -z "$LISTEN" ] && { echo -e "${ERROR_SYMBOL} 需要 --listen"; usage; exit 2; }
-    [ -z "$TARGET" ] && { echo -e "${ERROR_SYMBOL} 需要 --target"; usage; exit 2; }
+    [ -z "$ENGINE" ] && { echo -e "${ERROR_SYMBOL} --engine required"; usage; exit 2; }
+    [ -z "$PROTO" ] && { echo -e "${ERROR_SYMBOL} --proto required"; usage; exit 2; }
+    [ -z "$LISTEN" ] && { echo -e "${ERROR_SYMBOL} --listen required"; usage; exit 2; }
+    [ -z "$TARGET" ] && { echo -e "${ERROR_SYMBOL} --target required"; usage; exit 2; }
 
     # 非交互自动扩展：--range 与 --target-udp
     if [ -n "${RANGE}" ]; then
@@ -923,7 +1173,7 @@ case "$CMD" in
       fi
       L_START="${RANGE%-*}"; L_END="${RANGE#*-}"
       if ! [[ "$L_START" =~ ^[0-9]+$ && "$L_END" =~ ^[0-9]+$ && "$L_START" -le "$L_END" ]]; then
-        echo -e "${ERROR_SYMBOL} 端口范围无效"; exit 2
+        echo -e "${ERROR_SYMBOL} Invalid port range"; exit 2
       fi
       p=$L_START
       while [ "$p" -le "$L_END" ]; do
@@ -980,7 +1230,7 @@ case "$CMD" in
           gost) engine_gost_add tcp "$LISTEN" "$TARGET" ${NAME:+"${NAME}-tcp"} ; engine_gost_add udp "$LISTEN" "$TARGET_UDP" ${NAME:+"${NAME}-udp"} ;;
           realm) engine_realm_add tcp "$LISTEN" "$TARGET" ${NAME:+"${NAME}-tcp"} ; engine_realm_add udp "$LISTEN" "$TARGET_UDP" ${NAME:+"${NAME}-udp"} ;;
           nftables) engine_nftables_add tcp "$LISTEN" "$TARGET" ${NAME:+"${NAME}-tcp"} ; engine_nftables_add udp "$LISTEN" "$TARGET_UDP" ${NAME:+"${NAME}-udp"} ;;
-          *) echo -e "${ERROR_SYMBOL} 不支持的引擎: $ENGINE"; exit 2 ;;
+          *) echo -e "${ERROR_SYMBOL} Unsupported engine: $ENGINE"; exit 2 ;;
         esac
       else
         case "$ENGINE" in
@@ -988,7 +1238,7 @@ case "$CMD" in
           gost) engine_gost_add "$PROTO" "$LISTEN" "$TARGET" "$NAME" ;;
           realm) engine_realm_add "$PROTO" "$LISTEN" "$TARGET" "$NAME" ;;
           nftables) engine_nftables_add "$PROTO" "$LISTEN" "$TARGET" "$NAME" ;;
-          *) echo -e "${ERROR_SYMBOL} 不支持的引擎: $ENGINE"; exit 2 ;;
+          *) echo -e "${ERROR_SYMBOL} Unsupported engine: $ENGINE"; exit 2 ;;
         esac
       fi
     fi
@@ -1008,19 +1258,19 @@ case "$CMD" in
     esac
     ;;
   delete)
-    [ -z "$ENGINE" ] && { echo -e "${ERROR_SYMBOL} 需要 --engine"; exit 2; }
+    [ -z "$ENGINE" ] && { echo -e "${ERROR_SYMBOL} --engine required"; exit 2; }
     case "$ENGINE" in
       brook) engine_brook_delete "$NAME" ;;
       gost) engine_gost_delete "$NAME" ;;
       realm) engine_realm_delete "$NAME" ;;
       nftables) engine_nftables_delete "$NAME" ;;
-      *) echo -e "${ERROR_SYMBOL} 暂不支持该引擎的 delete: $ENGINE"; exit 2 ;;
+      *) echo -e "${ERROR_SYMBOL} Delete not supported for engine: $ENGINE"; exit 2 ;;
     esac
     ;;
   restart)
     case "$ENGINE" in
-      gost) $SUDO systemctl restart gost && echo -e "${SUCCESS_SYMBOL} gost 重启完成" ;;
-      realm) $SUDO systemctl restart realm && echo -e "${SUCCESS_SYMBOL} realm 重启完成" ;;
+      gost) $SUDO systemctl restart gost && echo -e "${SUCCESS_SYMBOL} Gost service restarted" ;;
+      realm) $SUDO systemctl restart realm && echo -e "${SUCCESS_SYMBOL} Realm service restarted" ;;
       *) echo -e "${ERROR_SYMBOL} 不支持的引擎: $ENGINE"; exit 2 ;;
     esac
     ;;

@@ -17,3 +17,6 @@
 
 # Cursor IDE
 .cursor/
+
+# SSH private key
+unit04
