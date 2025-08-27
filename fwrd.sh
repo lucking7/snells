@@ -7,7 +7,7 @@
 # 2) 统一资源模型：--engine --proto --listen --target [--target-udp] --ipver --name [--range]
 # 3) 统一输出接口：--output text|json，统一退出码（0 成功；非 0 失败）
 
-set -euo pipefail
+set -eo pipefail
 
 # 颜色与符号（与各脚本统一）
 RED='\033[0;31m'
@@ -78,24 +78,6 @@ json_escape() { echo -n "$1" | python3 -c 'import json,sys;print(json.dumps(sys.
 
 is_ipv6_literal() { [[ "$1" == *":"* ]] && [[ "$1" != \[*\]* ]]; }
 wrap_ipv6() { if is_ipv6_literal "$1"; then echo "[$1]"; else echo "$1"; fi }
-
-# Resolve script path reliably (avoid /proc/self/fd)
-get_script_path() {
-  local src="${BASH_SOURCE[0]}"
-  while [ -h "$src" ]; do
-    local dir; dir="$(cd -P "$(dirname "$src")" && pwd)"
-    src="$(readlink "$src")"
-    [[ "$src" != /* ]] && src="$dir/$src"
-  done
-  local dir; dir="$(cd -P "$(dirname "$src")" && pwd)"
-  echo "$dir/$(basename "$src")"
-}
-SCRIPT_PATH="$(get_script_path)"
-
-# Helper: run add subcommand with TTY as stdin so interactive parents using pipes won't break
-fwrd_add() {
-  "$SCRIPT_PATH" add "$@" </dev/tty
-}
 
 # 输入验证函数
 validate_port() {
@@ -430,9 +412,9 @@ quick_add() {
   # 复用统一 add 逻辑
   SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
   if [ -n "$UDP_TARGET" ]; then
-    fwrd_add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" --target-udp "$UDP_TARGET" ${NAME:+--name "$NAME"}
+    "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" --target-udp "$UDP_TARGET" ${NAME:+--name "$NAME"}
   else
-    fwrd_add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
+    "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
   fi
   echo -e "${SUCCESS_SYMBOL} Quick forward created"
 }
@@ -472,24 +454,24 @@ menu_quick_web() {
   case "$web_choice" in
     1)
       local_port=$(find_available_port 8000 8999)
-      fwrd_add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:80" --name "web-http-$local_port"
+      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:80" --name "web-http-$local_port"
       echo -e "${SUCCESS_SYMBOL} http -> :$local_port => ${target_host}:80" ;;
     2)
       local_port=$(find_available_port 8400 8499)
-      fwrd_add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:443" --name "web-https-$local_port"
+      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:443" --name "web-https-$local_port"
       echo -e "${SUCCESS_SYMBOL} https -> :$local_port => ${target_host}:443" ;;
     3)
       http_port=$(find_available_port 8000 8099)
       https_port=$(find_available_port 8400 8499)
-      fwrd_add --engine "$ENGINE" --proto tcp --listen ":$http_port" --target "${target_host}:80" --name "web-http-$http_port"
-      fwrd_add --engine "$ENGINE" --proto tcp --listen ":$https_port" --target "${target_host}:443" --name "web-https-$https_port"
+      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$http_port" --target "${target_host}:80" --name "web-http-$http_port"
+      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$https_port" --target "${target_host}:443" --name "web-https-$https_port"
       echo -e "${SUCCESS_SYMBOL} http -> :$http_port => ${target_host}:80"
       echo -e "${SUCCESS_SYMBOL} https -> :$https_port => ${target_host}:443" ;;
     4)
       read -rp "Target port: " t_port
       [ -z "$t_port" ] && { echo -e "${ERROR_SYMBOL} Port required"; return; }
       local_port=$(find_available_port 8000 8999)
-      fwrd_add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "web-custom-$local_port"
+      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "web-custom-$local_port"
       echo -e "${SUCCESS_SYMBOL} web -> :$local_port => ${target_host}:$t_port" ;;
   esac
 }
@@ -515,7 +497,7 @@ menu_quick_dns() {
   esac
   [ -z "$target_ip" ] && { echo -e "${ERROR_SYMBOL} DNS IP required"; return; }
   local_port=$(find_available_port 10053 15053)
-  fwrd_add --engine "$ENGINE" --proto both --listen ":$local_port" --target "${target_ip}:53" --name "dns-$dns_name-$local_port"
+  "$SCRIPT_PATH" add --engine "$ENGINE" --proto both --listen ":$local_port" --target "${target_ip}:53" --name "dns-$dns_name-$local_port"
   echo -e "${SUCCESS_SYMBOL} dns -> :$local_port => ${target_ip}:53 (tcp+udp)"
 }
 
@@ -540,7 +522,7 @@ menu_quick_remote() {
     3) local_port=$(find_available_port 5900 5999); t_port=5901; name=vnc ;;
     4) read -rp "Target port: " t_port; local_port=$(find_available_port 10000 19999); name=custom ;;
   esac
-  fwrd_add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "remote-$name-$local_port"
+  "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "remote-$name-$local_port"
   echo -e "${SUCCESS_SYMBOL} remote -> :$local_port => ${target_host}:$t_port"
 }
 
@@ -561,7 +543,7 @@ while [ $# -gt 0 ]; do
     --range) RANGE="$2"; shift 2 ;;
     --output) OUTPUT="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
-    *) echo -e "${ERROR_SYMBOL} 未知参数: $1"; usage; exit 2 ;;
+    *) echo -e "${ERROR_SYMBOL} Unknown parameter: $1"; usage; exit 2 ;;
   esac
 done
 
@@ -812,7 +794,7 @@ engine_nftables_list() {
   fi
 }
 
-# nftables 删除：按 proto + dport 精确删除 prerouting 规则，或按 comment 名称删除
+# nftables delete: precisely delete prerouting rules by proto + dport, or delete by comment name
 engine_nftables_delete() {
   local spec="$1"
   [ -z "$spec" ] && { echo -e "${ERROR_SYMBOL} Please provide --name"; exit 2; }
@@ -826,9 +808,9 @@ engine_nftables_delete() {
           [ -n "$handle" ] && $SUDO nft delete rule $fam nat prerouting handle "$handle" || true
         done
     done
-    echo -e "${SUCCESS_SYMBOL} nftables 已尝试删除: $spec"
+    echo -e "${SUCCESS_SYMBOL} nftables attempted to delete: $spec"
   else
-    # 按 comment 名称删除
+    # Delete by comment name
     local comment="$spec"
     for fam in ip ip6; do
       nft list ruleset -a 2>/dev/null | awk -v F="$fam" -v C="$comment" \
@@ -838,15 +820,15 @@ engine_nftables_delete() {
           [ -n "$handle" ] && $SUDO nft delete rule $fam nat prerouting handle "$handle" || true
         done
     done
-    echo -e "${SUCCESS_SYMBOL} nftables 已尝试按 comment 删除: $comment"
+    echo -e "${SUCCESS_SYMBOL} nftables attempted to delete by comment: $comment"
   fi
 }
 
-# 命令分派
+# Command dispatch
 ensure_dirs
 case "$CMD" in
   menu|"")
-    # 交互式菜单模式
+    # Interactive menu mode
     SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
     
     # Show system information function
@@ -876,7 +858,7 @@ case "$CMD" in
     }
     
     while true; do
-      clear 2>/dev/null || true
+      clear
       show_system_info
       
       echo -e "${BOLD}${YELLOW}QUICK SCENARIOS${PLAIN}"
@@ -901,12 +883,7 @@ case "$CMD" in
       echo -e "${BOLD}${RED}0.${PLAIN} Exit"
       echo ""
       echo -e "${BOLD}${BLUE}============================================================${PLAIN}"
-      if [ -t 0 ]; then
-        read -rp "$(echo -e "${BOLD}${GREEN}Please select operation [0-10]:${PLAIN} ")" msel || msel=""
-      else
-        printf "Non-interactive mode. Type: fwrd.sh add|list|delete|restart|status|logs\n"
-        exit 0
-      fi
+      read -rp "$(echo -e "${BOLD}${GREEN}Please select operation [0-10]:${PLAIN} ")" msel
       case "$msel" in
         1)
           menu_quick_web
@@ -1049,7 +1026,7 @@ case "$CMD" in
               # 处理 split UDP
               if [ "$PROTO" = "both" ] && [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
                 # TCP
-                fwrd_add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
+                "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
                 # UDP
                 if [ -n "${TARGET_UDP:-}" ]; then
                   if [ "$MAP_TYPE" = "2" ]; then
@@ -1065,10 +1042,10 @@ case "$CMD" in
               else
                 # 非分离：按选择的 proto 处理
                 if [ "$PROTO" = "both" ]; then
-                  fwrd_add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
-                  fwrd_add --engine "$ENGINE" --proto udp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-udp-$p"}
+                  "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
+                  "$SCRIPT_PATH" add --engine "$ENGINE" --proto udp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-udp-$p"}
                 else
-                  fwrd_add --engine "$ENGINE" --proto "$PROTO" --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-$p"}
+                  "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-$p"}
                 fi
               fi
               p=$((p+1))
@@ -1092,11 +1069,11 @@ case "$CMD" in
             fi
             
             if [ "$PROTO" = "both" ] && [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
-              fwrd_add --engine "$ENGINE" --proto tcp --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "${NAME}-tcp"}
-              fwrd_add --engine "$ENGINE" --proto udp --listen "$LISTEN" --target "${TARGET_UDP:-$TARGET}" ${NAME:+--name "${NAME}-udp"}
+              "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "${NAME}-tcp"}
+              "$SCRIPT_PATH" add --engine "$ENGINE" --proto udp --listen "$LISTEN" --target "${TARGET_UDP:-$TARGET}" ${NAME:+--name "${NAME}-udp"}
               echo -e "${SUCCESS_SYMBOL} TCP/UDP split rules creation completed!"
             else
-              fwrd_add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
+              "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
               echo -e "${SUCCESS_SYMBOL} Forwarding rule creation completed!"
             fi
           fi
