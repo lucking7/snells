@@ -79,25 +79,22 @@ json_escape() { echo -n "$1" | python3 -c 'import json,sys;print(json.dumps(sys.
 is_ipv6_literal() { [[ "$1" == *":"* ]] && [[ "$1" != \[*\]* ]]; }
 wrap_ipv6() { if is_ipv6_literal "$1"; then echo "[$1]"; else echo "$1"; fi }
 
-# Robust script path resolver to avoid /dev/fd and pipe paths under TTY/pipe contexts
-resolve_self() {
-  local src
-  if [ -n "${BASH_SOURCE[0]:-}" ]; then
-    src="${BASH_SOURCE[0]}"
-  else
-    src="$0"
-  fi
-  # Fallback to which if path is a fd or pipe
-  if echo "$src" | grep -Eq '^/proc/|^/dev/fd/' || echo "$src" | grep -q 'pipe:'; then
-    if command -v fwrd.sh >/dev/null 2>&1; then
-      src="$(command -v fwrd.sh)"
-    fi
-  fi
-  case "$src" in
-    /*) : ;;
-    *) src="$PWD/$src" ;;
-  esac
-  realpath "$src" 2>/dev/null || readlink -f "$src" 2>/dev/null || echo "$src"
+# Resolve script path reliably (avoid /proc/self/fd)
+get_script_path() {
+  local src="${BASH_SOURCE[0]}"
+  while [ -h "$src" ]; do
+    local dir; dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  local dir; dir="$(cd -P "$(dirname "$src")" && pwd)"
+  echo "$dir/$(basename "$src")"
+}
+SCRIPT_PATH="$(get_script_path)"
+
+# Helper: run add subcommand with TTY as stdin so interactive parents using pipes won't break
+fwrd_add() {
+  "$SCRIPT_PATH" add "$@" </dev/tty
 }
 
 # 输入验证函数
@@ -431,11 +428,11 @@ quick_add() {
   read -rp "Rule name (optional): " NAME
 
   # 复用统一 add 逻辑
-  SCRIPT_PATH="$(resolve_self)"
+  SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
   if [ -n "$UDP_TARGET" ]; then
-    "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" --target-udp "$UDP_TARGET" ${NAME:+--name "$NAME"}
+    fwrd_add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" --target-udp "$UDP_TARGET" ${NAME:+--name "$NAME"}
   else
-    "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
+    fwrd_add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
   fi
   echo -e "${SUCCESS_SYMBOL} Quick forward created"
 }
@@ -460,7 +457,7 @@ select_engine() {
 menu_quick_web() {
   clear
   echo -e "${BOLD}${BLUE}========== Quick Web Forward ==========${PLAIN}"
-  local SCRIPT_PATH="$(resolve_self)"
+  local SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
   ENGINE=$(select_engine)
   ensure_engine_ready "$ENGINE"
   read -rp "Target host or IP: " target_host
@@ -475,24 +472,24 @@ menu_quick_web() {
   case "$web_choice" in
     1)
       local_port=$(find_available_port 8000 8999)
-      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:80" --name "web-http-$local_port"
+      fwrd_add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:80" --name "web-http-$local_port"
       echo -e "${SUCCESS_SYMBOL} http -> :$local_port => ${target_host}:80" ;;
     2)
       local_port=$(find_available_port 8400 8499)
-      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:443" --name "web-https-$local_port"
+      fwrd_add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:443" --name "web-https-$local_port"
       echo -e "${SUCCESS_SYMBOL} https -> :$local_port => ${target_host}:443" ;;
     3)
       http_port=$(find_available_port 8000 8099)
       https_port=$(find_available_port 8400 8499)
-      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$http_port" --target "${target_host}:80" --name "web-http-$http_port"
-      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$https_port" --target "${target_host}:443" --name "web-https-$https_port"
+      fwrd_add --engine "$ENGINE" --proto tcp --listen ":$http_port" --target "${target_host}:80" --name "web-http-$http_port"
+      fwrd_add --engine "$ENGINE" --proto tcp --listen ":$https_port" --target "${target_host}:443" --name "web-https-$https_port"
       echo -e "${SUCCESS_SYMBOL} http -> :$http_port => ${target_host}:80"
       echo -e "${SUCCESS_SYMBOL} https -> :$https_port => ${target_host}:443" ;;
     4)
       read -rp "Target port: " t_port
       [ -z "$t_port" ] && { echo -e "${ERROR_SYMBOL} Port required"; return; }
       local_port=$(find_available_port 8000 8999)
-      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "web-custom-$local_port"
+      fwrd_add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "web-custom-$local_port"
       echo -e "${SUCCESS_SYMBOL} web -> :$local_port => ${target_host}:$t_port" ;;
   esac
 }
@@ -501,7 +498,7 @@ menu_quick_web() {
 menu_quick_dns() {
   clear
   echo -e "${BOLD}${BLUE}========== Quick DNS Forward ==========${PLAIN}"
-  local SCRIPT_PATH="$(resolve_self)"
+  local SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
   ENGINE=$(select_engine)
   ensure_engine_ready "$ENGINE"
   echo "  1) Cloudflare (1.1.1.1)"
@@ -518,7 +515,7 @@ menu_quick_dns() {
   esac
   [ -z "$target_ip" ] && { echo -e "${ERROR_SYMBOL} DNS IP required"; return; }
   local_port=$(find_available_port 10053 15053)
-  "$SCRIPT_PATH" add --engine "$ENGINE" --proto both --listen ":$local_port" --target "${target_ip}:53" --name "dns-$dns_name-$local_port"
+  fwrd_add --engine "$ENGINE" --proto both --listen ":$local_port" --target "${target_ip}:53" --name "dns-$dns_name-$local_port"
   echo -e "${SUCCESS_SYMBOL} dns -> :$local_port => ${target_ip}:53 (tcp+udp)"
 }
 
@@ -526,7 +523,7 @@ menu_quick_dns() {
 menu_quick_remote() {
   clear
   echo -e "${BOLD}${BLUE}========== Quick Remote Forward ==========${PLAIN}"
-  local SCRIPT_PATH="$(resolve_self)"
+  local SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
   ENGINE=$(select_engine)
   ensure_engine_ready "$ENGINE"
   read -rp "Target host or IP: " target_host
@@ -543,7 +540,7 @@ menu_quick_remote() {
     3) local_port=$(find_available_port 5900 5999); t_port=5901; name=vnc ;;
     4) read -rp "Target port: " t_port; local_port=$(find_available_port 10000 19999); name=custom ;;
   esac
-  "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "remote-$name-$local_port"
+  fwrd_add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "remote-$name-$local_port"
   echo -e "${SUCCESS_SYMBOL} remote -> :$local_port => ${target_host}:$t_port"
 }
 
@@ -1052,7 +1049,7 @@ case "$CMD" in
               # 处理 split UDP
               if [ "$PROTO" = "both" ] && [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
                 # TCP
-                "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
+                fwrd_add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
                 # UDP
                 if [ -n "${TARGET_UDP:-}" ]; then
                   if [ "$MAP_TYPE" = "2" ]; then
@@ -1068,10 +1065,10 @@ case "$CMD" in
               else
                 # 非分离：按选择的 proto 处理
                 if [ "$PROTO" = "both" ]; then
-                  "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
-                  "$SCRIPT_PATH" add --engine "$ENGINE" --proto udp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-udp-$p"}
+                  fwrd_add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
+                  fwrd_add --engine "$ENGINE" --proto udp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-udp-$p"}
                 else
-                  "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-$p"}
+                  fwrd_add --engine "$ENGINE" --proto "$PROTO" --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-$p"}
                 fi
               fi
               p=$((p+1))
@@ -1095,11 +1092,11 @@ case "$CMD" in
             fi
             
             if [ "$PROTO" = "both" ] && [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
-              "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "${NAME}-tcp"}
-              "$SCRIPT_PATH" add --engine "$ENGINE" --proto udp --listen "$LISTEN" --target "${TARGET_UDP:-$TARGET}" ${NAME:+--name "${NAME}-udp"}
+              fwrd_add --engine "$ENGINE" --proto tcp --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "${NAME}-tcp"}
+              fwrd_add --engine "$ENGINE" --proto udp --listen "$LISTEN" --target "${TARGET_UDP:-$TARGET}" ${NAME:+--name "${NAME}-udp"}
               echo -e "${SUCCESS_SYMBOL} TCP/UDP split rules creation completed!"
             else
-              "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
+              fwrd_add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
               echo -e "${SUCCESS_SYMBOL} Forwarding rule creation completed!"
             fi
           fi
