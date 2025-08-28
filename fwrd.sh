@@ -92,6 +92,27 @@ validate_port() {
     return 1
 }
 
+# Resolve hostname to IPv4 (for nftables DNAT)
+resolve_ipv4() {
+    local host="$1"
+    # If already IPv4, return directly
+    if [[ "$host" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        echo "$host"
+        return 0
+    fi
+    # Try getent, then dig
+    local ip
+    ip=$(getent ahostsv4 "$host" 2>/dev/null | awk '/STREAM/ {print $1; exit}')
+    if [[ -z "$ip" ]]; then
+        ip=$(command -v dig >/dev/null 2>&1 && dig +short A "$host" | head -n1 || true)
+    fi
+    if [[ -n "$ip" ]]; then
+        echo "$ip"
+        return 0
+    fi
+    return 1
+}
+
 # Progressive input with error correction
 get_valid_ip() {
     local prompt="$1"
@@ -453,7 +474,14 @@ add_rule_nftables() {
     
     log_info "Adding NFTables rule..."
     
-    if ! nft list tables 2>/dev/null | grep -q "table inet filter"; then
+    # Resolve domain to IPv4 for DNAT
+    local dnat_ip
+    if ! dnat_ip=$(resolve_ipv4 "$target_ip"); then
+        log_error "Failed to resolve target IP for nftables: $target_ip"
+        return 1
+    fi
+    
+    if ! nft list tables 2>/div/null | grep -q "table inet filter"; then
         log_info "Initializing NFTables..."
         nft -f - << 'EOF'
 flush ruleset
@@ -472,11 +500,11 @@ EOF
     local rule_comment="fwrd-${rule_id}"
     
     if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
-        nft add rule ip nat prerouting tcp dport "$listen_port" dnat to "${target_ip}:${target_port}" comment "\"$rule_comment\""
+        nft add rule ip nat prerouting tcp dport "$listen_port" dnat to "${dnat_ip}:${target_port}" comment "\"$rule_comment\""
     fi
     
     if [[ "$protocol" == "udp" || "$protocol" == "both" ]]; then
-        nft add rule ip nat prerouting udp dport "$listen_port" dnat to "${target_ip}:${target_port}" comment "\"$rule_comment\""
+        nft add rule ip nat prerouting udp dport "$listen_port" dnat to "${dnat_ip}:${target_port}" comment "\"$rule_comment\""
     fi
     
     nft list ruleset > /etc/nftables.conf
@@ -497,8 +525,10 @@ add_rule_realm() {
     
     log_info "Adding Realm rule..."
     
-    local config_file="/root/.realm/config.toml"
-    mkdir -p "$(dirname "$config_file")"
+    local config_dir="/etc/realm"
+    local config_file="$config_dir/config.toml"
+    mkdir -p "$config_dir"
+    chown -R realm:realm "$config_dir" 2>/dev/null || true
     
     if [[ ! -f "$config_file" ]]; then
         cat > "$config_file" << 'EOF'
@@ -507,6 +537,7 @@ no_tcp = false
 use_udp = true
 ipv6_only = false
 EOF
+        chown realm:realm "$config_file" 2>/dev/null || true
     fi
     
     local remark="Forward Rule ${rule_id}"
@@ -548,7 +579,7 @@ User=realm
 Group=realm
 Restart=on-failure
 RestartSec=5s
-ExecStart=$TOOLS_DIR/realm -c /root/.realm/config.toml
+ExecStart=$TOOLS_DIR/realm -c /etc/realm/config.toml
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -862,7 +893,12 @@ show_system_status() {
     echo
     local rules_count=$(jq '.rules | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
     echo "Active rules: $rules_count"
-    local connections=$(netstat -ant | grep ESTABLISHED | wc -l)
+    local connections
+    if command -v ss >/dev/null 2>&1; then
+        connections=$(ss -ant state established | tail -n +2 | wc -l)
+    else
+        connections=$(netstat -ant 2>/dev/null | grep ESTABLISHED | wc -l || echo 0)
+    fi
     echo "Active connections: $connections"
 }
 
@@ -1141,6 +1177,7 @@ main() {
                     1) [[ "${TOOL_STATUS[gost]}" == "installed" ]] && log_info "GOST already installed" || install_gost ;;
                     2) [[ "${TOOL_STATUS[nftables]}" == "installed" ]] && log_info "NFTables already installed" || install_nftables ;;
                     3) [[ "${TOOL_STATUS[realm]}" == "installed" ]] && log_info "Realm already installed" || install_realm ;;
+
                     0) continue ;;
                     *) log_error "Invalid choice" ;;
                 esac
