@@ -14,17 +14,17 @@ CONFIG_DIR="/etc/fwrd"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 TOOLS_DIR="/opt/fwrd"
 
-# Colors
+# Colors (use ANSI C quoting to emit real ESC)
 declare -A COLORS=(
-    [RED]='\033[0;31m'
-    [GREEN]='\033[0;32m'
-    [YELLOW]='\033[1;33m'
-    [BLUE]='\033[0;34m'
-    [PURPLE]='\033[0;35m'
-    [CYAN]='\033[0;36m'
-    [WHITE]='\033[1;37m'
-    [BOLD]='\033[1m'
-    [NC]='\033[0m'
+    [RED]=$'\033[0;31m'
+    [GREEN]=$'\033[0;32m'
+    [YELLOW]=$'\033[1;33m'
+    [BLUE]=$'\033[0;34m'
+    [PURPLE]=$'\033[0;35m'
+    [CYAN]=$'\033[0;36m'
+    [WHITE]=$'\033[1;37m'
+    [BOLD]=$'\033[1m'
+    [NC]=$'\033[0m'
 )
 
 # Symbols
@@ -950,8 +950,10 @@ show_install_menu() {
     echo -e "${COLORS[BOLD]}Tool Installation${COLORS[NC]}"
     echo
     
+    # Fixed, deterministic order
+    local tools_order=(gost realm nftables)
     local index=1
-    for tool in "${!FORWARD_TOOLS[@]}"; do
+    for tool in "${tools_order[@]}"; do
         local status="${TOOL_STATUS[$tool]}"
         local status_color
         case "$status" in
@@ -1175,8 +1177,8 @@ main() {
                 read -p "Install tool: " install_choice
                 case "$install_choice" in
                     1) [[ "${TOOL_STATUS[gost]}" == "installed" ]] && log_info "GOST already installed" || install_gost ;;
-                    2) [[ "${TOOL_STATUS[nftables]}" == "installed" ]] && log_info "NFTables already installed" || install_nftables ;;
-                    3) [[ "${TOOL_STATUS[realm]}" == "installed" ]] && log_info "Realm already installed" || install_realm ;;
+                    2) [[ "${TOOL_STATUS[realm]}" == "installed" ]] && log_info "Realm already installed" || install_realm ;;
+                    3) [[ "${TOOL_STATUS[nftables]}" == "installed" ]] && log_info "NFTables already installed" || install_nftables ;;
 
                     0) continue ;;
                     *) log_error "Invalid choice" ;;
