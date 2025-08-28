@@ -116,7 +116,7 @@ resolve_ipv4() {
 # Progressive input with error correction
 get_valid_ip() {
     local prompt="$1"
-    local default="$2"
+    local default="${2:-}"
     local ip
     
     while true; do
@@ -148,7 +148,7 @@ get_valid_ip() {
 
 get_valid_port() {
     local prompt="$1"
-    local default="$2"
+    local default="${2:-}"
     local port
     
     while true; do
@@ -975,15 +975,21 @@ interactive_add_rule() {
     echo -e "${COLORS[BOLD]}Add Forward Rule${COLORS[NC]}"
     echo
     
-    # Progressive input
+    # Progressive input with improved flow
     local listen_port
-    read -p "Listen port (leave empty for auto): " listen_port
-    if [[ -z "$listen_port" ]]; then
-        listen_port=$(find_available_port)
-        echo "Auto-selected port: $listen_port"
-    else
-        listen_port=$(get_valid_port "Listen port" "$listen_port")
-    fi
+    while true; do
+        read -p "Listen port (leave empty for auto): " listen_port
+        if [[ -z "$listen_port" ]]; then
+            listen_port=$(find_available_port) || return 1 # Exit if no port found
+            log_info "Auto-selected port: $listen_port"
+            break
+        elif validated_port=$(validate_port "$listen_port"); then
+            listen_port="$validated_port"
+            break
+        else
+            log_error "Invalid port. Must be 1-65535"
+        fi
+    done
     
     local target_ip=$(get_valid_ip "Target IP")
     local target_port=$(get_valid_port "Target port")
