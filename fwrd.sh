@@ -219,23 +219,47 @@ get_valid_port() {
 
 
 
-# System check
+# System check with better error handling
 check_system() {
     if [[ $EUID -ne 0 ]]; then
-        log_error "Root privileges required"
+        echo -e "${COLORS[RED]}❌ 需要管理员权限${COLORS[NC]}"
+        echo -e "${COLORS[YELLOW]}💡 请使用 sudo 运行此脚本：${COLORS[NC]}"
+        echo -e "${COLORS[CYAN]}   sudo bash $0${COLORS[NC]}"
         exit 1
     fi
     
+    # Check and install missing commands
     local required_cmds=("curl" "jq" "systemctl" "lsof")
+    local missing_commands=()
+    
     for cmd in "${required_cmds[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
-            log_warn "Missing command: $cmd, attempting install..."
-            case "$cmd" in
-                jq|lsof) apt-get update && apt-get install -y "$cmd" ;;
-                *) log_error "Please install: $cmd" && exit 1 ;;
-            esac
+            missing_commands+=("$cmd")
         fi
     done
+    
+    if [[ ${#missing_commands[@]} -gt 0 ]]; then
+        echo -e "${COLORS[YELLOW]}⚠️  正在安装缺少的依赖: ${missing_commands[*]}${COLORS[NC]}"
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y "${missing_commands[@]}" 2>/dev/null
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y "${missing_commands[@]}" 2>/dev/null
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y "${missing_commands[@]}" 2>/dev/null
+        else
+            log_error "无法自动安装依赖，请手动安装: ${missing_commands[*]}"
+            exit 1
+        fi
+        
+        # Verify installation
+        for cmd in "${missing_commands[@]}"; do
+            if ! command -v "$cmd" >/dev/null 2>&1; then
+                log_error "安装 $cmd 失败，请手动安装"
+                exit 1
+            fi
+        done
+        log_success "依赖安装完成"
+    fi
 }
 
 # Setup configuration
@@ -842,13 +866,51 @@ update_config_rule() {
 # List forward rules
 list_forward_rules() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
-        log_warn "No configuration found"
+        echo -e "${COLORS[YELLOW]}⚠️  配置文件不存在，正在初始化...${COLORS[NC]}"
+        setup_config
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+            log_error "无法创建配置文件 $CONFIG_FILE"
+            log_error "请检查权限或手动运行: sudo mkdir -p $CONFIG_DIR"
+        return 1
+        fi
+    fi
+    
+    # Check if jq is available
+    if ! command -v jq >/dev/null 2>&1; then
+        log_error "缺少 jq 命令，正在尝试安装..."
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update && apt-get install -y jq
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y jq
+        else
+            log_error "请手动安装 jq: apt-get install jq 或 yum install jq"
+            return 1
+        fi
+    fi
+    
+    # Validate config file
+    if ! jq '.' "$CONFIG_FILE" >/dev/null 2>&1; then
+        log_error "配置文件损坏，正在重新创建..."
+        backup_config "$CONFIG_FILE"
+        setup_config
+    fi
+    
+    local rules_count
+    if ! rules_count=$(jq '.rules | length' "$CONFIG_FILE" 2>/dev/null); then
+        log_error "无法读取配置文件"
         return 1
     fi
     
-    local rules_count=$(jq '.rules | length' "$CONFIG_FILE")
     if [[ "$rules_count" -eq 0 ]]; then
-        log_warn "No rules found"
+        echo
+        echo -e "${COLORS[CYAN]}📋 转发规则列表${COLORS[NC]}"
+        echo "────────────────────────────────────────────────────────────────────────────────"
+        echo -e "${COLORS[YELLOW]}暂无配置规则${COLORS[NC]}"
+        echo
+        echo -e "${COLORS[BLUE]}💡 提示：${COLORS[NC]}"
+        echo "  • 选择选项 3 添加标准规则"
+        echo "  • 选择选项 4 添加高级分离规则"
+        echo -e "  • 选择选项 5 使用快速模板 ${COLORS[GREEN]}🚀${COLORS[NC]}"
         return 0
     fi
     
@@ -1132,6 +1194,7 @@ show_main_menu() {
     echo "  9. Service control"
     echo "  10. Performance test"
     echo "  11. Health check"
+    echo "  12. System diagnosis 🔍"
     echo
     echo "  0. Exit"
     echo
@@ -1276,7 +1339,7 @@ interactive_add_rule() {
         ""|"y"|"yes")
             echo
             echo -e "${COLORS[BLUE]}🔄 Creating forwarding rule...${COLORS[NC]}"
-            if add_forward_rule "$listen_port" "$target_ip" "$target_port" "$protocol" "$tool" "$listen_ip"; then
+        if add_forward_rule "$listen_port" "$target_ip" "$target_port" "$protocol" "$tool" "$listen_ip"; then
                 echo
                 echo -e "${COLORS[GREEN]}${COLORS[BOLD]}✅ SUCCESS!${COLORS[NC]}"
                 echo -e "${COLORS[GREEN]}🎉 Rule created: $listen_ip:$listen_port → $target_ip:$target_port${COLORS[NC]}"
@@ -1963,6 +2026,7 @@ main() {
             9) service_control_menu ;;
             10) performance_test ;;
             11) health_check ;;
+            12) diagnose_system ;;
             0) 
                 log_info "Goodbye!"
                 exit 0
@@ -1972,6 +2036,93 @@ main() {
         
         [[ "$choice" != "0" ]] && { echo; read -p "Press Enter to continue..."; }
     done
+}
+
+# Diagnostic function to help troubleshoot issues
+diagnose_system() {
+    clear
+    echo -e "${COLORS[BOLD]}🔍 系统诊断${COLORS[NC]}"
+    echo "════════════════════════════════════════════"
+    
+    # Check basic requirements
+    echo -e "${COLORS[CYAN]}📋 基础检查：${COLORS[NC]}"
+    
+    # Root privileges
+    if [[ $EUID -eq 0 ]]; then
+        echo -e "  ✅ Root权限: 正常"
+    else
+        echo -e "  ❌ Root权限: 需要sudo权限"
+    fi
+    
+    # Required commands
+    local required_cmds=("curl" "jq" "systemctl" "lsof")
+    for cmd in "${required_cmds[@]}"; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            echo -e "  ✅ $cmd: 已安装"
+        else
+            echo -e "  ❌ $cmd: 未安装"
+        fi
+    done
+    
+    echo
+    echo -e "${COLORS[CYAN]}📁 配置文件检查：${COLORS[NC]}"
+    
+    # Config directory
+    if [[ -d "$CONFIG_DIR" ]]; then
+        echo -e "  ✅ 配置目录: $CONFIG_DIR"
+        ls -la "$CONFIG_DIR" 2>/dev/null | head -5
+    else
+        echo -e "  ❌ 配置目录: $CONFIG_DIR 不存在"
+    fi
+    
+    # Config file
+    if [[ -f "$CONFIG_FILE" ]]; then
+        echo -e "  ✅ 配置文件: $CONFIG_FILE"
+        if jq '.' "$CONFIG_FILE" >/dev/null 2>&1; then
+            echo -e "  ✅ 配置文件格式: 有效的JSON"
+            local rules_count=$(jq '.rules | length' "$CONFIG_FILE" 2>/dev/null || echo "0")
+            echo -e "  📊 规则数量: $rules_count"
+        else
+            echo -e "  ❌ 配置文件格式: 无效的JSON"
+        fi
+    else
+        echo -e "  ❌ 配置文件: $CONFIG_FILE 不存在"
+    fi
+    
+    echo
+    echo -e "${COLORS[CYAN]}🔧 工具状态：${COLORS[NC]}"
+    detect_tools > /dev/null 2>&1
+    for tool in "${!TOOL_STATUS[@]}"; do
+        local status="${TOOL_STATUS[$tool]}"
+        case "$status" in
+            "installed") echo -e "  ✅ $tool: 已安装" ;;
+            "not_installed") echo -e "  ❌ $tool: 未安装" ;;
+            *) echo -e "  ⚠️  $tool: $status" ;;
+        esac
+    done
+    
+    echo
+    echo -e "${COLORS[CYAN]}🌐 网络检查：${COLORS[NC]}"
+    if curl -s --connect-timeout 5 --max-time 10 -I https://github.com >/dev/null 2>&1; then
+        echo -e "  ✅ 网络连接: 正常"
+    else
+        echo -e "  ❌ 网络连接: 无法访问外网"
+    fi
+    
+    echo
+    echo -e "${COLORS[BLUE]}💡 建议修复步骤：${COLORS[NC]}"
+    if [[ $EUID -ne 0 ]]; then
+        echo "  1. 使用 sudo 权限运行脚本"
+    fi
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "  2. 运行脚本将自动创建配置文件"
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "  3. 安装 jq: apt-get install jq"
+    fi
+    
+    echo
+    read -p "Press Enter to continue..."
 }
 
 # Signal handlers for clean exit
