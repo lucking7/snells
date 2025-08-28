@@ -113,7 +113,15 @@ resolve_ipv4() {
     return 1
 }
 
-# Progressive input with error correction
+# Enhanced input validation with better user guidance
+show_ip_help() {
+    echo -e "${COLORS[YELLOW]}💡 IP地址格式帮助：${COLORS[NC]}"
+    echo -e "   • IPv4: ${COLORS[CYAN]}192.168.1.1, 1.1.1.1${COLORS[NC]}"
+    echo -e "   • IPv6: ${COLORS[CYAN]}2001:db8::1, ::1${COLORS[NC]}"
+    echo -e "   • 域名: ${COLORS[CYAN]}google.com, example.org${COLORS[NC]}"
+    echo -e "   • 输入 ${COLORS[CYAN]}?${COLORS[NC]} 显示此帮助"
+}
+
 get_valid_ip() {
     local prompt="$1"
     local default="${2:-}"
@@ -121,10 +129,16 @@ get_valid_ip() {
     
     while true; do
         if [[ -n "$default" ]]; then
-            read -p "$prompt [$default]: " ip
+            read -p "$prompt [$default] (? 帮助): " ip
             ip=${ip:-$default}
         else
-            read -p "$prompt: " ip
+            read -p "$prompt (? 帮助): " ip
+        fi
+        
+        # Show help if requested
+        if [[ "$ip" == "?" ]]; then
+            show_ip_help
+            continue
         fi
         
         if [[ -z "$ip" && -n "$default" ]]; then
@@ -133,7 +147,8 @@ get_valid_ip() {
         fi
         
         if [[ -z "$ip" ]]; then
-            log_error "IP address cannot be empty"
+            echo -e "${COLORS[RED]}❌ IP地址不能为空${COLORS[NC]}"
+            show_ip_help
             continue
         fi
         
@@ -141,9 +156,19 @@ get_valid_ip() {
             echo "$validated_ip"
             return 0
         else
-            log_error "Invalid IP format. Examples: 192.168.1.1, example.com, 2001:db8::1"
+            echo -e "${COLORS[RED]}❌ 无效的IP地址格式${COLORS[NC]}"
+            show_ip_help
         fi
     done
+}
+
+show_port_help() {
+    echo -e "${COLORS[YELLOW]}💡 端口号帮助：${COLORS[NC]}"
+    echo -e "   • 范围: ${COLORS[CYAN]}1-65535${COLORS[NC]}"
+    echo -e "   • 常用: ${COLORS[CYAN]}80(HTTP), 443(HTTPS), 8080(代理), 3000(开发)${COLORS[NC]}"
+    echo -e "   • 避免: ${COLORS[RED]}22(SSH), 53(DNS), 25(SMTP)${COLORS[NC]} (系统保留)"
+    echo -e "   • 推荐: ${COLORS[GREEN]}10000-65000${COLORS[NC]} (用户端口)"
+    echo -e "   • 输入 ${COLORS[CYAN]}?${COLORS[NC]} 显示此帮助"
 }
 
 get_valid_port() {
@@ -153,10 +178,16 @@ get_valid_port() {
     
     while true; do
         if [[ -n "$default" ]]; then
-            read -p "$prompt [$default]: " port
+            read -p "$prompt [$default] (? 帮助): " port
             port=${port:-$default}
         else
-            read -p "$prompt: " port
+            read -p "$prompt (? 帮助): " port
+        fi
+        
+        # Show help if requested
+        if [[ "$port" == "?" ]]; then
+            show_port_help
+            continue
         fi
         
         if [[ -z "$port" && -n "$default" ]]; then
@@ -165,47 +196,28 @@ get_valid_port() {
         fi
         
         if [[ -z "$port" ]]; then
-            log_error "Port cannot be empty"
+            echo -e "${COLORS[RED]}❌ 端口号不能为空${COLORS[NC]}"
+            show_port_help
             continue
         fi
         
         if validated_port=$(validate_port "$port"); then
             # Check if port is in use
             if lsof -i :"$validated_port" >/dev/null 2>&1; then
-                log_warn "Port $validated_port appears to be in use"
-                read -p "Continue anyway? [y/N]: " confirm
+                echo -e "${COLORS[YELLOW]}⚠️  警告：端口 $validated_port 可能正在使用${COLORS[NC]}"
+                read -p "是否继续使用此端口? [y/N]: " confirm
                 [[ "$confirm" =~ ^[Yy]$ ]] || continue
             fi
             echo "$validated_port"
             return 0
         else
-            log_error "Invalid port. Must be 1-65535"
+            echo -e "${COLORS[RED]}❌ 无效端口号，必须在 1-65535 范围内${COLORS[NC]}"
+            show_port_help
         fi
     done
 }
 
-get_protocol() {
-    local protocol
-    while true; do
-        printf "Protocol options:\n"
-        printf "  1) TCP only\n"
-        printf "  2) UDP only\n" 
-        printf "  3) TCP + UDP (recommended)\n"
-        printf "\n"
-        read -p "Select protocol [3] (press Enter for default): " protocol
-        protocol=${protocol:-3}
-        
-        case "$protocol" in
-            1) echo "tcp"; return 0 ;;
-            2) echo "udp"; return 0 ;;
-            3|"") echo "both"; return 0 ;;
-            *) 
-                log_error "Invalid choice. Please enter 1, 2, or 3, or press Enter for default"
-                printf "\n"
-                ;;
-        esac
-    done
-}
+
 
 # System check
 check_system() {
@@ -609,6 +621,71 @@ EOF
     
     if systemctl is-active --quiet realm; then
         log_success "Realm rule added"
+        return 0
+    else
+        log_error "Realm service failed"
+        return 1
+    fi
+}
+
+# Add Realm split rule (separate TCP/UDP targets) - 参考realm.sh实现
+add_rule_realm_split() {
+    local rule_id="$1"
+    local listen_port="$2"
+    local tcp_target_ip="$3"
+    local tcp_target_port="$4"
+    local udp_target_ip="$5"
+    local udp_target_port="$6"
+    local listen_ip="${7:-0.0.0.0}"
+    
+    log_info "Adding Realm split rule (TCP/UDP separation)..."
+    
+    local config_dir="/etc/realm"
+    local config_file="$config_dir/config.toml"
+    mkdir -p "$config_dir"
+    chown -R realm:realm "$config_dir" 2>/dev/null || true
+    
+    if [[ ! -f "$config_file" ]]; then
+        cat > "$config_file" << 'EOF'
+[network]
+no_tcp = false
+use_udp = true
+ipv6_only = false
+EOF
+        chown realm:realm "$config_file" 2>/dev/null || true
+    fi
+    
+    local remark="Split Forward Rule ${rule_id}"
+    
+    # 添加TCP转发规则 - 参考realm.sh的方法
+    cat >> "$config_file" << EOF
+
+[[endpoints]]
+# Remark: $remark - TCP
+listen = "${listen_ip}:$listen_port"
+remote = "$tcp_target_ip:$tcp_target_port"
+use_tcp = true
+use_udp = false
+EOF
+
+    # 添加UDP转发规则 - 参考realm.sh的方法
+    cat >> "$config_file" << EOF
+
+[[endpoints]]
+# Remark: $remark - UDP
+listen = "${listen_ip}:$listen_port"
+remote = "$udp_target_ip:$udp_target_port"
+use_tcp = false
+use_udp = true
+EOF
+    
+    create_realm_service
+    systemctl restart realm
+    
+    if systemctl is-active --quiet realm; then
+        log_success "Realm split rule added"
+        log_info "TCP: ${listen_ip}:${listen_port} -> ${tcp_target_ip}:${tcp_target_port}"
+        log_info "UDP: ${listen_ip}:${listen_port} -> ${udp_target_ip}:${udp_target_port}"
         return 0
     else
         log_error "Realm service failed"
@@ -1044,15 +1121,17 @@ show_main_menu() {
     echo "  2. System status"
     echo
     echo "Rules:"
-    echo "  3. Add rule"
-    echo "  4. List rules"
-    echo "  5. Modify rule"
-    echo "  6. Delete rule"
+    echo "  3. Add rule (standard)"
+    echo "  4. Add rule (advanced - separate TCP/UDP)"
+    echo "  5. Add rule (templates) 🚀"
+    echo "  6. List rules"
+    echo "  7. Modify rule"
+    echo "  8. Delete rule"
     echo
     echo "System:"
-    echo "  7. Service control"
-    echo "  8. Performance test"
-    echo "  9. Health check"
+    echo "  9. Service control"
+    echo "  10. Performance test"
+    echo "  11. Health check"
     echo
     echo "  0. Exit"
     echo
@@ -1082,95 +1161,522 @@ show_install_menu() {
     printf "\n"
 }
 
-# Interactive add rule
+# New simplified interactive add rule
 interactive_add_rule() {
     clear
-    echo -e "${COLORS[BOLD]}Add Forward Rule${COLORS[NC]}"
+    echo -e "${COLORS[BOLD]}🚀 Add Forward Rule - Quick Setup${COLORS[NC]}"
+    echo -e "${COLORS[CYAN]}Press Enter for defaults or enter custom values${COLORS[NC]}"
     echo
     
-    # Progressive input with improved flow
+    # Step 1: Listen Port
+    echo -e "${COLORS[BOLD]}Step 1: Listen Port${COLORS[NC]}"
     local listen_port
     while true; do
-        read -p "Listen port (leave empty for auto): " listen_port
+        read -p "Listen port (Enter for random): " listen_port
         if [[ -z "$listen_port" ]]; then
-            listen_port=$(find_available_port) || return 1 # Exit if no port found
-            log_info "Auto-selected port: $listen_port"
+            listen_port=$(find_available_port) || return 1
+            echo -e "  ${COLORS[GREEN]}✓ Auto-selected port: $listen_port${COLORS[NC]}"
             break
         elif validated_port=$(validate_port "$listen_port"); then
             listen_port="$validated_port"
+            echo -e "  ${COLORS[GREEN]}✓ Using port: $listen_port${COLORS[NC]}"
             break
         else
-            log_error "Invalid port. Must be 1-65535"
+            echo -e "  ${COLORS[RED]}✗ Invalid port. Enter 1-65535${COLORS[NC]}"
         fi
     done
+    echo
     
-    printf "\n"
+    # Step 2: Target IP
+    echo -e "${COLORS[BOLD]}Step 2: Target IP${COLORS[NC]}"
     local target_ip=$(get_valid_ip "Target IP")
+    echo -e "  ${COLORS[GREEN]}✓ Target IP: $target_ip${COLORS[NC]}"
+    echo
     
-    printf "\n"
+    # Step 3: Target Port
+    echo -e "${COLORS[BOLD]}Step 3: Target Port${COLORS[NC]}"
     local target_port=$(get_valid_port "Target port")
+    echo -e "  ${COLORS[GREEN]}✓ Target port: $target_port${COLORS[NC]}"
+    echo
     
-    printf "\n"
-    local protocol=$(get_protocol)
+    # Step 4: Protocol (Simplified)
+    echo -e "${COLORS[BOLD]}Step 4: Protocol${COLORS[NC]}"
+    local protocol="both"
+    echo "1) TCP only  2) UDP only  3) TCP+UDP"
+    read -p "Protocol (Enter for TCP+UDP): " proto_input
+    case "${proto_input,,}" in
+        "1"|"tcp") protocol="tcp"; echo -e "  ${COLORS[GREEN]}✓ Protocol: TCP only${COLORS[NC]}" ;;
+        "2"|"udp") protocol="udp"; echo -e "  ${COLORS[GREEN]}✓ Protocol: UDP only${COLORS[NC]}" ;;
+        *) protocol="both"; echo -e "  ${COLORS[GREEN]}✓ Protocol: TCP + UDP (default)${COLORS[NC]}" ;;
+    esac
+    echo
     
-    printf "\n"
-    printf "Tool selection:\n"
-    printf "  1. Auto-select (recommended)\n"
-    # Use deterministic order matching install menu
-    local tools_order=(gost realm nftables)
-    local printed_tools=()
-    local index=2
-    for tool in "${tools_order[@]}"; do
-        if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
-            printf "  %d. %s\n" "$index" "$tool"
-            printed_tools+=("$tool")
-            ((index++))
+    # Step 5: Tool Selection (Simplified)
+    echo -e "${COLORS[BOLD]}Step 5: Tool Selection${COLORS[NC]}"
+    local tool="auto"
+    local available_tools=()
+    local tool_display=""
+    
+    # Check available tools
+    for t in gost realm nftables; do
+        if [[ "${TOOL_STATUS[$t]}" == "installed" ]]; then
+            available_tools+=("$t")
         fi
     done
-    printf "\n"
-    read -p "Select tool [1] (press Enter for auto-select): " tool_choice
-    tool_choice=${tool_choice:-1}
     
-    local tool="auto"
-    if [[ "$tool_choice" != "1" ]]; then
-        local sel_index=$((tool_choice-2))
-        if [[ $sel_index -ge 0 && $sel_index -lt ${#printed_tools[@]} ]]; then
-            tool="${printed_tools[$sel_index]}"
-        else
-            log_warn "Invalid selection, fallback to auto"
-            tool="auto"
-        fi
-    fi
-    
-    printf "\n"
-    local listen_ip="0.0.0.0"
-    read -p "Listen IP [0.0.0.0] (press Enter for all interfaces): " input_listen_ip
-    [[ -n "$input_listen_ip" ]] && listen_ip=$(get_valid_ip "Listen IP" "$input_listen_ip")
-    
-    printf "\n"
-    printf "${COLORS[YELLOW]}═══ Rule Summary ═══${COLORS[NC]}\n"
-    printf "  Listen: %s:%s\n" "$listen_ip" "$listen_port"
-    printf "  Target: %s:%s\n" "$target_ip" "$target_port"
-    printf "  Protocol: %s\n" "$protocol"
-    printf "  Tool: %s\n" "$tool"
-    printf "════════════════════\n"
-    printf "\n"
-    
-    read -p "Create this forwarding rule? [Y/n] (press Enter to confirm): " confirm
-    confirm=${confirm:-Y}
-    
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        if add_forward_rule "$listen_port" "$target_ip" "$target_port" "$protocol" "$tool" "$listen_ip"; then
-            log_success "Rule created successfully!"
-            echo "Access: $listen_ip:$listen_port -> $target_ip:$target_port"
-        else
-            log_error "Failed to create rule"
+    if [[ ${#available_tools[@]} -gt 0 ]]; then
+        echo "Available: ${available_tools[*]} | auto-select"
+        read -p "Tool (Enter for auto-select): " tool_input
+        
+        # Check if input matches available tool
+        for available in "${available_tools[@]}"; do
+            if [[ "${tool_input,,}" == "${available,,}" ]]; then
+                tool="$available"
+                tool_display="$available"
+                break
+            fi
+        done
+        
+        if [[ "$tool" == "auto" ]]; then
+            tool_display="auto-select"
         fi
     else
-        log_info "Cancelled"
+        echo "No tools installed - will use auto-select"
+        tool_display="auto-select"
+    fi
+    
+    echo -e "  ${COLORS[GREEN]}✓ Tool: $tool_display${COLORS[NC]}"
+    echo
+    
+    # Step 6: Listen IP (Simplified)
+    echo -e "${COLORS[BOLD]}Step 6: Listen IP${COLORS[NC]}"
+    local listen_ip="0.0.0.0"
+    read -p "Listen IP (Enter for 0.0.0.0): " ip_input
+    if [[ -n "$ip_input" ]] && validated_ip=$(validate_ip "$ip_input"); then
+        listen_ip="$validated_ip"
+    fi
+    echo -e "  ${COLORS[GREEN]}✓ Listen IP: $listen_ip${COLORS[NC]}"
+    echo
+    
+    # Summary and Confirmation
+    echo -e "${COLORS[YELLOW]}══════════════════════════════════════${COLORS[NC]}"
+    echo -e "${COLORS[BOLD]}📋 RULE SUMMARY${COLORS[NC]}"
+    echo -e "${COLORS[YELLOW]}══════════════════════════════════════${COLORS[NC]}"
+    echo -e "  🎯 Forward: ${COLORS[CYAN]}$listen_ip:$listen_port${COLORS[NC]} → ${COLORS[CYAN]}$target_ip:$target_port${COLORS[NC]}"
+    echo -e "  🔗 Protocol: ${COLORS[CYAN]}$protocol${COLORS[NC]}"
+    echo -e "  🛠️  Tool: ${COLORS[CYAN]}$tool_display${COLORS[NC]}"
+    echo -e "${COLORS[YELLOW]}══════════════════════════════════════${COLORS[NC]}"
+    echo
+    
+    # Simple confirmation
+    echo -e "${COLORS[BOLD]}Press Enter to CREATE this rule, or type 'n' to cancel:${COLORS[NC]}"
+    read -p "> " final_confirm
+    
+    case "${final_confirm,,}" in
+        ""|"y"|"yes")
+            echo
+            echo -e "${COLORS[BLUE]}🔄 Creating forwarding rule...${COLORS[NC]}"
+            if add_forward_rule "$listen_port" "$target_ip" "$target_port" "$protocol" "$tool" "$listen_ip"; then
+                echo
+                echo -e "${COLORS[GREEN]}${COLORS[BOLD]}✅ SUCCESS!${COLORS[NC]}"
+                echo -e "${COLORS[GREEN]}🎉 Rule created: $listen_ip:$listen_port → $target_ip:$target_port${COLORS[NC]}"
+                echo -e "${COLORS[GREEN]}🔧 Using $tool_display with $protocol protocol${COLORS[NC]}"
+            else
+                echo
+                echo -e "${COLORS[RED]}${COLORS[BOLD]}❌ FAILED!${COLORS[NC]}"
+                echo -e "${COLORS[RED]}Unable to create forwarding rule${COLORS[NC]}"
+            fi
+            ;;
+        *)
+            echo -e "${COLORS[YELLOW]}❌ Operation cancelled${COLORS[NC]}"
+            ;;
+    esac
+    
+    echo
+    read -p "Press Enter to continue..."
+}
+
+# Advanced rule with separate TCP/UDP targets
+interactive_add_advanced_rule() {
+    clear
+    echo -e "${COLORS[BOLD]}🔧 Advanced Rule - Separate TCP/UDP Targets${COLORS[NC]}"
+    echo -e "${COLORS[CYAN]}Configure different targets for TCP and UDP traffic${COLORS[NC]}"
+    echo
+    
+    # Step 1: Listen Port (shared for both TCP and UDP)
+    echo -e "${COLORS[BOLD]}Step 1: Listen Port (shared for TCP & UDP)${COLORS[NC]}"
+    local listen_port
+    while true; do
+        read -p "Listen port (Enter for random): " listen_port
+        if [[ -z "$listen_port" ]]; then
+            listen_port=$(find_available_port) || return 1
+            echo -e "  ${COLORS[GREEN]}✓ Auto-selected port: $listen_port${COLORS[NC]}"
+            break
+        elif validated_port=$(validate_port "$listen_port"); then
+            listen_port="$validated_port"
+            echo -e "  ${COLORS[GREEN]}✓ Using port: $listen_port${COLORS[NC]}"
+            break
+        else
+            echo -e "  ${COLORS[RED]}✗ Invalid port. Enter 1-65535${COLORS[NC]}"
+        fi
+    done
+    echo
+    
+    # Step 2: TCP Target
+    echo -e "${COLORS[BOLD]}Step 2: TCP Target Configuration${COLORS[NC]}"
+    local tcp_enabled="yes"
+    read -p "Enable TCP forwarding? [Y/n]: " tcp_input
+    if [[ "${tcp_input,,}" =~ ^n ]]; then
+        tcp_enabled="no"
+        echo -e "  ${COLORS[YELLOW]}⚠ TCP forwarding disabled${COLORS[NC]}"
+        local tcp_target_ip=""
+        local tcp_target_port=""
+    else
+        local tcp_target_ip=$(get_valid_ip "TCP target IP")
+        echo -e "  ${COLORS[GREEN]}✓ TCP target IP: $tcp_target_ip${COLORS[NC]}"
+        local tcp_target_port=$(get_valid_port "TCP target port")
+        echo -e "  ${COLORS[GREEN]}✓ TCP target port: $tcp_target_port${COLORS[NC]}"
+    fi
+    echo
+    
+    # Step 3: UDP Target
+    echo -e "${COLORS[BOLD]}Step 3: UDP Target Configuration${COLORS[NC]}"
+    local udp_enabled="yes"
+    read -p "Enable UDP forwarding? [Y/n]: " udp_input
+    if [[ "${udp_input,,}" =~ ^n ]]; then
+        udp_enabled="no"
+        echo -e "  ${COLORS[YELLOW]}⚠ UDP forwarding disabled${COLORS[NC]}"
+        local udp_target_ip=""
+        local udp_target_port=""
+    else
+        local udp_target_ip=$(get_valid_ip "UDP target IP")
+        echo -e "  ${COLORS[GREEN]}✓ UDP target IP: $udp_target_ip${COLORS[NC]}"
+        local udp_target_port=$(get_valid_port "UDP target port")
+        echo -e "  ${COLORS[GREEN]}✓ UDP target port: $udp_target_port${COLORS[NC]}"
+    fi
+    echo
+    
+    # Validation
+    if [[ "$tcp_enabled" == "no" && "$udp_enabled" == "no" ]]; then
+        log_error "At least one protocol (TCP or UDP) must be enabled"
+        read -p "Press Enter to continue..."
+        return 1
+    fi
+    
+    # Step 4: Tool Selection
+    echo -e "${COLORS[BOLD]}Step 4: Tool Selection${COLORS[NC]}"
+    local tool="auto"
+    local available_tools=()
+    
+    # GOST, NFTables, and Realm all support separate TCP/UDP targets
+    for t in gost realm nftables; do
+        if [[ "${TOOL_STATUS[$t]}" == "installed" ]]; then
+            available_tools+=("$t")
+        fi
+    done
+    
+    if [[ ${#available_tools[@]} -gt 0 ]]; then
+        echo "Available for advanced rules: ${available_tools[*]} | auto-select"
+        echo -e "${COLORS[GREEN]}All tools support separate TCP/UDP targets${COLORS[NC]}"
+        read -p "Tool (Enter for auto-select): " tool_input
+        
+        for available in "${available_tools[@]}"; do
+            if [[ "${tool_input,,}" == "${available,,}" ]]; then
+                tool="$available"
+                break
+            fi
+        done
+    else
+        echo -e "${COLORS[RED]}No suitable tools installed for advanced rules${COLORS[NC]}"
+        echo "Please install GOST or NFTables first"
+        read -p "Press Enter to continue..."
+        return 1
+    fi
+    
+    echo -e "  ${COLORS[GREEN]}✓ Tool: ${tool:-auto-select}${COLORS[NC]}"
+    echo
+    
+    # Step 5: Listen IP
+    echo -e "${COLORS[BOLD]}Step 5: Listen IP${COLORS[NC]}"
+    local listen_ip="0.0.0.0"
+    read -p "Listen IP (Enter for 0.0.0.0): " ip_input
+    if [[ -n "$ip_input" ]] && validated_ip=$(validate_ip "$ip_input"); then
+        listen_ip="$validated_ip"
+    fi
+    echo -e "  ${COLORS[GREEN]}✓ Listen IP: $listen_ip${COLORS[NC]}"
+    echo
+    
+    # Summary
+    echo -e "${COLORS[YELLOW]}══════════════════════════════════════${COLORS[NC]}"
+    echo -e "${COLORS[BOLD]}📋 ADVANCED RULE SUMMARY${COLORS[NC]}"
+    echo -e "${COLORS[YELLOW]}══════════════════════════════════════${COLORS[NC]}"
+    echo -e "  🎯 Listen: ${COLORS[CYAN]}$listen_ip:$listen_port${COLORS[NC]}"
+    if [[ "$tcp_enabled" == "yes" ]]; then
+        echo -e "  📡 TCP → ${COLORS[CYAN]}$tcp_target_ip:$tcp_target_port${COLORS[NC]}"
+    else
+        echo -e "  📡 TCP → ${COLORS[RED]}disabled${COLORS[NC]}"
+    fi
+    if [[ "$udp_enabled" == "yes" ]]; then
+        echo -e "  📡 UDP → ${COLORS[CYAN]}$udp_target_ip:$udp_target_port${COLORS[NC]}"
+    else
+        echo -e "  📡 UDP → ${COLORS[RED]}disabled${COLORS[NC]}"
+    fi
+    echo -e "  🛠️  Tool: ${COLORS[CYAN]}${tool:-auto-select}${COLORS[NC]}"
+    echo -e "${COLORS[YELLOW]}══════════════════════════════════════${COLORS[NC]}"
+    echo
+    
+    # Confirmation
+    echo -e "${COLORS[BOLD]}Press Enter to CREATE these advanced rules, or type 'n' to cancel:${COLORS[NC]}"
+    read -p "> " final_confirm
+    
+    case "${final_confirm,,}" in
+        ""|"y"|"yes")
+            echo
+            echo -e "${COLORS[BLUE]}🔄 Creating advanced forwarding rules...${COLORS[NC]}"
+            
+            local success=0
+            
+            # Special handling for Realm split rules (参考realm.sh的优化方法)
+            if [[ "$tool" == "realm" ]] && [[ "$tcp_enabled" == "yes" ]] && [[ "$udp_enabled" == "yes" ]]; then
+                # Use the new Realm split function for optimal configuration
+                local rule_id=$(date +%s)_$(shuf -i 1000-9999 -n 1)
+                if add_rule_realm_split "$rule_id" "$listen_port" "$tcp_target_ip" "$tcp_target_port" "$udp_target_ip" "$udp_target_port" "$listen_ip"; then
+                    echo -e "${COLORS[GREEN]}✅ Realm split rules created successfully${COLORS[NC]}"
+                    success=2  # Count as both TCP and UDP success
+                else
+                    echo -e "${COLORS[RED]}❌ Failed to create Realm split rules${COLORS[NC]}"
+                fi
+            else
+                # Standard separate rule creation for other tools or single protocol
+                
+                # Create TCP rule if enabled
+                if [[ "$tcp_enabled" == "yes" ]]; then
+                    if add_forward_rule "$listen_port" "$tcp_target_ip" "$tcp_target_port" "tcp" "$tool" "$listen_ip"; then
+                        echo -e "${COLORS[GREEN]}✅ TCP rule created successfully${COLORS[NC]}"
+                        ((success++))
+                    else
+                        echo -e "${COLORS[RED]}❌ Failed to create TCP rule${COLORS[NC]}"
+                    fi
+                fi
+                
+                # Create UDP rule if enabled
+                if [[ "$udp_enabled" == "yes" ]]; then
+                    if add_forward_rule "$listen_port" "$udp_target_ip" "$udp_target_port" "udp" "$tool" "$listen_ip"; then
+                        echo -e "${COLORS[GREEN]}✅ UDP rule created successfully${COLORS[NC]}"
+                        ((success++))
+                    else
+                        echo -e "${COLORS[RED]}❌ Failed to create UDP rule${COLORS[NC]}"
+                    fi
+                fi
+            fi
+            
+            echo
+            if [[ $success -gt 0 ]]; then
+                echo -e "${COLORS[GREEN]}${COLORS[BOLD]}🎉 Advanced rules created!${COLORS[NC]}"
+                if [[ "$tcp_enabled" == "yes" ]]; then
+                    echo -e "${COLORS[GREEN]}📡 TCP: $listen_ip:$listen_port → $tcp_target_ip:$tcp_target_port${COLORS[NC]}"
+                fi
+                if [[ "$udp_enabled" == "yes" ]]; then
+                    echo -e "${COLORS[GREEN]}📡 UDP: $listen_ip:$listen_port → $udp_target_ip:$udp_target_port${COLORS[NC]}"
+                fi
+            else
+                echo -e "${COLORS[RED]}${COLORS[BOLD]}❌ Failed to create rules${COLORS[NC]}"
+            fi
+            ;;
+        *)
+            echo -e "${COLORS[YELLOW]}❌ Operation cancelled${COLORS[NC]}"
+            ;;
+    esac
+    
+    echo
+    read -p "Press Enter to continue..."
+}
+
+# Quick templates for common forwarding scenarios
+quick_templates() {
+    clear
+    echo -e "${COLORS[BOLD]}🚀 快速模板 - 常用转发场景${COLORS[NC]}"
+    echo -e "${COLORS[CYAN]}选择预设模板快速创建转发规则${COLORS[NC]}"
+    echo
+    
+    echo "📋 可用模板："
+    echo -e "  1. ${COLORS[GREEN]}HTTP 代理${COLORS[NC]} (80 → 目标服务器)"
+    echo -e "  2. ${COLORS[GREEN]}HTTPS 代理${COLORS[NC]} (443 → 目标服务器)"
+    echo -e "  3. ${COLORS[BLUE]}SSH 转发${COLORS[NC]} (2222 → 22)"
+    echo -e "  4. ${COLORS[PURPLE]}DNS 转发${COLORS[NC]} (5353 → 53, TCP+UDP分离)"
+    echo -e "  5. ${COLORS[YELLOW]}开发服务器${COLORS[NC]} (3000/8080 → 目标)"
+    echo -e "  6. ${COLORS[CYAN]}游戏服务器${COLORS[NC]} (自定义端口 → UDP)"
+    echo -e "  7. ${COLORS[RED]}数据库代理${COLORS[NC]} (33306 → MySQL 3306)"
+    echo -e "  8. ${COLORS[GREEN]}返回主菜单${COLORS[NC]}"
+    echo
+    
+    read -p "选择模板 [1-8]: " template_choice
+    
+    case "$template_choice" in
+        1) template_http_proxy ;;
+        2) template_https_proxy ;;
+        3) template_ssh_forward ;;
+        4) template_dns_split ;;
+        5) template_dev_server ;;
+        6) template_game_server ;;
+        7) template_database_proxy ;;
+        8) return ;;
+        *) 
+            echo -e "${COLORS[RED]}❌ 无效选择${COLORS[NC]}"
+            read -p "Press Enter to continue..."
+            quick_templates
+            ;;
+    esac
+}
+
+# Template: HTTP Proxy
+template_http_proxy() {
+    echo -e "${COLORS[BOLD]}🌐 HTTP 代理模板${COLORS[NC]}"
+    echo -e "${COLORS[YELLOW]}监听端口 80，转发到目标 HTTP 服务器${COLORS[NC]}"
+    echo
+    
+    local target_ip=$(get_valid_ip "目标服务器IP")
+    local target_port=$(get_valid_port "目标服务器端口" "80")
+    local listen_port=$(get_valid_port "本地监听端口" "8080")
+    
+    echo
+    echo -e "${COLORS[BLUE]}🔄 创建 HTTP 代理转发规则...${COLORS[NC]}"
+    
+    if add_forward_rule "$listen_port" "$target_ip" "$target_port" "tcp" "auto" "0.0.0.0"; then
+        echo -e "${COLORS[GREEN]}✅ HTTP 代理创建成功！${COLORS[NC]}"
+        echo -e "${COLORS[CYAN]}🔗 访问地址: http://localhost:$listen_port${COLORS[NC]}"
+        echo -e "${COLORS[CYAN]}📍 转发至: http://$target_ip:$target_port${COLORS[NC]}"
+    else
+        echo -e "${COLORS[RED]}❌ 创建失败${COLORS[NC]}"
     fi
     
     echo
+    read -p "Press Enter to continue..."
+}
+
+# Template: DNS Split Forward
+template_dns_split() {
+    echo -e "${COLORS[BOLD]}🔍 DNS 分离转发模板${COLORS[NC]}"
+    echo -e "${COLORS[YELLOW]}TCP 和 UDP 转发到不同的 DNS 服务器${COLORS[NC]}"
+    echo
+    
+    local listen_port=$(get_valid_port "本地监听端口" "5353")
+    local tcp_dns=$(get_valid_ip "TCP DNS服务器" "1.1.1.1")
+    local udp_dns=$(get_valid_ip "UDP DNS服务器" "8.8.8.8")
+    local tcp_port=$(get_valid_port "TCP DNS端口" "53")
+    local udp_port=$(get_valid_port "UDP DNS端口" "53")
+    
+    echo
+    echo -e "${COLORS[BLUE]}🔄 创建 DNS 分离转发规则...${COLORS[NC]}"
+    
+    local rule_id=$(date +%s)_$(shuf -i 1000-9999 -n 1)
+    local success=0
+    
+    if add_forward_rule "$listen_port" "$tcp_dns" "$tcp_port" "tcp" "auto" "0.0.0.0"; then
+        ((success++))
+    fi
+    
+    if add_forward_rule "$listen_port" "$udp_dns" "$udp_port" "udp" "auto" "0.0.0.0"; then
+        ((success++))
+    fi
+    
+    if [[ $success -eq 2 ]]; then
+        echo -e "${COLORS[GREEN]}✅ DNS 分离转发创建成功！${COLORS[NC]}"
+        echo -e "${COLORS[CYAN]}📡 TCP: localhost:$listen_port → $tcp_dns:$tcp_port${COLORS[NC]}"
+        echo -e "${COLORS[CYAN]}📡 UDP: localhost:$listen_port → $udp_dns:$udp_port${COLORS[NC]}"
+    else
+        echo -e "${COLORS[YELLOW]}⚠️  部分创建成功 ($success/2)${COLORS[NC]}"
+    fi
+    
+    echo
+    read -p "Press Enter to continue..."
+}
+
+# Template: SSH Forward
+template_ssh_forward() {
+    echo -e "${COLORS[BOLD]}🔐 SSH 转发模板${COLORS[NC]}"
+    echo -e "${COLORS[YELLOW]}安全的 SSH 端口转发${COLORS[NC]}"
+    echo
+    
+    local target_ip=$(get_valid_ip "目标服务器IP")
+    local listen_port=$(get_valid_port "本地监听端口" "2222")
+    local target_port="22"
+    
+    echo
+    echo -e "${COLORS[BLUE]}🔄 创建 SSH 转发规则...${COLORS[NC]}"
+    
+    if add_forward_rule "$listen_port" "$target_ip" "$target_port" "tcp" "auto" "0.0.0.0"; then
+        echo -e "${COLORS[GREEN]}✅ SSH 转发创建成功！${COLORS[NC]}"
+        echo -e "${COLORS[CYAN]}🔗 连接命令: ssh -p $listen_port user@localhost${COLORS[NC]}"
+        echo -e "${COLORS[CYAN]}📍 实际连接: $target_ip:$target_port${COLORS[NC]}"
+    else
+        echo -e "${COLORS[RED]}❌ 创建失败${COLORS[NC]}"
+    fi
+    
+    echo
+    read -p "Press Enter to continue..."
+}
+
+# Template: Database Proxy
+template_database_proxy() {
+    echo -e "${COLORS[BOLD]}🗃️  数据库代理模板${COLORS[NC]}"
+    echo -e "${COLORS[YELLOW]}MySQL/MariaDB 数据库连接代理${COLORS[NC]}"
+    echo
+    
+    local target_ip=$(get_valid_ip "数据库服务器IP")
+    local listen_port=$(get_valid_port "本地监听端口" "33306")
+    local target_port=$(get_valid_port "数据库端口" "3306")
+    
+    echo
+    echo -e "${COLORS[BLUE]}🔄 创建数据库代理规则...${COLORS[NC]}"
+    
+    if add_forward_rule "$listen_port" "$target_ip" "$target_port" "tcp" "auto" "0.0.0.0"; then
+        echo -e "${COLORS[GREEN]}✅ 数据库代理创建成功！${COLORS[NC]}"
+        echo -e "${COLORS[CYAN]}🔗 连接地址: localhost:$listen_port${COLORS[NC]}"
+        echo -e "${COLORS[CYAN]}📍 数据库: $target_ip:$target_port${COLORS[NC]}"
+        echo -e "${COLORS[YELLOW]}💡 示例: mysql -h localhost -P $listen_port -u username${COLORS[NC]}"
+    else
+        echo -e "${COLORS[RED]}❌ 创建失败${COLORS[NC]}"
+    fi
+    
+    echo
+    read -p "Press Enter to continue..."
+}
+
+# Template stubs for remaining templates
+template_https_proxy() {
+    echo -e "${COLORS[BOLD]}🔒 HTTPS 代理模板${COLORS[NC]}"
+    local target_ip=$(get_valid_ip "目标HTTPS服务器IP")
+    local target_port=$(get_valid_port "目标端口" "443")
+    local listen_port=$(get_valid_port "本地监听端口" "8443")
+    
+    if add_forward_rule "$listen_port" "$target_ip" "$target_port" "tcp" "auto" "0.0.0.0"; then
+        echo -e "${COLORS[GREEN]}✅ HTTPS 代理创建成功！${COLORS[NC]}"
+    fi
+    read -p "Press Enter to continue..."
+}
+
+template_dev_server() {
+    echo -e "${COLORS[BOLD]}💻 开发服务器模板${COLORS[NC]}"
+    local target_ip=$(get_valid_ip "开发服务器IP")
+    local target_port=$(get_valid_port "目标端口" "3000")
+    local listen_port=$(get_valid_port "本地监听端口" "8000")
+    
+    if add_forward_rule "$listen_port" "$target_ip" "$target_port" "tcp" "auto" "0.0.0.0"; then
+        echo -e "${COLORS[GREEN]}✅ 开发服务器转发创建成功！${COLORS[NC]}"
+    fi
+    read -p "Press Enter to continue..."
+}
+
+template_game_server() {
+    echo -e "${COLORS[BOLD]}🎮 游戏服务器模板${COLORS[NC]}"
+    local target_ip=$(get_valid_ip "游戏服务器IP")
+    local target_port=$(get_valid_port "游戏端口")
+    local listen_port=$(get_valid_port "本地监听端口" "$target_port")
+    
+    if add_forward_rule "$listen_port" "$target_ip" "$target_port" "both" "auto" "0.0.0.0"; then
+        echo -e "${COLORS[GREEN]}✅ 游戏服务器转发创建成功！${COLORS[NC]}"
+    fi
     read -p "Press Enter to continue..."
 }
 
@@ -1439,22 +1945,24 @@ main() {
                 ;;
             2) show_system_status ;;
             3) interactive_add_rule ;;
-            4) list_forward_rules ;;
-            5)
+            4) interactive_add_advanced_rule ;;
+            5) quick_templates ;;
+            6) list_forward_rules ;;
+            7)
                 list_forward_rules
                 echo
                 read -p "Rule number to modify: " rule_num
                 [[ "$rule_num" =~ ^[0-9]+$ ]] && modify_forward_rule "$rule_num" || log_error "Invalid input"
                 ;;
-            6)
+            8)
                 list_forward_rules
                 echo
                 read -p "Rule number to delete: " rule_num
                 [[ "$rule_num" =~ ^[0-9]+$ ]] && delete_forward_rule "$rule_num" || log_error "Invalid input"
                 ;;
-            7) service_control_menu ;;
-            8) performance_test ;;
-            9) health_check ;;
+            9) service_control_menu ;;
+            10) performance_test ;;
+            11) health_check ;;
             0) 
                 log_info "Goodbye!"
                 exit 0
