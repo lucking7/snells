@@ -922,6 +922,8 @@ list_forward_rules() {
     
     local index=0
     while read -r rule; do
+        # Skip empty lines to avoid issues in strict mode
+        [[ -z "$rule" ]] && continue
         ((index++))
         # 使用 // 提供字段默认值，避免 set -e 因 null 退出
         local id=$(echo "$rule" | jq -r '.id // "-"')
@@ -956,7 +958,7 @@ list_forward_rules() {
                "$index" "$tool" "$listen_ip" "$listen_port" "$target_ip" "$target_port" \
                "$protocol" "$status" "$created"
     # 若 .rules 不存在或为空，避免 jq 非零退出导致 set -e 触发
-    done < <(jq -c '.rules // [] | .[]' "$CONFIG_FILE" 2>/dev/null || echo)
+    done < <(jq -c '.rules // [] | .[]' "$CONFIG_FILE" 2>/dev/null)
     
     echo
     log_info "Total: $rules_count rules"
