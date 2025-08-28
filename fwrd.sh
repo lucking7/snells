@@ -991,10 +991,14 @@ interactive_add_rule() {
     
     echo "Tool selection:"
     echo "  1. Auto-select (recommended)"
+    # Use deterministic order matching install menu
+    local tools_order=(gost realm nftables)
+    local printed_tools=()
     local index=2
-    for tool in "${!FORWARD_TOOLS[@]}"; do
+    for tool in "${tools_order[@]}"; do
         if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
             echo "  $index. $tool"
+            printed_tools+=("$tool")
             ((index++))
         fi
     done
@@ -1004,12 +1008,12 @@ interactive_add_rule() {
     
     local tool="auto"
     if [[ "$tool_choice" != "1" ]]; then
-        local tools_array=()
-        for t in "${!FORWARD_TOOLS[@]}"; do
-            [[ "${TOOL_STATUS[$t]}" == "installed" ]] && tools_array+=("$t")
-        done
-        if [[ "${#tools_array[@]}" -ge $((tool_choice-1)) ]]; then
-            tool="${tools_array[$((tool_choice-2))]}"
+        local sel_index=$((tool_choice-2))
+        if [[ $sel_index -ge 0 && $sel_index -lt ${#printed_tools[@]} ]]; then
+            tool="${printed_tools[$sel_index]}"
+        else
+            log_warn "Invalid selection, fallback to auto"
+            tool="auto"
         fi
     fi
     
