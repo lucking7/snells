@@ -897,8 +897,9 @@ list_forward_rules() {
     
     local rules_count
     if ! rules_count=$(jq '.rules | length' "$CONFIG_FILE" 2>/dev/null); then
-        log_error "无法读取配置文件"
-        return 1
+        # 在严格模式下避免退出：给予安全默认值并提示
+        log_warn "无法读取配置文件，使用空规则列表"
+        rules_count=0
     fi
     
     if [[ "$rules_count" -eq 0 ]]; then
@@ -922,27 +923,28 @@ list_forward_rules() {
     local index=0
     while read -r rule; do
         ((index++))
-        local id=$(echo "$rule" | jq -r '.id')
-        local tool=$(echo "$rule" | jq -r '.tool')
-        local listen_ip=$(echo "$rule" | jq -r '.listen_ip')
-        local listen_port=$(echo "$rule" | jq -r '.listen_port')
-        local target_ip=$(echo "$rule" | jq -r '.target_ip')
-        local target_port=$(echo "$rule" | jq -r '.target_port')
-        local protocol=$(echo "$rule" | jq -r '.protocol')
-        local created=$(echo "$rule" | jq -r '.created' | cut -d'T' -f1)
+        # 使用 // 提供字段默认值，避免 set -e 因 null 退出
+        local id=$(echo "$rule" | jq -r '.id // "-"')
+        local tool=$(echo "$rule" | jq -r '.tool // "-"')
+        local listen_ip=$(echo "$rule" | jq -r '.listen_ip // "0.0.0.0"')
+        local listen_port=$(echo "$rule" | jq -r '.listen_port // 0')
+        local target_ip=$(echo "$rule" | jq -r '.target_ip // "-"')
+        local target_port=$(echo "$rule" | jq -r '.target_port // 0')
+        local protocol=$(echo "$rule" | jq -r '.protocol // "both"')
+        local created=$(echo "$rule" | jq -r '.created // "-"' | cut -d'T' -f1)
         
         # Check service status
         local status="unknown"
         case "$tool" in
             gost|realm)
-                if systemctl is-active --quiet "$tool"; then
+                if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$tool"; then
                     status="${COLORS[GREEN]}running${COLORS[NC]}"
                 else
                     status="${COLORS[RED]}stopped${COLORS[NC]}"
                 fi
                 ;;
             nftables)
-                if nft list ruleset | grep -q "fwrd-${id}"; then
+                if command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -q "fwrd-${id}"; then
                     status="${COLORS[GREEN]}active${COLORS[NC]}"
                 else
                     status="${COLORS[RED]}inactive${COLORS[NC]}"
@@ -953,7 +955,8 @@ list_forward_rules() {
         printf "%-3s %-8s %-15s %-5s %-15s %-5s %-8s %-16s %-10s\n" \
                "$index" "$tool" "$listen_ip" "$listen_port" "$target_ip" "$target_port" \
                "$protocol" "$status" "$created"
-    done < <(jq -c '.rules[]' "$CONFIG_FILE")
+    # 若 .rules 不存在或为空，避免 jq 非零退出导致 set -e 触发
+    done < <(jq -c '.rules // [] | .[]' "$CONFIG_FILE" 2>/dev/null || echo)
     
     echo
     log_info "Total: $rules_count rules"
