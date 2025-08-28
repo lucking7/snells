@@ -463,6 +463,35 @@ EOF
     systemctl enable gost
 }
 
+setup_nftables_chain() {
+    # Create our custom table and chain if they don't exist
+    if ! nft list tables | grep -q "fwrd_nat"; then
+        nft add table inet fwrd_nat
+    fi
+    if ! nft list chains inet fwrd_nat | grep -q "fwrd_prerouting"; then
+        nft add chain inet fwrd_nat fwrd_prerouting { type nat hook prerouting priority 0\; }
+    fi
+    
+    # Ensure the main nftables config includes our rules
+    local nft_conf="/etc/nftables.conf"
+    local fwrd_nft_conf="/etc/fwrd/nftables.conf"
+    touch "$fwrd_nft_conf"
+    if ! grep -q "include \"$fwrd_nft_conf\"" "$nft_conf" 2>/dev/null; then
+        # If firewalld is active, add to its include file, otherwise main config
+        local firewalld_include="/etc/firewalld/nftables/main.nft"
+        local target_conf="$nft_conf"
+        if systemctl is-active --quiet firewalld && [ -f "$firewalld_include" ]; then
+            target_conf="$firewalld_include"
+        fi
+        
+        if ! grep -q "include \"$fwrd_nft_conf\"" "$target_conf" 2>/dev/null; then
+             echo "include \"$fwrd_nft_conf\"" >> "$target_conf"
+        fi
+    fi
+    # Save current fwrd ruleset
+    nft list table inet fwrd_nat > "$fwrd_nft_conf"
+}
+
 # Add NFTables rule
 add_rule_nftables() {
     local rule_id="$1"
@@ -474,6 +503,9 @@ add_rule_nftables() {
     
     log_info "Adding NFTables rule..."
     
+    # Ensure our custom chain is set up
+    setup_nftables_chain
+    
     # Resolve domain to IPv4 for DNAT
     local dnat_ip
     if ! dnat_ip=$(resolve_ipv4 "$target_ip"); then
@@ -481,34 +513,18 @@ add_rule_nftables() {
         return 1
     fi
     
-    if ! nft list tables 2>/div/null | grep -q "table inet filter"; then
-        log_info "Initializing NFTables..."
-        nft -f - << 'EOF'
-flush ruleset
-table inet filter {
-    chain input { type filter hook input priority 0; policy accept; }
-    chain forward { type filter hook forward priority 0; policy accept; }
-    chain output { type filter hook output priority 0; policy accept; }
-}
-table ip nat {
-    chain prerouting { type nat hook prerouting priority dstnat; policy accept; }
-    chain postrouting { type nat hook postrouting priority srcnat; policy accept; masquerade }
-}
-EOF
-    fi
-    
     local rule_comment="fwrd-${rule_id}"
     
     if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
-        nft add rule ip nat prerouting tcp dport "$listen_port" dnat to "${dnat_ip}:${target_port}" comment "\"$rule_comment\""
+        nft add rule inet fwrd_nat fwrd_prerouting tcp dport "$listen_port" dnat to "${dnat_ip}:${target_port}" comment "\"$rule_comment\""
     fi
     
     if [[ "$protocol" == "udp" || "$protocol" == "both" ]]; then
-        nft add rule ip nat prerouting udp dport "$listen_port" dnat to "${dnat_ip}:${target_port}" comment "\"$rule_comment\""
+        nft add rule inet fwrd_nat fwrd_prerouting udp dport "$listen_port" dnat to "${dnat_ip}:${target_port}" comment "\"$rule_comment\""
     fi
     
-    nft list ruleset > /etc/nftables.conf
-    sed -i '1i#!/usr/sbin/nft -f' /etc/nftables.conf
+    # Persist the rules to our dedicated file
+    nft list table inet fwrd_nat > /etc/fwrd/nftables.conf
     
     log_success "NFTables rule added"
     echo "${rule_id}|${protocol}|${listen_port}|${target_ip}|${target_port}|$(date)" >> "$CONFIG_DIR/nftables_rules.txt"
@@ -751,20 +767,27 @@ delete_forward_rule() {
             fi
             ;;
         nftables)
-            nft list ruleset -a | grep "fwrd-${id}" | while read line; do
-                local handle=$(echo "$line" | grep -o 'handle [0-9]*' | awk '{print $2}')
-                if [[ -n "$handle" ]]; then
-                    nft delete rule ip nat prerouting handle "$handle" 2>/dev/null || true
-                fi
-            done
-            nft list ruleset > /etc/nftables.conf
-            sed -i '1i#!/usr/sbin/nft -f' /etc/nftables.conf
+            # Find the rule handle by comment and delete it
+            local handle=$(nft list chain inet fwrd_nat fwrd_prerouting -a | grep "fwrd-${id}" | grep -o 'handle [0-9]*' | awk '{print $2}')
+            if [[ -n "$handle" ]]; then
+                nft delete rule inet fwrd_nat fwrd_prerouting handle "$handle"
+            else
+                log_warn "Could not find NFTables rule handle for $id to delete."
+            fi
+            # Repersist rules
+            nft list table inet fwrd_nat > /etc/fwrd/nftables.conf
             sed -i "/^${id}|/d" "$CONFIG_DIR/nftables_rules.txt" 2>/dev/null || true
             ;;
         realm)
-            local config_file="/root/.realm/config.toml"
+            local config_file="/etc/realm/config.toml"
             if [[ -f "$config_file" ]]; then
-                sed -i "/# Remark: Forward Rule ${id}/,/^$/d" "$config_file"
+                # Use a more robust method to remove the TOML block
+                awk -v id="$id" '
+                BEGIN { in_block=0; print_line=1 }
+                /# Remark: Forward Rule / { if ($0 ~ id) in_block=1; }
+                { if (!in_block) print $0; }
+                /^$/ { if (in_block) { in_block=0; next; } }
+                ' "$config_file" > "${config_file}.tmp" && mv "${config_file}.tmp" "$config_file"
                 systemctl restart realm 2>/dev/null || true
             fi
             ;;
