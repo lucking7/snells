@@ -187,11 +187,11 @@ get_valid_port() {
 get_protocol() {
     local protocol
     while true; do
-        echo "Protocol options:"
-        echo "  1) TCP only"
-        echo "  2) UDP only" 
-        echo "  3) TCP + UDP (recommended)"
-        echo
+        printf "Protocol options:\n"
+        printf "  1) TCP only\n"
+        printf "  2) UDP only\n" 
+        printf "  3) TCP + UDP (recommended)\n"
+        printf "\n"
         read -p "Select protocol [3] (press Enter for default): " protocol
         protocol=${protocol:-3}
         
@@ -201,7 +201,7 @@ get_protocol() {
             3|"") echo "both"; return 0 ;;
             *) 
                 log_error "Invalid choice. Please enter 1, 2, or 3, or press Enter for default"
-                echo
+                printf "\n"
                 ;;
         esac
     done
@@ -1060,8 +1060,8 @@ show_main_menu() {
 
 show_install_menu() {
     clear
-    echo -e "${COLORS[BOLD]}Tool Installation${COLORS[NC]}"
-    echo
+    printf "${COLORS[BOLD]}Tool Installation${COLORS[NC]}\n"
+    printf "\n"
     
     # Fixed, deterministic order
     local tools_order=(gost realm nftables)
@@ -1073,13 +1073,13 @@ show_install_menu() {
             installed) status_color="${COLORS[GREEN]}installed${COLORS[NC]}" ;;
             *) status_color="${COLORS[RED]}not installed${COLORS[NC]}" ;;
         esac
-        echo "  $index. $tool - ${FORWARD_TOOLS[$tool]} ($status_color)"
+        printf "  %d. %s - %s (%s)\n" "$index" "$tool" "${FORWARD_TOOLS[$tool]}" "$status_color"
         ((index++))
     done
     
-    echo
-    echo "  0. Back"
-    echo
+    printf "\n"
+    printf "  0. Back\n"
+    printf "\n"
 }
 
 # Interactive add rule
@@ -1104,30 +1104,30 @@ interactive_add_rule() {
         fi
     done
     
-    echo
+    printf "\n"
     local target_ip=$(get_valid_ip "Target IP")
     
-    echo
+    printf "\n"
     local target_port=$(get_valid_port "Target port")
     
-    echo
+    printf "\n"
     local protocol=$(get_protocol)
     
-    echo
-    echo "Tool selection:"
-    echo "  1. Auto-select (recommended)"
+    printf "\n"
+    printf "Tool selection:\n"
+    printf "  1. Auto-select (recommended)\n"
     # Use deterministic order matching install menu
     local tools_order=(gost realm nftables)
     local printed_tools=()
     local index=2
     for tool in "${tools_order[@]}"; do
         if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
-            echo "  $index. $tool"
+            printf "  %d. %s\n" "$index" "$tool"
             printed_tools+=("$tool")
             ((index++))
         fi
     done
-    echo
+    printf "\n"
     read -p "Select tool [1] (press Enter for auto-select): " tool_choice
     tool_choice=${tool_choice:-1}
     
@@ -1142,19 +1142,19 @@ interactive_add_rule() {
         fi
     fi
     
-    echo
+    printf "\n"
     local listen_ip="0.0.0.0"
     read -p "Listen IP [0.0.0.0] (press Enter for all interfaces): " input_listen_ip
     [[ -n "$input_listen_ip" ]] && listen_ip=$(get_valid_ip "Listen IP" "$input_listen_ip")
     
-    echo
-    echo -e "${COLORS[YELLOW]}═══ Rule Summary ═══${COLORS[NC]}"
-    echo "  Listen: $listen_ip:$listen_port"
-    echo "  Target: $target_ip:$target_port"
-    echo "  Protocol: $protocol"
-    echo "  Tool: $tool"
-    echo "════════════════════"
-    echo
+    printf "\n"
+    printf "${COLORS[YELLOW]}═══ Rule Summary ═══${COLORS[NC]}\n"
+    printf "  Listen: %s:%s\n" "$listen_ip" "$listen_port"
+    printf "  Target: %s:%s\n" "$target_ip" "$target_port"
+    printf "  Protocol: %s\n" "$protocol"
+    printf "  Tool: %s\n" "$tool"
+    printf "════════════════════\n"
+    printf "\n"
     
     read -p "Create this forwarding rule? [Y/n] (press Enter to confirm): " confirm
     confirm=${confirm:-Y}
