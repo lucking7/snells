@@ -188,17 +188,21 @@ get_protocol() {
     local protocol
     while true; do
         echo "Protocol options:"
-        echo "  1) TCP"
-        echo "  2) UDP" 
-        echo "  3) TCP + UDP"
-        read -p "Select protocol [3]: " protocol
+        echo "  1) TCP only"
+        echo "  2) UDP only" 
+        echo "  3) TCP + UDP (recommended)"
+        echo
+        read -p "Select protocol [3] (press Enter for default): " protocol
         protocol=${protocol:-3}
         
         case "$protocol" in
             1) echo "tcp"; return 0 ;;
             2) echo "udp"; return 0 ;;
-            3) echo "both"; return 0 ;;
-            *) log_error "Invalid choice. Enter 1, 2, or 3" ;;
+            3|"") echo "both"; return 0 ;;
+            *) 
+                log_error "Invalid choice. Please enter 1, 2, or 3, or press Enter for default"
+                echo
+                ;;
         esac
     done
 }
@@ -1014,10 +1018,16 @@ interactive_add_rule() {
         fi
     done
     
+    echo
     local target_ip=$(get_valid_ip "Target IP")
+    
+    echo
     local target_port=$(get_valid_port "Target port")
+    
+    echo
     local protocol=$(get_protocol)
     
+    echo
     echo "Tool selection:"
     echo "  1. Auto-select (recommended)"
     # Use deterministic order matching install menu
@@ -1031,8 +1041,8 @@ interactive_add_rule() {
             ((index++))
         fi
     done
-    
-    read -p "Select tool [1]: " tool_choice
+    echo
+    read -p "Select tool [1] (press Enter for auto-select): " tool_choice
     tool_choice=${tool_choice:-1}
     
     local tool="auto"
@@ -1046,19 +1056,21 @@ interactive_add_rule() {
         fi
     fi
     
+    echo
     local listen_ip="0.0.0.0"
-    read -p "Listen IP [0.0.0.0]: " input_listen_ip
+    read -p "Listen IP [0.0.0.0] (press Enter for all interfaces): " input_listen_ip
     [[ -n "$input_listen_ip" ]] && listen_ip=$(get_valid_ip "Listen IP" "$input_listen_ip")
     
     echo
-    echo -e "${COLORS[YELLOW]}Rule Summary:${COLORS[NC]}"
+    echo -e "${COLORS[YELLOW]}═══ Rule Summary ═══${COLORS[NC]}"
     echo "  Listen: $listen_ip:$listen_port"
     echo "  Target: $target_ip:$target_port"
     echo "  Protocol: $protocol"
     echo "  Tool: $tool"
+    echo "════════════════════"
     echo
     
-    read -p "Create rule? [Y/n]: " confirm
+    read -p "Create this forwarding rule? [Y/n] (press Enter to confirm): " confirm
     confirm=${confirm:-Y}
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
