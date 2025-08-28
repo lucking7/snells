@@ -871,7 +871,8 @@ list_forward_rules() {
         if [[ ! -f "$CONFIG_FILE" ]]; then
             log_error "无法创建配置文件 $CONFIG_FILE"
             log_error "请检查权限或手动运行: sudo mkdir -p $CONFIG_DIR"
-        return 1
+            # 在严格模式下避免退出整个脚本
+            return 0
         fi
     fi
     
@@ -879,20 +880,35 @@ list_forward_rules() {
     if ! command -v jq >/dev/null 2>&1; then
         log_error "缺少 jq 命令，正在尝试安装..."
         if command -v apt-get >/dev/null 2>&1; then
-            apt-get update && apt-get install -y jq
+            apt-get update -qq || true
+            apt-get install -y jq || true
         elif command -v yum >/dev/null 2>&1; then
-            yum install -y jq
+            yum install -y jq || true
         else
             log_error "请手动安装 jq: apt-get install jq 或 yum install jq"
-            return 1
+            return 0
+        fi
+        # 重新检查
+        if ! command -v jq >/dev/null 2>&1; then
+            log_warn "jq 仍未安装，无法显示规则列表"
+            return 0
         fi
     fi
     
-    # Validate config file
+    # Validate config file (非致命)
     if ! jq '.' "$CONFIG_FILE" >/dev/null 2>&1; then
         log_error "配置文件损坏，正在重新创建..."
-        backup_config "$CONFIG_FILE"
-        setup_config
+        backup_config "$CONFIG_FILE" || true
+        setup_config || true
+        # 如果仍然无效，直接显示空列表提示
+        if ! jq '.' "$CONFIG_FILE" >/dev/null 2>&1; then
+            echo
+            echo -e "${COLORS[CYAN]}📋 转发规则列表${COLORS[NC]}"
+            echo "────────────────────────────────────────────────────────────────────────────────"
+            echo -e "${COLORS[YELLOW]}无法读取配置文件${COLORS[NC]}"
+            echo -e "${COLORS[BLUE]}💡 提示：${COLORS[NC]}请检查 $CONFIG_FILE 的权限与内容"
+            return 0
+        fi
     fi
     
     local rules_count
@@ -958,7 +974,8 @@ list_forward_rules() {
                "$index" "$tool" "$listen_ip" "$listen_port" "$target_ip" "$target_port" \
                "$protocol" "$status" "$created"
     # 若 .rules 不存在或为空，避免 jq 非零退出导致 set -e 触发
-    done < <(jq -c '.rules // [] | .[]' "$CONFIG_FILE" 2>/dev/null)
+    # 使用 subshell 保底，若 jq 失败不会让主脚本退出
+    done < <( (jq -c '.rules // [] | .[]' "$CONFIG_FILE" 2>/dev/null || true) )
     
     echo
     log_info "Total: $rules_count rules"
