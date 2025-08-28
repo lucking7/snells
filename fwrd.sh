@@ -28,7 +28,8 @@ declare -A COLORS=(
 )
 
 # Symbols
-SUCCESS="${COLORS[BOLD]}${COLORS[GREEN]}[✓]${COLORS[NC]}"ERROR="${COLORS[BOLD]}${COLORS[RED]}[✗]${COLORS[NC]}"
+SUCCESS="${COLORS[BOLD]}${COLORS[GREEN]}[✓]${COLORS[NC]}"
+ERROR="${COLORS[BOLD]}${COLORS[RED]}[✗]${COLORS[NC]}"
 INFO="${COLORS[BOLD]}${COLORS[BLUE]}[i]${COLORS[NC]}"
 WARN="${COLORS[BOLD]}${COLORS[YELLOW]}[!]${COLORS[NC]}"
 
@@ -62,7 +63,8 @@ validate_ip() {
     local ip=$(sanitize_input "$1")
     # IPv4 validation
     if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-        IFS='.' read -r -a octets <<<"$ip"        for octet in "${octets[@]}"; do
+        IFS='.' read -r -a octets <<<"$ip"
+        for octet in "${octets[@]}"; do
             [[ "$octet" -le 255 ]] || return 1
         done
         echo "$ip"
@@ -98,7 +100,8 @@ get_valid_ip() {
     
     while true; do
         if [[ -n "$default" ]]; then
-            read -p "$prompt [$default]: " ip            ip=${ip:-$default}
+            read -p "$prompt [$default]: " ip
+            ip=${ip:-$default}
         else
             read -p "$prompt: " ip
         fi
@@ -133,7 +136,8 @@ get_valid_port() {
             port=${port:-$default}
         else
             read -p "$prompt: " port
-        fi        
+        fi
+        
         if [[ -z "$port" && -n "$default" ]]; then
             echo "$default"
             return 0
@@ -167,7 +171,8 @@ get_protocol() {
         echo "  2) UDP" 
         echo "  3) TCP + UDP"
         read -p "Select protocol [3]: " protocol
-        protocol=${protocol:-3}        
+        protocol=${protocol:-3}
+        
         case "$protocol" in
             1) echo "tcp"; return 0 ;;
             2) echo "udp"; return 0 ;;
@@ -198,7 +203,8 @@ check_system() {
 
 # Setup configuration
 setup_config() {
-    log_info "Setting up configuration..."    
+    log_info "Setting up configuration..."
+    
     mkdir -p "$CONFIG_DIR"/{rules,backups,logs}
     mkdir -p "$TOOLS_DIR"
     
@@ -232,7 +238,8 @@ detect_tools() {
     # GOST detection
     if command -v gost &> /dev/null; then
         TOOL_STATUS[gost]="installed"
-        TOOL_VERSION[gost]=$(gost --version 2>/dev/null | head -1 || echo "unknown")    else
+        TOOL_VERSION[gost]=$(gost --version 2>/dev/null | head -1 || echo "unknown")
+    else
         TOOL_STATUS[gost]="not_installed"
     fi
     
@@ -264,8 +271,9 @@ detect_tools() {
     done
 }
 
-# Tool installation functions
-install_gost() {    log_info "Installing GOST..."
+# Tool installation
+install_gost() {
+    log_info "Installing GOST..."
     if curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh | bash; then
         log_success "GOST installed"
         TOOL_STATUS[gost]="installed"
@@ -303,7 +311,8 @@ install_realm() {
     esac
     
     local version=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest | jq -r '.tag_name // "v2.6.2"')
-    local download_url="https://github.com/zhboner/realm/releases/download/${version}/realm-${realm_arch}.tar.gz"    
+    local download_url="https://github.com/zhboner/realm/releases/download/${version}/realm-${realm_arch}.tar.gz"
+    
     if curl -L -o /tmp/realm.tar.gz "$download_url"; then
         tar -xzf /tmp/realm.tar.gz -C /tmp
         mv /tmp/realm "$TOOLS_DIR/realm"
@@ -345,6 +354,7 @@ recommend_tool() {
             ;;
     esac
 }
+
 # Add GOST rule
 add_rule_gost() {
     local rule_id="$1"
@@ -387,7 +397,8 @@ add_rule_gost() {
            --arg target "$target_addr" \
            '.services += [{name: $name, addr: $addr, handler: {type: $proto}, listener: {type: $proto}, forwarder: {nodes: [{name: "target-0", addr: $target}]}}]' \
            "$config_file" > "${config_file}.tmp" && mv "${config_file}.tmp" "$config_file"
-    fi    
+    fi
+    
     create_gost_service
     systemctl restart gost
     
@@ -425,7 +436,8 @@ LimitNOFILE=infinity
 
 [Install]
 WantedBy=multi-user.target
-EOF    
+EOF
+    
     systemctl daemon-reload
     systemctl enable gost
 }
@@ -461,7 +473,8 @@ EOF
     
     if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
         nft add rule ip nat prerouting tcp dport "$listen_port" dnat to "${target_ip}:${target_port}" comment "\"$rule_comment\""
-    fi    
+    fi
+    
     if [[ "$protocol" == "udp" || "$protocol" == "both" ]]; then
         nft add rule ip nat prerouting udp dport "$listen_port" dnat to "${target_ip}:${target_port}" comment "\"$rule_comment\""
     fi
@@ -496,7 +509,8 @@ ipv6_only = false
 EOF
     fi
     
-    local remark="Forward Rule ${rule_id}"    cat >> "$config_file" << EOF
+    local remark="Forward Rule ${rule_id}"
+    cat >> "$config_file" << EOF
 
 [[endpoints]]
 # Remark: $remark
@@ -533,7 +547,8 @@ Type=simple
 User=realm
 Group=realm
 Restart=on-failure
-RestartSec=5sExecStart=$TOOLS_DIR/realm -c /root/.realm/config.toml
+RestartSec=5s
+ExecStart=$TOOLS_DIR/realm -c /root/.realm/config.toml
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -574,7 +589,8 @@ add_forward_rule() {
         nftables) add_rule_nftables "$rule_id" "$listen_port" "$target_ip" "$target_port" "$protocol" "$listen_ip" ;;
         realm) add_rule_realm "$rule_id" "$listen_port" "$target_ip" "$target_port" "$protocol" "$listen_ip" ;;
         *) log_error "Unsupported tool: $tool"; return 1 ;;
-    esac    
+    esac
+    
     update_config_rule "$rule_id" "$listen_port" "$target_ip" "$target_port" "$protocol" "$tool" "$listen_ip"
 }
 
@@ -608,7 +624,9 @@ update_config_rule() {
            created: $created,
            enabled: true
        }]' "$CONFIG_FILE" > "$temp_file" && mv "$temp_file" "$CONFIG_FILE"
-}# List forward rules
+}
+
+# List forward rules
 list_forward_rules() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
         log_warn "No configuration found"
@@ -648,7 +666,8 @@ list_forward_rules() {
                     status="${COLORS[RED]}stopped${COLORS[NC]}"
                 fi
                 ;;
-            nftables)                if nft list ruleset | grep -q "fwrd-${id}"; then
+            nftables)
+                if nft list ruleset | grep -q "fwrd-${id}"; then
                     status="${COLORS[GREEN]}active${COLORS[NC]}"
                 else
                     status="${COLORS[RED]}inactive${COLORS[NC]}"
@@ -682,7 +701,8 @@ delete_forward_rule() {
     
     local rule=$(jq ".rules[$((rule_index-1))]" "$CONFIG_FILE")
     local id=$(echo "$rule" | jq -r '.id')
-    local tool=$(echo "$rule" | jq -r '.tool')    local listen_port=$(echo "$rule" | jq -r '.listen_port')
+    local tool=$(echo "$rule" | jq -r '.tool')
+    local listen_port=$(echo "$rule" | jq -r '.listen_port')
     local target_ip=$(echo "$rule" | jq -r '.target_ip')
     local target_port=$(echo "$rule" | jq -r '.target_port')
     local protocol=$(echo "$rule" | jq -r '.protocol')
@@ -717,7 +737,8 @@ delete_forward_rule() {
                 systemctl restart realm 2>/dev/null || true
             fi
             ;;
-    esac    
+    esac
+    
     # Remove from config
     local temp_file=$(mktemp)
     jq "del(.rules[$((rule_index-1))])" "$CONFIG_FILE" > "$temp_file" && mv "$temp_file" "$CONFIG_FILE"
@@ -753,7 +774,8 @@ modify_forward_rule() {
     echo
     
     # Get new values
-    echo "Enter new values (press Enter to keep current):"    local new_listen_port=$(get_valid_port "Listen port" "$old_listen_port")
+    echo "Enter new values (press Enter to keep current):"
+    local new_listen_port=$(get_valid_port "Listen port" "$old_listen_port")
     local new_target_ip=$(get_valid_ip "Target IP" "$old_target_ip")
     local new_target_port=$(get_valid_port "Target port" "$old_target_port")
     
@@ -786,7 +808,8 @@ modify_forward_rule() {
           "$new_protocol" == "$old_protocol" ]]; then
         log_info "No changes made"
         return 0
-    fi    
+    fi
+    
     echo
     echo "Changes:"
     echo "  Listen port: $old_listen_port -> $new_listen_port"
@@ -815,7 +838,8 @@ show_system_status() {
     echo
     echo "Tool Status:"
     printf "%-12s %-12s %-15s %-12s\n" "TOOL" "INSTALLED" "VERSION" "SERVICE"
-    echo "───────────────────────────────────────────────────────"    
+    echo "───────────────────────────────────────────────────────"
+    
     for tool in "${!FORWARD_TOOLS[@]}"; do
         local install_status="${TOOL_STATUS[$tool]}"
         local version="${TOOL_VERSION[$tool]:-unknown}"
@@ -842,7 +866,7 @@ show_system_status() {
     echo "Active connections: $connections"
 }
 
-# Find available port
+# Generate available port
 find_available_port() {
     local start_port=${1:-10000}
     local end_port=${2:-65000}
@@ -857,7 +881,9 @@ find_available_port() {
     
     log_error "No available port found"
     return 1
-}# ==================== Interactive Menus ====================
+}
+
+# ==================== Interactive Menus ====================
 
 show_main_menu() {
     clear
@@ -903,7 +929,9 @@ show_install_menu() {
     echo
     echo "  0. Back"
     echo
-}# Interactive add rule
+}
+
+# Interactive add rule
 interactive_add_rule() {
     clear
     echo -e "${COLORS[BOLD]}Add Forward Rule${COLORS[NC]}"
@@ -945,7 +973,8 @@ interactive_add_rule() {
         if [[ "${#tools_array[@]}" -ge $((tool_choice-1)) ]]; then
             tool="${tools_array[$((tool_choice-2))]}"
         fi
-    fi    
+    fi
+    
     local listen_ip="0.0.0.0"
     read -p "Listen IP [0.0.0.0]: " input_listen_ip
     [[ -n "$input_listen_ip" ]] && listen_ip=$(get_valid_ip "Listen IP" "$input_listen_ip")
@@ -984,7 +1013,8 @@ service_control_menu() {
         echo
         
         echo "Services:"
-        for tool in "${!FORWARD_TOOLS[@]}"; do            if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
+        for tool in "${!FORWARD_TOOLS[@]}"; do
+            if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
                 local status="${TOOL_SERVICE_STATUS[$tool]}"
                 local status_color
                 case "$status" in
@@ -1023,7 +1053,8 @@ service_control_menu() {
                 done
                 ;;
             3)
-                log_info "Restarting services..."                for tool in "${!FORWARD_TOOLS[@]}"; do
+                log_info "Restarting services..."
+                for tool in "${!FORWARD_TOOLS[@]}"; do
                     if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
                         systemctl restart "$tool" 2>/dev/null && log_success "$tool restarted" || log_warn "$tool restart failed"
                     fi
@@ -1060,7 +1091,8 @@ performance_test() {
     target_ip=$(get_valid_ip "Test target IP")
     target_port=$(get_valid_port "Test target port")
     read -p "Test duration (seconds) [10]: " duration
-    duration=${duration:-10}    
+    duration=${duration:-10}
+    
     log_info "Testing $target_ip:$target_port for ${duration}s..."
     
     local start_time=$(date +%s)
@@ -1099,7 +1131,8 @@ main() {
     
     while true; do
         show_main_menu
-        read -p "Select: " choice        
+        read -p "Select: " choice
+        
         case "$choice" in
             1) 
                 show_install_menu
@@ -1135,7 +1168,8 @@ main() {
                 exit 0
                 ;;
             *) log_error "Invalid choice" ;;
-        esac        
+        esac
+        
         [[ "$choice" != "0" ]] && { echo; read -p "Press Enter to continue..."; }
     done
 }
