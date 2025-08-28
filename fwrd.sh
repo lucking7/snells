@@ -284,14 +284,16 @@ detect_tools() {
         TOOL_STATUS[realm]="not_installed"
     fi
     
-    # Service status
+    # Service status with better error handling
     for tool in "${!FORWARD_TOOLS[@]}"; do
         if systemctl is-active --quiet "$tool" 2>/dev/null; then
             TOOL_SERVICE_STATUS[$tool]="active"
         elif systemctl is-enabled --quiet "$tool" 2>/dev/null; then
             TOOL_SERVICE_STATUS[$tool]="inactive"
-        else
+        elif systemctl list-unit-files "$tool.service" 2>/dev/null | grep -q "$tool.service"; then
             TOOL_SERVICE_STATUS[$tool]="disabled"
+        else
+            TOOL_SERVICE_STATUS[$tool]="not_found"
         fi
     done
 }
@@ -299,12 +301,19 @@ detect_tools() {
 # Tool installation
 install_gost() {
     log_info "Installing GOST..."
-    if curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh | bash; then
+    
+    # Check network connectivity first
+    if ! curl -s --connect-timeout 10 --max-time 30 -I https://github.com >/dev/null 2>&1; then
+        log_error "Network connectivity issue. Please check internet connection."
+        return 1
+    fi
+    
+    if timeout 300 curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh | bash; then
         log_success "GOST installed"
         TOOL_STATUS[gost]="installed"
         return 0
     else
-        log_error "GOST installation failed"
+        log_error "GOST installation failed or timed out"
         return 1
     fi
 }
@@ -335,10 +344,17 @@ install_realm() {
         *) log_error "Unsupported architecture: $arch"; return 1 ;;
     esac
     
-    local version=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest | jq -r '.tag_name // "v2.6.2"')
+    # Check network and get version with timeout
+    local version
+    if ! version=$(timeout 30 curl -s --connect-timeout 10 https://api.github.com/repos/zhboner/realm/releases/latest | jq -r '.tag_name // ""'); then
+        log_warn "Failed to fetch latest version, using fallback"
+        version="v2.6.2"
+    fi
+    [[ -z "$version" ]] && version="v2.6.2"
+    
     local download_url="https://github.com/zhboner/realm/releases/download/${version}/realm-${realm_arch}.tar.gz"
     
-    if curl -L -o /tmp/realm.tar.gz "$download_url"; then
+    if timeout 300 curl -L --connect-timeout 10 --max-time 180 -o /tmp/realm.tar.gz "$download_url"; then
         tar -xzf /tmp/realm.tar.gz -C /tmp
         mv /tmp/realm "$TOOLS_DIR/realm"
         chmod +x "$TOOLS_DIR/realm"
@@ -469,11 +485,17 @@ EOF
 
 setup_nftables_chain() {
     # Create our custom table and chain if they don't exist
-    if ! nft list tables | grep -q "fwrd_nat"; then
-        nft add table inet fwrd_nat
+    if ! nft list tables 2>/dev/null | grep -q "fwrd_nat"; then
+        if ! nft add table inet fwrd_nat 2>/dev/null; then
+            log_error "Failed to create nftables table. Check permissions and nftables service."
+            return 1
+        fi
     fi
-    if ! nft list chains inet fwrd_nat | grep -q "fwrd_prerouting"; then
-        nft add chain inet fwrd_nat fwrd_prerouting { type nat hook prerouting priority 0\; }
+    if ! nft list chains inet fwrd_nat 2>/dev/null | grep -q "fwrd_prerouting"; then
+        if ! nft add chain inet fwrd_nat fwrd_prerouting { type nat hook prerouting priority 0\; } 2>/dev/null; then
+            log_error "Failed to create nftables chain. Check nftables configuration."
+            return 1
+        fi
     fi
     
     # Ensure the main nftables config includes our rules
@@ -520,11 +542,22 @@ add_rule_nftables() {
     local rule_comment="fwrd-${rule_id}"
     
     if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
-        nft add rule inet fwrd_nat fwrd_prerouting tcp dport "$listen_port" dnat to "${dnat_ip}:${target_port}" comment "\"$rule_comment\""
+        if ! nft add rule inet fwrd_nat fwrd_prerouting tcp dport "$listen_port" dnat to "${dnat_ip}:${target_port}" comment "\"$rule_comment\"" 2>/dev/null; then
+            log_error "Failed to add TCP rule to nftables"
+            return 1
+        fi
     fi
     
     if [[ "$protocol" == "udp" || "$protocol" == "both" ]]; then
-        nft add rule inet fwrd_nat fwrd_prerouting udp dport "$listen_port" dnat to "${dnat_ip}:${target_port}" comment "\"$rule_comment\""
+        if ! nft add rule inet fwrd_nat fwrd_prerouting udp dport "$listen_port" dnat to "${dnat_ip}:${target_port}" comment "\"$rule_comment\"" 2>/dev/null; then
+            log_error "Failed to add UDP rule to nftables"
+            # If TCP was added, try to clean it up
+            if [[ "$protocol" == "both" ]]; then
+                local tcp_handle=$(nft list chain inet fwrd_nat fwrd_prerouting -a 2>/dev/null | grep "fwrd-${rule_id}" | grep "tcp" | grep -o 'handle [0-9]*' | awk '{print $2}')
+                [[ -n "$tcp_handle" ]] && nft delete rule inet fwrd_nat fwrd_prerouting handle "$tcp_handle" 2>/dev/null
+            fi
+            return 1
+        fi
     fi
     
     # Persist the rules to our dedicated file
@@ -645,6 +678,41 @@ add_forward_rule() {
     update_config_rule "$rule_id" "$listen_port" "$target_ip" "$target_port" "$protocol" "$tool" "$listen_ip"
 }
 
+# Validate and backup config file
+validate_config() {
+    local config_file="$1"
+    if [[ ! -f "$config_file" ]]; then
+        log_error "Config file not found: $config_file"
+        return 1
+    fi
+    
+    if ! jq '.' "$config_file" >/dev/null 2>&1; then
+        log_error "Invalid JSON in config file: $config_file"
+        # Try to restore from backup
+        local backup_file="${config_file}.backup.$(date +%Y%m%d)"
+        if [[ -f "$backup_file" ]]; then
+            log_info "Attempting to restore from backup..."
+            cp "$backup_file" "$config_file"
+            if jq '.' "$config_file" >/dev/null 2>&1; then
+                log_success "Config restored from backup"
+                return 0
+            fi
+        fi
+        return 1
+    fi
+    return 0
+}
+
+backup_config() {
+    local config_file="$1"
+    local backup_file="${config_file}.backup.$(date +%Y%m%d)"
+    if [[ -f "$config_file" ]] && jq '.' "$config_file" >/dev/null 2>&1; then
+        cp "$config_file" "$backup_file"
+        # Keep only last 5 backups
+        find "$(dirname "$config_file")" -name "$(basename "$config_file").backup.*" -type f | sort -r | tail -n +6 | xargs rm -f 2>/dev/null || true
+    fi
+}
+
 # Update config file with rule
 update_config_rule() {
     local rule_id="$1"
@@ -655,8 +723,12 @@ update_config_rule() {
     local tool="$6"
     local listen_ip="$7"
     
+    # Validate and backup existing config
+    validate_config "$CONFIG_FILE" || return 1
+    backup_config "$CONFIG_FILE"
+    
     local temp_file=$(mktemp)
-    jq --arg id "$rule_id" \
+    if ! jq --arg id "$rule_id" \
        --arg listen_port "$listen_port" \
        --arg target_ip "$target_ip" \
        --arg target_port "$target_port" \
@@ -674,7 +746,20 @@ update_config_rule() {
            listen_ip: $listen_ip,
            created: $created,
            enabled: true
-       }]' "$CONFIG_FILE" > "$temp_file" && mv "$temp_file" "$CONFIG_FILE"
+       }]' "$CONFIG_FILE" > "$temp_file" 2>/dev/null; then
+        log_error "Failed to update config file"
+        rm -f "$temp_file"
+        return 1
+    fi
+    
+    # Validate the new config before moving
+    if jq '.' "$temp_file" >/dev/null 2>&1; then
+        mv "$temp_file" "$CONFIG_FILE"
+    else
+        log_error "Generated invalid config, keeping original"
+        rm -f "$temp_file"
+        return 1
+    fi
 }
 
 # List forward rules
@@ -967,6 +1052,7 @@ show_main_menu() {
     echo "System:"
     echo "  7. Service control"
     echo "  8. Performance test"
+    echo "  9. Health check"
     echo
     echo "  0. Exit"
     echo
@@ -1206,6 +1292,127 @@ performance_test() {
     fi
 }
 
+# Health check system
+health_check() {
+    clear
+    echo -e "${COLORS[BOLD]}System Health Check${COLORS[NC]}"
+    echo
+    
+    local issues_found=0
+    
+    # Check config file integrity
+    echo "Checking configuration..."
+    if validate_config "$CONFIG_FILE"; then
+        log_success "Configuration file is valid"
+    else
+        log_error "Configuration file has issues"
+        ((issues_found++))
+    fi
+    
+    # Check tool installations and services
+    echo
+    echo "Checking tool installations and services..."
+    detect_tools
+    for tool in "${!FORWARD_TOOLS[@]}"; do
+        if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
+            log_success "$tool is properly installed"
+            
+            # Check service status
+            case "${TOOL_SERVICE_STATUS[$tool]}" in
+                active) log_success "$tool service is running" ;;
+                inactive) log_warn "$tool service is stopped but enabled" ;;
+                disabled) log_warn "$tool service is disabled" ;;
+                not_found) log_error "$tool service not found"; ((issues_found++)) ;;
+            esac
+        else
+            log_warn "$tool is not installed"
+        fi
+    done
+    
+    # Check network connectivity
+    echo
+    echo "Checking network connectivity..."
+    if curl -s --connect-timeout 5 --max-time 10 -I https://github.com >/dev/null 2>&1; then
+        log_success "Internet connectivity is working"
+    else
+        log_warn "Internet connectivity issues detected"
+    fi
+    
+    # Check system resources
+    echo
+    echo "Checking system resources..."
+    local load=$(uptime | awk '{print $(NF-2)}' | tr -d ',')
+    local memory_free=$(free -m | awk 'NR==2{printf "%.0f", $7*100/$2}')
+    local disk_free=$(df / | awk 'NR==2{print $5}' | tr -d '%')
+    
+    echo "  System load: $load"
+    echo "  Free memory: $memory_free%"
+    echo "  Disk usage: $disk_free%"
+    
+    if (( $(echo "$load > 5.0" | bc -l 2>/dev/null || echo 0) )); then
+        log_warn "High system load detected"
+    fi
+    
+    if [[ $memory_free -lt 10 ]]; then
+        log_warn "Low memory available"
+    fi
+    
+    if [[ $disk_free -gt 90 ]]; then
+        log_warn "Disk space is running low"
+    fi
+    
+    # Check active rules
+    echo
+    echo "Checking active rules..."
+    local rules_count=$(jq '.rules | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
+    if [[ $rules_count -gt 0 ]]; then
+        log_success "$rules_count forwarding rules configured"
+        
+        # Test rule functionality (basic check)
+        echo "Testing rule functionality..."
+        local working_rules=0
+        while read -r rule; do
+            local tool=$(echo "$rule" | jq -r '.tool')
+            local listen_port=$(echo "$rule" | jq -r '.listen_port')
+            
+            case "$tool" in
+                gost|realm)
+                    if systemctl is-active --quiet "$tool"; then
+                        ((working_rules++))
+                    fi
+                    ;;
+                nftables)
+                    local id=$(echo "$rule" | jq -r '.id')
+                    if nft list chain inet fwrd_nat fwrd_prerouting 2>/dev/null | grep -q "fwrd-${id}"; then
+                        ((working_rules++))
+                    fi
+                    ;;
+            esac
+        done < <(jq -c '.rules[]' "$CONFIG_FILE" 2>/dev/null)
+        
+        if [[ $working_rules -eq $rules_count ]]; then
+            log_success "All $rules_count rules appear to be working"
+        else
+            log_warn "Only $working_rules of $rules_count rules appear to be working"
+            ((issues_found++))
+        fi
+    else
+        log_info "No forwarding rules configured"
+    fi
+    
+    echo
+    echo "════════════════════════════════════════"
+    if [[ $issues_found -eq 0 ]]; then
+        log_success "Health check completed - no issues found!"
+    else
+        log_warn "Health check completed - $issues_found issue(s) found"
+        echo "Run individual diagnostic commands to investigate further."
+    fi
+    echo "════════════════════════════════════════"
+    echo
+    read -p "Press Enter to continue..."
+}
+
 # Main loop
 main() {
     check_system
@@ -1247,6 +1454,7 @@ main() {
                 ;;
             7) service_control_menu ;;
             8) performance_test ;;
+            9) health_check ;;
             0) 
                 log_info "Goodbye!"
                 exit 0
@@ -1257,6 +1465,29 @@ main() {
         [[ "$choice" != "0" ]] && { echo; read -p "Press Enter to continue..."; }
     done
 }
+
+# Signal handlers for clean exit
+cleanup() {
+    local exit_code=$?
+    echo
+    log_info "Cleaning up..."
+    
+    # Clean up any temporary files
+    find /tmp -name "realm.tar.gz" -user root -mtime -1 -delete 2>/dev/null || true
+    find /tmp -name "*.fwrd.tmp.*" -user root -mtime -1 -delete 2>/dev/null || true
+    
+    # If we were in the middle of an operation, mention state might be inconsistent
+    if [[ $exit_code -ne 0 ]]; then
+        log_warn "Script interrupted. System state might be inconsistent."
+        log_warn "Run the script again to verify configuration."
+    fi
+    
+    exit $exit_code
+}
+
+# Set up signal handlers
+trap cleanup EXIT
+trap 'log_warn "Interrupted by user"; exit 130' INT TERM
 
 # Script entry point
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
