@@ -13,12 +13,6 @@ BLUE="\033[0;34m"
 BOLD="\033[1m" 
 NC="\033[0m" # 无颜色
 
-# 统一符号
-SUCCESS_SYMBOL="${BOLD}${GREEN}[+]${NC}"
-ERROR_SYMBOL="${BOLD}${RED}[x]${NC}"
-INFO_SYMBOL="${BOLD}${BLUE}[i]${NC}"
-WARN_SYMBOL="${BOLD}${YELLOW}[!]${NC}"
-
 # 配置路径变量
 CONFIG_PATH="/root/.realm/config.toml"
 REALM_DIR="/root/realm"
@@ -379,22 +373,23 @@ fetch_server_info() {
 show_menu() {
     fetch_server_info
     clear
-    echo -e "${BOLD}${BLUE}========== Realm 端口转发管理 ==========${NC}"
-    echo -e "${INFO_SYMBOL} IPv4: ${BOLD}$ipv4${NC}  ${INFO_SYMBOL} IPv6: ${BOLD}$ipv6${NC}"
-    echo -e "${INFO_SYMBOL} 站点: $colo  运营商: $asOrganization  国家: $country"
-    echo -e "${BOLD}${BLUE}---------------------------------------${NC}"
-    echo -e "  ${GREEN}1.${NC} 安装/重装 Realm"
-    echo -e "  ${GREEN}2.${NC} 添加转发规则"
-    echo -e "  ${GREEN}3.${NC} 查看所有转发规则"
-    echo -e "  ${GREEN}4.${NC} 删除转发规则"
-    echo -e "  ${GREEN}5.${NC} 管理 Realm 服务"
-    echo -e "  ${GREEN}6.${NC} 卸载 Realm"
-    echo -e "  ${GREEN}7.${NC} 退出"
-    echo -e "${BOLD}${BLUE}---------------------------------------${NC}"
-    echo -e "状态: ${realm_status_color}${realm_status}${NC}"
-    echo -n "服务: "
+    echo -e "${BOLD}=== Realm Proxy Management Script ===${NC}"
+    echo "1. Install/Reinstall Realm"
+    echo "2. Add Forwarding Rules"
+    echo "3. View All Forwarding Rules"
+    echo "4. Delete Forwarding Rules"
+    echo "5. Manage Realm Service"
+    echo "6. Uninstall Realm"
+    echo "7. Exit"
+    echo "------------------------------"
+    echo -e "Realm Status: ${realm_status_color}${realm_status}${NC}"
+    echo -n "Realm Service: "
     check_realm_service_status
-    echo -e "${BOLD}${BLUE}=======================================${NC}"
+    echo "------------------------------"
+    echo "Server Information:"
+    echo "IPv4: $ipv4 | IPv6: $ipv6"
+    echo "COLO: $colo | AS Organization: $asOrganization | Country: $country"
+    echo "=================================="
 }
 
 # 查找可用端口
@@ -423,51 +418,51 @@ find_available_port() {
 manage_realm_service() {
     while true; do
         clear
-        echo -e "${BOLD}${BLUE}—— Realm 服务管理 ——${NC}"
-        echo "1. 启动服务"
-        echo "2. 停止服务"
-        echo "3. 重启服务"
-        echo "4. 查看服务状态"
-        echo "5. 查看服务日志"
-        echo "6. 返回主菜单"
-        read -rp "请选择 [1-6]: " service_choice
+        echo -e "${BOLD}Manage Realm Service${NC}"
+        echo "1. Start Realm Service"
+        echo "2. Stop Realm Service"
+        echo "3. Restart Realm Service"
+        echo "4. View Realm Service Status"
+        echo "5. View Realm Service Logs"
+        echo "6. Return to Main Menu"
+        read -rp "Select an option: " service_choice
         case $service_choice in
             1) 
-                echo -e "${INFO_SYMBOL} 正在启动 Realm 服务...${NC}"
+                echo -e "${YELLOW}Starting Realm service...${NC}"
                 if systemctl start realm; then
-                    echo -e "${SUCCESS_SYMBOL} 服务已启动${NC}"
+                    echo -e "${GREEN}Realm service started${NC}"
                 else
-                    echo -e "${ERROR_SYMBOL} 启动失败${NC}"
+                    echo -e "${RED}Failed to start Realm service${NC}"
                 fi
                 ;;
             2) 
-                echo -e "${INFO_SYMBOL} 正在停止 Realm 服务...${NC}"
+                echo -e "${YELLOW}Stopping Realm service...${NC}"
                 if systemctl stop realm; then
-                    echo -e "${SUCCESS_SYMBOL} 服务已停止${NC}"
+                    echo -e "${GREEN}Realm service stopped${NC}"
                 else
-                    echo -e "${ERROR_SYMBOL} 停止失败${NC}"
+                    echo -e "${RED}Failed to stop Realm service${NC}"
                 fi
                 ;;
             3) 
-                echo -e "${INFO_SYMBOL} 正在重启 Realm 服务...${NC}"
+                echo -e "${YELLOW}Restarting Realm service...${NC}"
                 if systemctl restart realm; then
-                    echo -e "${SUCCESS_SYMBOL} 服务已重启${NC}"
+                    echo -e "${GREEN}Realm service restarted${NC}"
                 else
-                    echo -e "${ERROR_SYMBOL} 重启失败${NC}"
+                    echo -e "${RED}Failed to restart Realm service${NC}"
                 fi
                 ;;
             4) 
-                echo -e "${INFO_SYMBOL} Realm 服务状态:${NC}"
+                echo -e "${YELLOW}Realm service status:${NC}"
                 systemctl status realm --no-pager
                 ;;
             5)
-                echo -e "${INFO_SYMBOL} Realm 服务日志（最近 20 行）:${NC}"
+                echo -e "${YELLOW}Realm service logs (last 20 lines):${NC}"
                 journalctl -u realm.service -n 20 --no-pager
                 ;;
             6) return ;;
-            *) echo -e "${ERROR_SYMBOL} 无效的选择${NC}" ;;
+            *) echo -e "${RED}Invalid option${NC}" ;;
         esac
-        read -n1 -r -p "按任意键继续..."
+        read -n1 -r -p "Press any key to continue..."
     done
 }
 
@@ -475,18 +470,18 @@ manage_realm_service() {
 forwarding_rules_menu() {
     while true; do
         clear
-        echo -e "${BOLD}${BLUE}—— 转发规则管理 ——${NC}"
-        echo "1. 添加标准转发"
-        echo "2. 添加 TCP/UDP 分离转发"
-        echo "3. 返回主菜单"
-        read -rp "请选择 [1-3]: " forward_choice
+        echo -e "${BOLD}Forwarding Rules Management${NC}"
+        echo "1. Add Standard Forwarding Rule"
+        echo "2. Add TCP/UDP Split Forwarding Rule"
+        echo "3. Return to Main Menu"
+        read -rp "Select an option: " forward_choice
         case $forward_choice in
             1) add_standard_forward ;;
             2) add_split_forward ;;
             3) return ;;
-            *) echo -e "${ERROR_SYMBOL} 无效的选择${NC}" ;;
+            *) echo -e "${RED}Invalid option${NC}" ;;
         esac
-        read -n1 -r -p "按任意键继续..."
+        read -n1 -r -p "Press any key to continue..."
     done
 }
 

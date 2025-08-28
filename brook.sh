@@ -295,6 +295,16 @@ create_systemd_service() {
   printf "${INFO_SYMBOL} Systemd服务将使用以下Brook命令: ${COLOR_INFO_ACCENT}%s${PLAIN}\n" "$brook_exec_command_for_service"
 
   local brook_relay_cmd_line="${brook_exec_command_for_service} relay -f ${listen_on_address_param} -t ${remote_addr}"
+  # 根据Brook实际行为，timeout设为0可能用于禁用对应协议
+  case $proto in 
+    "tcp") 
+      brook_relay_cmd_line+=" --udpTimeout 0" 
+      ;; 
+    "udp") 
+      brook_relay_cmd_line+=" --tcpTimeout 0" 
+      ;; 
+    # "both" 情况不添加超时参数，保持默认行为
+  esac
 
   local service_content="[Unit]
 Description=Brook Forward from ${listen_on_address_param} to ${remote_addr} proto ${proto}
@@ -390,6 +400,10 @@ add_forward() {
 
   case $forward_type in
     1|2|3) # TCP only, UDP only, or Both to same target
+      local proto_str="tcp"
+      if [ "$forward_type" -eq 2 ]; then proto_str="udp"; fi
+      if [ "$forward_type" -eq 3 ]; then proto_str="both"; fi
+      
       while true; do 
         printf "${COLOR_INFO_TEXT}请输入目标IP地址或域名: ${PLAIN}"; read -r remote_ip; if validate_input "$remote_ip" "ip" || validate_input "$remote_ip" "hostname"; then break; fi;
       done
@@ -398,38 +412,13 @@ add_forward() {
       done
       remote_addr="${remote_ip}:${remote_port}"
       printf "${INFO_SYMBOL} 目标地址: ${COLOR_INFO_ACCENT}%s${PLAIN}\n" "$remote_addr"
-
-      if [ "$forward_type" -eq 3 ]; then
-        # TCP+UDP 到同一目标：分别创建 TCP 与 UDP 两条服务
-        local tcp_service_name udp_service_name
-        tcp_service_name=$(generate_service_name "$local_port" "tcp" "$listen_ip_for_brook")
-        udp_service_name=$(generate_service_name "$local_port" "udp" "$listen_ip_for_brook")
-        local tcp_ok=false udp_ok=false
-        if create_systemd_service "$tcp_service_name" "$final_listen_arg_for_brook" "$local_port" "$remote_addr" "tcp"; then
-          save_forward_config "$tcp_service_name" "$final_listen_arg_for_brook" "$remote_addr" "tcp"; tcp_ok=true
-        fi
-        if create_systemd_service "$udp_service_name" "$final_listen_arg_for_brook" "$local_port" "$remote_addr" "udp"; then
-          save_forward_config "$udp_service_name" "$final_listen_arg_for_brook" "$remote_addr" "udp"; udp_ok=true
-        fi
-        if $tcp_ok && $udp_ok; then
-          printf "${SUCCESS_SYMBOL} TCP 与 UDP 转发均已添加成功！${PLAIN}\n"
-        elif $tcp_ok; then
-          printf "${WARN_SYMBOL} 仅 TCP 转发添加成功，UDP 失败。${PLAIN}\n"
-        elif $udp_ok; then
-          printf "${WARN_SYMBOL} 仅 UDP 转发添加成功，TCP 失败。${PLAIN}\n"
-        else
-          printf "${ERROR_SYMBOL} TCP 与 UDP 转发均添加失败。${PLAIN}\n"
-        fi
+      
+      service_name=$(generate_service_name "$local_port" "$proto_str" "$listen_ip_for_brook")
+      if create_systemd_service "$service_name" "$final_listen_arg_for_brook" "$local_port" "$remote_addr" "$proto_str"; then
+        save_forward_config "$service_name" "$final_listen_arg_for_brook" "$remote_addr" "$proto_str"
+        printf "${SUCCESS_SYMBOL} 转发添加成功！${PLAIN}\n"
       else
-        # 单协议
-        local proto_str="tcp"; [ "$forward_type" -eq 2 ] && proto_str="udp"
-        service_name=$(generate_service_name "$local_port" "$proto_str" "$listen_ip_for_brook")
-        if create_systemd_service "$service_name" "$final_listen_arg_for_brook" "$local_port" "$remote_addr" "$proto_str"; then
-          save_forward_config "$service_name" "$final_listen_arg_for_brook" "$remote_addr" "$proto_str"
-          printf "${SUCCESS_SYMBOL} 转发添加成功！${PLAIN}\n"
-        else
-          printf "${ERROR_SYMBOL} 添加转发失败，服务未能启动。${PLAIN}\n"
-        fi
+        printf "${ERROR_SYMBOL} 添加转发失败，服务未能启动。${PLAIN}\n"
       fi
       ;;
     4) # TCP and UDP to different targets

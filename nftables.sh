@@ -28,12 +28,6 @@ BOLD='\033[1m'                    # 粗体
 DIM='\033[2m'                     # 暗色
 UNDERLINE='\033[4m'               # 下划线
 
-# 统一信息符号（与其他脚本一致）
-SUCCESS_SYMBOL="${BOLD}${SUCCESS_GREEN}[+]${NC}"
-ERROR_SYMBOL="${BOLD}${ERROR_RED}[x]${NC}"
-INFO_SYMBOL="${BOLD}${LIGHT_BLUE}[i]${NC}"
-WARN_SYMBOL="${BOLD}${WARNING_YELLOW}[!]${NC}"
-
 # 配置文件路径
 NFTABLES_CONF="/etc/nftables.conf"
 FORWARD_RULES_FILE="/etc/nftables_forward_rules.txt"
@@ -156,15 +150,15 @@ print_header() {
     local ipv6_info_display="${CACHED_IPV6_INFO:-}"
     
     if [[ "$CACHED_IPV4" != "" ]]; then
-        echo -e "${INFO_SYMBOL} IPv4: ${BOLD}$ipv4_display${NC} ${LIGHT_GRAY}($ipv4_info_display)${NC}"
+        echo -e "${LIGHT_BLUE}IPv4: ${BOLD}$ipv4_display${NC} ${LIGHT_GRAY}($ipv4_info_display)${NC}"
     else
-        echo -e "${WARN_SYMBOL} IPv4: 未检测到${NC}"
+        echo -e "${LIGHT_GRAY}IPv4: 未检测到${NC}"
     fi
     
     if [[ "$CACHED_IPV6" != "" ]]; then
-        echo -e "${INFO_SYMBOL} IPv6: ${BOLD}$ipv6_display${NC} ${LIGHT_GRAY}($ipv6_info_display)${NC}"
+        echo -e "${LIGHT_BLUE}IPv6: ${BOLD}$ipv6_display${NC} ${LIGHT_GRAY}($ipv6_info_display)${NC}"
     else
-        echo -e "${WARN_SYMBOL} IPv6: 未检测到${NC}"
+        echo -e "${LIGHT_GRAY}IPv6: 未检测到${NC}"
     fi
     
     echo -e "${LIGHT_GRAY}${DIM}系统: $(lsb_release -si 2>/dev/null || echo 'Linux') | 时间: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
@@ -669,11 +663,7 @@ add_forward_rule_core() {
     local success=true
     
     if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
-        local to_target_tcp="$internal_ip:$internal_port"
-        if [[ "$target_ip_type" == "ipv6" ]]; then
-            to_target_tcp="[$internal_ip]:$internal_port"
-        fi
-        local tcp_rule="${src_condition}tcp dport $external_port dnat to $to_target_tcp comment \"$rule_name\""
+        local tcp_rule="${src_condition}tcp dport $external_port dnat to $internal_ip:$internal_port comment \"$rule_name\""
         print_debug "执行命令: nft add rule $table_family nat prerouting $tcp_rule"
         if ! nft add rule $table_family nat prerouting $tcp_rule 2>/dev/null; then
             print_error "TCP转发规则添加失败: $(nft add rule $table_family nat prerouting $tcp_rule 2>&1)"
@@ -685,11 +675,7 @@ add_forward_rule_core() {
     fi
     
     if [[ "$protocol" == "udp" || "$protocol" == "both" ]]; then
-        local to_target_udp="$internal_ip:$internal_port"
-        if [[ "$target_ip_type" == "ipv6" ]]; then
-            to_target_udp="[$internal_ip]:$internal_port"
-        fi
-        local udp_rule="${src_condition}udp dport $external_port dnat to $to_target_udp comment \"$rule_name\""
+        local udp_rule="${src_condition}udp dport $external_port dnat to $internal_ip:$internal_port comment \"$rule_name\""
         print_debug "执行命令: nft add rule $table_family nat prerouting $udp_rule"
         if ! nft add rule $table_family nat prerouting $udp_rule 2>/dev/null; then
             print_error "UDP转发规则添加失败: $(nft add rule $table_family nat prerouting $udp_rule 2>&1)"

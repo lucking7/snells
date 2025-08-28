@@ -1,1295 +1,1146 @@
 #!/bin/bash
 
-# 统一入口：fwrd.sh
-# 目的：为多种转发引擎（brook/gost/realm/nftables）提供统一的 CLI 契约
-# 三个统一：
-# 1) 统一动词/子命令：add | list | delete | restart | status | logs
-# 2) 统一资源模型：--engine --proto --listen --target [--target-udp] --ipver --name [--range]
-# 3) 统一输出接口：--output text|json，统一退出码（0 成功；非 0 失败）
+# Forward Manager v1.0.0
+# Unified management for GOST, NFTables, Realm forwarding tools
+# Features: Auto-install, Rule management, Service control, Performance monitoring
 
-set -eo pipefail
+set -euo pipefail
 
-# 颜色与符号（与各脚本统一）
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-BOLD='\033[1m'
-PLAIN='\033[0m'
+# ==================== Configuration ====================
 
-SUCCESS_SYMBOL="${BOLD}${GREEN}[+]${PLAIN}"
-ERROR_SYMBOL="${BOLD}${RED}[x]${PLAIN}"
-INFO_SYMBOL="${BOLD}${BLUE}[i]${PLAIN}"
-WARN_SYMBOL="${BOLD}${YELLOW}[!]${PLAIN}"
+VERSION="1.0.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="/etc/fwrd"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+TOOLS_DIR="/opt/fwrd"
 
-# sudo 检查
-if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-  SUDO=""
-else
-  SUDO="sudo"
-fi
+# Colors
+declare -A COLORS=(
+    [RED]='\033[0;31m'
+    [GREEN]='\033[0;32m'
+    [YELLOW]='\033[1;33m'
+    [BLUE]='\033[0;34m'
+    [PURPLE]='\033[0;35m'
+    [CYAN]='\033[0;36m'
+    [WHITE]='\033[1;37m'
+    [BOLD]='\033[1m'
+    [NC]='\033[0m'
+)
 
-# 默认路径（与各引擎脚本保持一致）
-BROOK_SERVICE_DIR="/etc/systemd/system"
-BROOK_CONFIG_DIR="/etc/brook"
-BROOK_CONFIG_FILE="${BROOK_CONFIG_DIR}/forwards.conf"
+# Symbols
+SUCCESS="${COLORS[BOLD]}${COLORS[GREEN]}[✓]${COLORS[NC]}"ERROR="${COLORS[BOLD]}${COLORS[RED]}[✗]${COLORS[NC]}"
+INFO="${COLORS[BOLD]}${COLORS[BLUE]}[i]${COLORS[NC]}"
+WARN="${COLORS[BOLD]}${COLORS[YELLOW]}[!]${COLORS[NC]}"
 
-GOST_CONFIG_DIR="/etc/gost"
-GOST_CONFIG_FILE="${GOST_CONFIG_DIR}/config.json"
+# Forward tools
+declare -A FORWARD_TOOLS=(
+    [gost]="GOST - Feature-rich tunnel"
+    [nftables]="NFTables - Kernel-level forwarding" 
+    [realm]="Realm - High-performance Rust proxy"
+)
 
-REALM_DIR="/opt/realm"
-REALM_CONFIG="/etc/realm/config.toml"
+# Tool status tracking
+declare -A TOOL_STATUS=()
+declare -A TOOL_VERSION=()
+declare -A TOOL_SERVICE_STATUS=()
 
-# nftables 相关
-NFTABLES_CONF="/etc/nftables.conf"
+# ==================== Core Functions ====================
 
-usage() {
-  cat <<EOF
-用法: fwrd.sh <command> [选项]
+log_info() { echo -e "${INFO} $*"; }
+log_success() { echo -e "${SUCCESS} $*"; }
+log_error() { echo -e "${ERROR} $*"; }
+log_warn() { echo -e "${WARN} $*"; }
 
-命令:
-  add       添加转发规则
-  list      列出转发规则
-  delete    删除转发规则
-  restart   重启引擎服务（适用: gost/realm）
-  status    查看引擎服务状态（适用: gost/realm）
-  logs      查看引擎服务日志（适用: gost/realm/brook）
-
-核心选项（统一资源模型）:
-  --engine <brook|gost|realm|nftables>
-  --proto <tcp|udp|both>
-  --listen <addr:port>        例: :8080 / 0.0.0.0:8080 / [::]:8080
-  --target <host:port>        例: 1.2.3.4:80 / example.com:443 / [2001:db8::1]:80
-  --target-udp <host:port>    分离转发的 UDP 目标（仅 both/split 时可用）
-  --ipver <4|6|46>            引擎支持时用于监听与目标栈选择
-  --name <rule-name>          规则名/备注（用于匹配删除/显示）
-  --range <start-end>         端口范围（可选，gost/nftables 支持更好）
-  --output <text|json>
-
-示例:
-  fwrd.sh add --engine brook --proto tcp --listen :8080 --target 1.2.3.4:80 --name web8080
-  fwrd.sh add --engine gost --proto both --listen :10053 --target 1.1.1.1:53 --name dns53
-  fwrd.sh list --engine gost --output json
-  fwrd.sh delete --engine brook --name brook-forward-8080-tcp
-EOF
+# Input sanitization and validation
+sanitize_input() {
+    local input="$1"
+    # Remove leading/trailing whitespace and normalize
+    echo "$input" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' '
 }
 
-json_escape() { echo -n "$1" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))' 2>/dev/null || echo -n "$1"; }
+validate_ip() {
+    local ip=$(sanitize_input "$1")
+    # IPv4 validation
+    if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        IFS='.' read -r -a octets <<<"$ip"        for octet in "${octets[@]}"; do
+            [[ "$octet" -le 255 ]] || return 1
+        done
+        echo "$ip"
+        return 0
+    fi
+    # IPv6 basic validation
+    if [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]] && [[ "$ip" == *":"* ]]; then
+        echo "$ip"
+        return 0
+    fi
+    # Domain name validation
+    if [[ "$ip" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\.-]{0,61}[a-zA-Z0-9])?$ ]]; then
+        echo "$ip"
+        return 0
+    fi
+    return 1
+}
 
-is_ipv6_literal() { [[ "$1" == *":"* ]] && [[ "$1" != \[*\]* ]]; }
-wrap_ipv6() { if is_ipv6_literal "$1"; then echo "[$1]"; else echo "$1"; fi }
-
-# 输入验证函数
 validate_port() {
-  local port="$1"
-  [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+    local port=$(sanitize_input "$1")
+    if [[ "$port" =~ ^[0-9]+$ ]] && [[ "$port" -ge 1 && "$port" -le 65535 ]]; then
+        echo "$port"
+        return 0
+    fi
+    return 1
 }
 
-validate_host_port() {
-  local addr="$1"
-  local host port
-  # 提取主机和端口
-  if [[ "$addr" == \[*\]:* ]]; then
-    # IPv6格式 [host]:port
-    host="${addr%:*}"; host="${host#[}"; host="${host%]}"
-    port="${addr##*:}"
-  elif [[ "$addr" == *:* ]]; then
-    host="${addr%:*}"
-    port="${addr##*:}"
-  else
-    return 1  # 无效格式
-  fi
-  
-  # 验证端口
-  validate_port "$port" || return 1
-  
-  # 验证主机名/IP（简单检查）
-  if [ -z "$host" ] || [ "$host" = "0.0.0.0" ] || [ "$host" = "::" ]; then
-    return 0  # 通配符地址
-  fi
-  
-  # 简单的主机名/IP验证
-  if [[ "$host" =~ ^[a-zA-Z0-9.-]+$ ]] || [[ "$host" =~ ^[0-9a-fA-F:]+$ ]]; then
-    return 0
-  fi
-  
-  return 1
+# Progressive input with error correction
+get_valid_ip() {
+    local prompt="$1"
+    local default="$2"
+    local ip
+    
+    while true; do
+        if [[ -n "$default" ]]; then
+            read -p "$prompt [$default]: " ip            ip=${ip:-$default}
+        else
+            read -p "$prompt: " ip
+        fi
+        
+        if [[ -z "$ip" && -n "$default" ]]; then
+            echo "$default"
+            return 0
+        fi
+        
+        if [[ -z "$ip" ]]; then
+            log_error "IP address cannot be empty"
+            continue
+        fi
+        
+        if validated_ip=$(validate_ip "$ip"); then
+            echo "$validated_ip"
+            return 0
+        else
+            log_error "Invalid IP format. Examples: 192.168.1.1, example.com, 2001:db8::1"
+        fi
+    done
 }
 
-validate_listen_addr() {
-  local addr="$1"
-  # 监听地址可以是 :port 格式
-  if [[ "$addr" == :* ]]; then
-    local port="${addr#:}"
-    validate_port "$port"
-  else
-    validate_host_port "$addr"
-  fi
+get_valid_port() {
+    local prompt="$1"
+    local default="$2"
+    local port
+    
+    while true; do
+        if [[ -n "$default" ]]; then
+            read -p "$prompt [$default]: " port
+            port=${port:-$default}
+        else
+            read -p "$prompt: " port
+        fi        
+        if [[ -z "$port" && -n "$default" ]]; then
+            echo "$default"
+            return 0
+        fi
+        
+        if [[ -z "$port" ]]; then
+            log_error "Port cannot be empty"
+            continue
+        fi
+        
+        if validated_port=$(validate_port "$port"); then
+            # Check if port is in use
+            if lsof -i :"$validated_port" >/dev/null 2>&1; then
+                log_warn "Port $validated_port appears to be in use"
+                read -p "Continue anyway? [y/N]: " confirm
+                [[ "$confirm" =~ ^[Yy]$ ]] || continue
+            fi
+            echo "$validated_port"
+            return 0
+        else
+            log_error "Invalid port. Must be 1-65535"
+        fi
+    done
 }
 
-# ----------- 运行时依赖与自动安装（按引擎） -----------
-pm_detect() {
-  if command -v apt-get >/dev/null 2>&1; then echo apt-get; return; fi
-  if command -v yum >/dev/null 2>&1; then echo yum; return; fi
-  if command -v dnf >/dev/null 2>&1; then echo dnf; return; fi
-  echo ""
+get_protocol() {
+    local protocol
+    while true; do
+        echo "Protocol options:"
+        echo "  1) TCP"
+        echo "  2) UDP" 
+        echo "  3) TCP + UDP"
+        read -p "Select protocol [3]: " protocol
+        protocol=${protocol:-3}        
+        case "$protocol" in
+            1) echo "tcp"; return 0 ;;
+            2) echo "udp"; return 0 ;;
+            3) echo "both"; return 0 ;;
+            *) log_error "Invalid choice. Enter 1, 2, or 3" ;;
+        esac
+    done
 }
 
-install_pkgs() {
-  local pm; pm=$(pm_detect)
-  [ -z "$pm" ] && { echo -e "${ERROR_SYMBOL} 未找到受支持的包管理器(apt/yum/dnf)"; return 1; }
-  case "$pm" in
-    apt-get)
-      $SUDO apt-get update -y >/dev/null 2>&1 || true
-      $SUDO apt-get install -y "$@" >/dev/null 2>&1 ;;
-    yum) $SUDO yum install -y "$@" >/dev/null 2>&1 ;;
-    dnf) $SUDO dnf install -y "$@" >/dev/null 2>&1 ;;
-  esac
+# System check
+check_system() {
+    if [[ $EUID -ne 0 ]]; then
+        log_error "Root privileges required"
+        exit 1
+    fi
+    
+    local required_cmds=("curl" "jq" "systemctl" "lsof")
+    for cmd in "${required_cmds[@]}"; do
+        if ! command -v "$cmd" &> /dev/null; then
+            log_warn "Missing command: $cmd, attempting install..."
+            case "$cmd" in
+                jq|lsof) apt-get update && apt-get install -y "$cmd" ;;
+                *) log_error "Please install: $cmd" && exit 1 ;;
+            esac
+        fi
+    done
 }
 
-ensure_user() {
-  local u="$1"
-  id "$u" >/dev/null 2>&1 || $SUDO useradd --system --no-create-home --shell /bin/false "$u" >/dev/null 2>&1 || true
+# Setup configuration
+setup_config() {
+    log_info "Setting up configuration..."    
+    mkdir -p "$CONFIG_DIR"/{rules,backups,logs}
+    mkdir -p "$TOOLS_DIR"
+    
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        cat > "$CONFIG_FILE" << 'EOF'
+{
+  "version": "1.0.0",
+  "default_tool": "auto",
+  "auto_start": true,
+  "tools": {
+    "gost": {"enabled": false, "config_path": "/etc/gost", "service_name": "gost"},
+    "nftables": {"enabled": false, "config_path": "/etc/nftables.conf", "service_name": "nftables"},
+    "realm": {"enabled": false, "config_path": "/root/.realm", "service_name": "realm"}
+  },
+  "rules": [],
+  "global_settings": {
+    "ip_forward": true,
+    "log_level": "info",
+    "max_rules": 100
+  }
+}
+EOF
+        log_success "Configuration created"
+    fi
 }
 
-ensure_jq() {
-  command -v jq >/dev/null 2>&1 || install_pkgs jq
+# Detect installed tools
+detect_tools() {
+    log_info "Detecting tools..."
+    
+    # GOST detection
+    if command -v gost &> /dev/null; then
+        TOOL_STATUS[gost]="installed"
+        TOOL_VERSION[gost]=$(gost --version 2>/dev/null | head -1 || echo "unknown")    else
+        TOOL_STATUS[gost]="not_installed"
+    fi
+    
+    # NFTables detection
+    if command -v nft &> /dev/null; then
+        TOOL_STATUS[nftables]="installed"
+        TOOL_VERSION[nftables]=$(nft --version | head -1)
+    else
+        TOOL_STATUS[nftables]="not_installed"
+    fi
+    
+    # Realm detection
+    if [[ -f "/opt/fwrd/realm" ]] || command -v realm &> /dev/null; then
+        TOOL_STATUS[realm]="installed"
+        TOOL_VERSION[realm]=$(/opt/fwrd/realm --version 2>/dev/null || echo "unknown")
+    else
+        TOOL_STATUS[realm]="not_installed"
+    fi
+    
+    # Service status
+    for tool in "${!FORWARD_TOOLS[@]}"; do
+        if systemctl is-active --quiet "$tool" 2>/dev/null; then
+            TOOL_SERVICE_STATUS[$tool]="active"
+        elif systemctl is-enabled --quiet "$tool" 2>/dev/null; then
+            TOOL_SERVICE_STATUS[$tool]="inactive"
+        else
+            TOOL_SERVICE_STATUS[$tool]="disabled"
+        fi
+    done
 }
 
-install_brook_binary() {
-  local arch os brook_arch brook_os ver url
-  arch=$(uname -m)
-  case "$arch" in
-    x86_64|amd64) brook_arch="amd64";;
-    aarch64|arm64) brook_arch="arm64";;
-    i386|i686) brook_arch="386";;
-    *) echo -e "${ERROR_SYMBOL} Unsupported architecture: $arch"; return 1;;
-  esac
-  os=$(uname -s | tr '[:upper:]' '[:lower:]')
-  case "$os" in
-    linux) brook_os="linux";;
-    darwin) brook_os="darwin";;
-    *) echo -e "${ERROR_SYMBOL} Unsupported operating system: $os"; return 1;;
-  esac
-  ver=$(curl -s --connect-timeout 8 https://api.github.com/repos/txthinking/brook/releases/latest | grep -o '"tag_name": "v[^"]*' | sed 's/"tag_name": "v//' | head -1 || true)
-  [ -z "$ver" ] && ver="20250202"
-  url="https://github.com/txthinking/brook/releases/download/v${ver}/brook_${brook_os}_${brook_arch}"
-  tmpf=$(mktemp)
-  if curl -L --connect-timeout 30 --max-time 300 -o "$tmpf" "$url" && [ -s "$tmpf" ]; then
-    $SUDO chmod +x "$tmpf"
-    $SUDO mv "$tmpf" /usr/local/bin/brook
-    return 0
-  fi
-  rm -f "$tmpf" 2>/dev/null || true
-  return 1
+# Tool installation functions
+install_gost() {    log_info "Installing GOST..."
+    if curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh | bash; then
+        log_success "GOST installed"
+        TOOL_STATUS[gost]="installed"
+        return 0
+    else
+        log_error "GOST installation failed"
+        return 1
+    fi
 }
 
-ensure_brook_installed() {
-  if ! command -v brook >/dev/null 2>&1 || ! brook --help >/dev/null 2>&1; then
-    echo -e "${INFO_SYMBOL} Installing brook..."
-    install_pkgs curl >/dev/null 2>&1 || true
-    install_brook_binary || { echo -e "${ERROR_SYMBOL} Failed to install brook"; return 1; }
-  fi
-  ensure_user brook
+install_nftables() {
+    log_info "Installing NFTables..."
+    if apt-get update && apt-get install -y nftables; then
+        systemctl enable nftables
+        log_success "NFTables installed"
+        TOOL_STATUS[nftables]="installed"
+        return 0
+    else
+        log_error "NFTables installation failed"
+        return 1
+    fi
 }
 
-install_gost_binary() {
-  install_pkgs curl >/dev/null 2>&1 || true
-  bash -c "bash <(curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh) --install" >/dev/null 2>&1 || return 1
+install_realm() {
+    log_info "Installing Realm..."
+    
+    local arch=$(uname -m)
+    local realm_arch
+    
+    case "$arch" in
+        x86_64) realm_arch="x86_64-unknown-linux-gnu" ;;
+        aarch64) realm_arch="aarch64-unknown-linux-gnu" ;;
+        armv7l) realm_arch="arm-unknown-linux-gnueabi" ;;
+        *) log_error "Unsupported architecture: $arch"; return 1 ;;
+    esac
+    
+    local version=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest | jq -r '.tag_name // "v2.6.2"')
+    local download_url="https://github.com/zhboner/realm/releases/download/${version}/realm-${realm_arch}.tar.gz"    
+    if curl -L -o /tmp/realm.tar.gz "$download_url"; then
+        tar -xzf /tmp/realm.tar.gz -C /tmp
+        mv /tmp/realm "$TOOLS_DIR/realm"
+        chmod +x "$TOOLS_DIR/realm"
+        ln -sf "$TOOLS_DIR/realm" /usr/local/bin/realm
+        rm -f /tmp/realm.tar.gz
+        log_success "Realm installed"
+        TOOL_STATUS[realm]="installed"
+        return 0
+    else
+        log_error "Realm installation failed"
+        return 1
+    fi
 }
 
-ensure_gost_service() {
-  [ -d "$GOST_CONFIG_DIR" ] || $SUDO mkdir -p "$GOST_CONFIG_DIR"
-  [ -f "$GOST_CONFIG_FILE" ] || echo '{"services":[]}' | $SUDO tee "$GOST_CONFIG_FILE" >/dev/null
-  ensure_user gost
-  local svc=/etc/systemd/system/gost.service
-  if [ ! -f "$svc" ]; then
-    cat <<EOF | $SUDO tee "$svc" >/dev/null
+# Recommend best tool
+recommend_tool() {
+    local protocol="$1"
+    local performance_priority="${2:-normal}"
+    
+    case "$protocol-$performance_priority" in
+        *-high)
+            if [[ "${TOOL_STATUS[nftables]}" == "installed" ]]; then
+                echo "nftables"
+            elif [[ "${TOOL_STATUS[realm]}" == "installed" ]]; then
+                echo "realm"
+            else
+                echo "gost"
+            fi
+            ;;
+        *)
+            if [[ "${TOOL_STATUS[gost]}" == "installed" ]]; then
+                echo "gost"
+            elif [[ "${TOOL_STATUS[nftables]}" == "installed" ]]; then
+                echo "nftables"
+            else
+                echo "realm"
+            fi
+            ;;
+    esac
+}
+# Add GOST rule
+add_rule_gost() {
+    local rule_id="$1"
+    local listen_port="$2"
+    local target_ip="$3"
+    local target_port="$4"
+    local protocol="$5"
+    local listen_ip="${6:-0.0.0.0}"
+    
+    log_info "Adding GOST rule..."
+    
+    local config_file="/etc/gost/config.json"
+    mkdir -p "$(dirname "$config_file")"
+    
+    if [[ ! -f "$config_file" ]]; then
+        echo '{"services":[]}' > "$config_file"
+    fi
+    
+    local service_name="fwrd-${rule_id}"
+    local listen_addr="${listen_ip}:${listen_port}"
+    local target_addr="${target_ip}:${target_port}"
+    
+    if [[ "$protocol" == "both" ]]; then
+        jq --arg name "${service_name}-tcp" \
+           --arg addr "$listen_addr" \
+           --arg target "$target_addr" \
+           '.services += [{name: $name, addr: $addr, handler: {type: "tcp"}, listener: {type: "tcp"}, forwarder: {nodes: [{name: "target-0", addr: $target}]}}]' \
+           "$config_file" > "${config_file}.tmp"
+        
+        jq --arg name "${service_name}-udp" \
+           --arg addr "$listen_addr" \
+           --arg target "$target_addr" \
+           '.services += [{name: $name, addr: $addr, handler: {type: "udp"}, listener: {type: "udp"}, forwarder: {nodes: [{name: "target-0", addr: $target}]}}]' \
+           "${config_file}.tmp" > "$config_file"
+        rm -f "${config_file}.tmp"
+    else
+        jq --arg name "$service_name" \
+           --arg addr "$listen_addr" \
+           --arg proto "$protocol" \
+           --arg target "$target_addr" \
+           '.services += [{name: $name, addr: $addr, handler: {type: $proto}, listener: {type: $proto}, forwarder: {nodes: [{name: "target-0", addr: $target}]}}]' \
+           "$config_file" > "${config_file}.tmp" && mv "${config_file}.tmp" "$config_file"
+    fi    
+    create_gost_service
+    systemctl restart gost
+    
+    if systemctl is-active --quiet gost; then
+        log_success "GOST rule added"
+        return 0
+    else
+        log_error "GOST service failed"
+        return 1
+    fi
+}
+
+create_gost_service() {
+    if ! id "gost" &>/dev/null; then
+        useradd --system --no-create-home --shell /bin/false gost
+    fi
+    
+    cat > "/etc/systemd/system/gost.service" << EOF
 [Unit]
 Description=GOST Proxy Service
 After=network.target
-Wants=network.target
 
 [Service]
-ExecStart=/usr/local/bin/gost -C "$GOST_CONFIG_FILE"
+Type=simple
+ExecStart=/usr/local/bin/gost -C /etc/gost/config.json
 Restart=always
 RestartSec=5
 User=gost
 Group=gost
 NoNewPrivileges=true
-PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+PrivateTmp=true
 LimitNOFILE=infinity
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
+EOF    
+    systemctl daemon-reload
+    systemctl enable gost
+}
+
+# Add NFTables rule
+add_rule_nftables() {
+    local rule_id="$1"
+    local listen_port="$2"
+    local target_ip="$3"
+    local target_port="$4"
+    local protocol="$5"
+    local listen_ip="${6:-0.0.0.0}"
+    
+    log_info "Adding NFTables rule..."
+    
+    if ! nft list tables 2>/dev/null | grep -q "table inet filter"; then
+        log_info "Initializing NFTables..."
+        nft -f - << 'EOF'
+flush ruleset
+table inet filter {
+    chain input { type filter hook input priority 0; policy accept; }
+    chain forward { type filter hook forward priority 0; policy accept; }
+    chain output { type filter hook output priority 0; policy accept; }
+}
+table ip nat {
+    chain prerouting { type nat hook prerouting priority dstnat; policy accept; }
+    chain postrouting { type nat hook postrouting priority srcnat; policy accept; masquerade }
+}
 EOF
-    $SUDO systemctl daemon-reload
-  fi
-  $SUDO systemctl enable gost >/dev/null 2>&1 || true
+    fi
+    
+    local rule_comment="fwrd-${rule_id}"
+    
+    if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
+        nft add rule ip nat prerouting tcp dport "$listen_port" dnat to "${target_ip}:${target_port}" comment "\"$rule_comment\""
+    fi    
+    if [[ "$protocol" == "udp" || "$protocol" == "both" ]]; then
+        nft add rule ip nat prerouting udp dport "$listen_port" dnat to "${target_ip}:${target_port}" comment "\"$rule_comment\""
+    fi
+    
+    nft list ruleset > /etc/nftables.conf
+    sed -i '1i#!/usr/sbin/nft -f' /etc/nftables.conf
+    
+    log_success "NFTables rule added"
+    echo "${rule_id}|${protocol}|${listen_port}|${target_ip}|${target_port}|$(date)" >> "$CONFIG_DIR/nftables_rules.txt"
 }
 
-ensure_gost_installed() {
-  ensure_jq
-  if ! command -v gost >/dev/null 2>&1; then
-    echo -e "${INFO_SYMBOL} Installing gost..."
-    install_gost_binary || { echo -e "${ERROR_SYMBOL} Failed to install gost"; return 1; }
-  fi
-  ensure_gost_service
-}
-
-install_realm_binary() {
-  install_pkgs curl wget tar >/dev/null 2>&1 || true
-  local api=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest || true)
-  local ver
-  ver=$(echo "$api" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)
-  [ -z "$ver" ] && ver="v2.6.2"
-  local arch=$(uname -m)
-  local os=$(uname -s | tr '[:upper:]' '[:lower:]')
-  local url=""
-  case "${arch}-${os}" in
-    x86_64-linux) url="https://github.com/zhboner/realm/releases/download/${ver}/realm-x86_64-unknown-linux-gnu.tar.gz";;
-    aarch64-linux) url="https://github.com/zhboner/realm/releases/download/${ver}/realm-aarch64-unknown-linux-gnu.tar.gz";;
-    armv7l-linux|arm-linux) url="https://github.com/zhboner/realm/releases/download/${ver}/realm-arm-unknown-linux-gnueabi.tar.gz";;
-    *) url="https://github.com/zhboner/realm/releases/download/${ver}/realm-x86_64-unknown-linux-gnu.tar.gz";;
-  esac
-  $SUDO mkdir -p "$REALM_DIR"
-  ( cd "$REALM_DIR" && wget -qO realm.tar.gz "$url" && tar -xzf realm.tar.gz && $SUDO chmod +x realm && rm -f realm.tar.gz ) || return 1
-}
-
-ensure_realm_service() {
-  $SUDO mkdir -p "$(dirname "$REALM_CONFIG")" >/dev/null 2>&1 || true
-  [ -f "$REALM_CONFIG" ] || cat <<EOF | $SUDO tee "$REALM_CONFIG" >/dev/null
+# Add Realm rule
+add_rule_realm() {
+    local rule_id="$1"
+    local listen_port="$2"
+    local target_ip="$3"
+    local target_port="$4"
+    local protocol="$5"
+    local listen_ip="${6:-0.0.0.0}"
+    
+    log_info "Adding Realm rule..."
+    
+    local config_file="/root/.realm/config.toml"
+    mkdir -p "$(dirname "$config_file")"
+    
+    if [[ ! -f "$config_file" ]]; then
+        cat > "$config_file" << 'EOF'
 [network]
 no_tcp = false
 use_udp = true
 ipv6_only = false
 EOF
-  ensure_user realm
-  local svc=/etc/systemd/system/realm.service
-  if [ ! -f "$svc" ]; then
-    cat <<EOF | $SUDO tee "$svc" >/dev/null
+    fi
+    
+    local remark="Forward Rule ${rule_id}"    cat >> "$config_file" << EOF
+
+[[endpoints]]
+# Remark: $remark
+listen = "${listen_ip}:$listen_port"
+remote = "$target_ip:$target_port"
+use_tcp = $([[ "$protocol" == "tcp" || "$protocol" == "both" ]] && echo "true" || echo "false")
+use_udp = $([[ "$protocol" == "udp" || "$protocol" == "both" ]] && echo "true" || echo "false")
+EOF
+    
+    create_realm_service
+    systemctl restart realm
+    
+    if systemctl is-active --quiet realm; then
+        log_success "Realm rule added"
+        return 0
+    else
+        log_error "Realm service failed"
+        return 1
+    fi
+}
+
+create_realm_service() {
+    if ! id "realm" &>/dev/null; then
+        useradd --system --no-create-home --shell /bin/false realm
+    fi
+    
+    cat > "/etc/systemd/system/realm.service" << EOF
 [Unit]
 Description=Realm Service
-After=network-online.target
-Wants=network-online.target systemd-networkd-wait-online.service
+After=network.target
 
 [Service]
 Type=simple
 User=realm
 Group=realm
-WorkingDirectory=${REALM_DIR}
-ExecStart=${REALM_DIR}/realm -c ${REALM_CONFIG}
 Restart=on-failure
-RestartSec=5s
+RestartSec=5sExecStart=$TOOLS_DIR/realm -c /root/.realm/config.toml
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 LimitNOFILE=infinity
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    $SUDO systemctl daemon-reload
-  fi
-  $SUDO systemctl enable realm >/dev/null 2>&1 || true
-}
-
-ensure_realm_installed() {
-  if [ ! -x "${REALM_DIR}/realm" ]; then
-    echo -e "${INFO_SYMBOL} Installing realm..."
-    install_realm_binary || { echo -e "${ERROR_SYMBOL} Failed to install realm"; return 1; }
-  fi
-  ensure_realm_service
-}
-
-ensure_nftables_ready() {
-  if ! command -v nft >/dev/null 2>&1; then
-    echo -e "${INFO_SYMBOL} Installing nftables..."
-    install_pkgs nftables >/dev/null 2>&1 || true
-  fi
-  $SUDO systemctl enable nftables >/dev/null 2>&1 || true
-  $SUDO systemctl start nftables >/dev/null 2>&1 || true
-}
-
-ensure_engine_ready() {
-  case "$1" in
-    brook) ensure_brook_installed ;;
-    gost) ensure_gost_installed ;;
-    realm) ensure_realm_installed ;;
-    nftables) ensure_nftables_ready ;;
-  esac
-}
-
-# 选取可用端口（优先随机，失败则返回区间起始）
-find_available_port() {
-  local start=${1:-10000}
-  local end=${2:-65535}
-  local port
-  local i
-  for i in $(seq 1 100); do
-    port=$((RANDOM % (end - start + 1) + start))
-    if ! (ss -tuln 2>/dev/null | grep -q ":$port " || netstat -tuln 2>/dev/null | grep -q ":$port "); then
-      echo "$port"
-      return 0
-    fi
-  done
-  echo "$start"
-}
-
-# 快速创建：仅选择引擎与协议，其余走默认/最少输入
-quick_add() {
-  echo -e "${INFO_SYMBOL} Quick mode: choose engine and protocol"
-  echo "  1) brook"
-  echo "  2) gost"
-  echo "  3) realm"
-  echo "  4) nftables"
-  read -rp "Select engine [1-4] (default: 2): " _e
-  case "${_e:-2}" in
-    1) ENGINE="brook" ;;
-    2) ENGINE="gost" ;;
-    3) ENGINE="realm" ;;
-    4) ENGINE="nftables" ;;
-    *) ENGINE="gost" ;;
-  esac
-  ensure_engine_ready "$ENGINE"
-
-  echo "  1) tcp"
-  echo "  2) udp"
-  echo "  3) both (tcp+udp)"
-  read -rp "Select protocol [1-3] (default: 1): " _p
-  case "${_p:-1}" in
-    1) PROTO="tcp" ;;
-    2) PROTO="udp" ;;
-    3) PROTO="both" ;;
-    *) PROTO="tcp" ;;
-  esac
-
-  read -rp "Target host (e.g. 1.2.3.4 or example.com): " TGT_HOST
-  read -rp "Target port (1-65535): " TGT_PORT
-  if [ -z "$TGT_HOST" ]; then
-    echo -e "${ERROR_SYMBOL} Target host cannot be empty"; return 1
-  fi
-  if ! validate_port "$TGT_PORT"; then
-    echo -e "${ERROR_SYMBOL} Invalid port format, please enter a number between 1-65535"; return 1
-  fi
-  TARGET="${TGT_HOST}:${TGT_PORT}"
-
-  read -rp "Listen port (blank=auto): " _lp
-  if [ -z "${_lp}" ]; then
-    _lp=$(find_available_port 10000 65000)
-    echo -e "${INFO_SYMBOL} Auto-selected port: ${YELLOW}$_lp${PLAIN}"
-  else
-    if ! validate_port "$_lp"; then
-      echo -e "${ERROR_SYMBOL} Invalid listen port format, please enter a number between 1-65535"; return 1
-    fi
-  fi
-  LISTEN=":${_lp}"
-
-  UDP_TARGET=""
-  if [ "$PROTO" = "both" ]; then
-    read -rp "Use separate target for UDP? [y/N]: " _s
-    if [[ "${_s}" =~ ^[Yy]$ ]]; then
-      read -rp "UDP target host: " UDP_HOST
-      read -rp "UDP target port (1-65535): " UDP_PORT
-      if [ -z "$UDP_HOST" ]; then
-        echo -e "${ERROR_SYMBOL} UDP target host cannot be empty"; return 1
-      fi
-      if ! validate_port "$UDP_PORT"; then
-        echo -e "${ERROR_SYMBOL} Invalid UDP port format, please enter a number between 1-65535"; return 1
-      fi
-      UDP_TARGET="${UDP_HOST}:${UDP_PORT}"
-    fi
-  fi
-
-  read -rp "Rule name (optional): " NAME
-
-  # 复用统一 add 逻辑
-  SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
-  if [ -n "$UDP_TARGET" ]; then
-    "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" --target-udp "$UDP_TARGET" ${NAME:+--name "$NAME"}
-  else
-    "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
-  fi
-  echo -e "${SUCCESS_SYMBOL} Quick forward created"
-}
-
-# 选择引擎（数字简化）
-select_engine() {
-  echo "  1) brook"
-  echo "  2) gost"
-  echo "  3) realm"
-  echo "  4) nftables"
-  read -rp "Select engine [1-4] (default: 2): " _e
-  case "${_e:-2}" in
-    1) echo brook ;;
-    2) echo gost ;;
-    3) echo realm ;;
-    4) echo nftables ;;
-    *) echo gost ;;
-  esac
-}
-
-# 场景：快速 Web 转发（HTTP/HTTPS）
-menu_quick_web() {
-  clear
-  echo -e "${BOLD}${BLUE}========== Quick Web Forward ==========${PLAIN}"
-  local SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
-  ENGINE=$(select_engine)
-  ensure_engine_ready "$ENGINE"
-  read -rp "Target host or IP: " target_host
-  [ -z "$target_host" ] && { echo -e "${ERROR_SYMBOL} Target required"; return; }
-
-  echo "  1) HTTP (80)"
-  echo "  2) HTTPS (443)"
-  echo "  3) Both"
-  echo "  4) Custom port"
-  read -rp "Select [1-4] (default: 3): " web_choice
-  web_choice=${web_choice:-3}
-  case "$web_choice" in
-    1)
-      local_port=$(find_available_port 8000 8999)
-      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:80" --name "web-http-$local_port"
-      echo -e "${SUCCESS_SYMBOL} http -> :$local_port => ${target_host}:80" ;;
-    2)
-      local_port=$(find_available_port 8400 8499)
-      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:443" --name "web-https-$local_port"
-      echo -e "${SUCCESS_SYMBOL} https -> :$local_port => ${target_host}:443" ;;
-    3)
-      http_port=$(find_available_port 8000 8099)
-      https_port=$(find_available_port 8400 8499)
-      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$http_port" --target "${target_host}:80" --name "web-http-$http_port"
-      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$https_port" --target "${target_host}:443" --name "web-https-$https_port"
-      echo -e "${SUCCESS_SYMBOL} http -> :$http_port => ${target_host}:80"
-      echo -e "${SUCCESS_SYMBOL} https -> :$https_port => ${target_host}:443" ;;
-    4)
-      read -rp "Target port: " t_port
-      [ -z "$t_port" ] && { echo -e "${ERROR_SYMBOL} Port required"; return; }
-      local_port=$(find_available_port 8000 8999)
-      "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "web-custom-$local_port"
-      echo -e "${SUCCESS_SYMBOL} web -> :$local_port => ${target_host}:$t_port" ;;
-  esac
-}
-
-# 场景：快速 DNS 转发
-menu_quick_dns() {
-  clear
-  echo -e "${BOLD}${BLUE}========== Quick DNS Forward ==========${PLAIN}"
-  local SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
-  ENGINE=$(select_engine)
-  ensure_engine_ready "$ENGINE"
-  echo "  1) Cloudflare (1.1.1.1)"
-  echo "  2) Google (8.8.8.8)"
-  echo "  3) Quad9 (9.9.9.9)"
-  echo "  4) Custom"
-  read -rp "Select [1-4] (default: 1): " dns_choice
-  dns_choice=${dns_choice:-1}
-  case "$dns_choice" in
-    1) target_ip="1.1.1.1"; dns_name=cloudflare ;;
-    2) target_ip="8.8.8.8"; dns_name=google ;;
-    3) target_ip="9.9.9.9"; dns_name=quad9 ;;
-    4) read -rp "DNS server IP: " target_ip; dns_name=custom ;;
-  esac
-  [ -z "$target_ip" ] && { echo -e "${ERROR_SYMBOL} DNS IP required"; return; }
-  local_port=$(find_available_port 10053 15053)
-  "$SCRIPT_PATH" add --engine "$ENGINE" --proto both --listen ":$local_port" --target "${target_ip}:53" --name "dns-$dns_name-$local_port"
-  echo -e "${SUCCESS_SYMBOL} dns -> :$local_port => ${target_ip}:53 (tcp+udp)"
-}
-
-# 场景：快速远程访问（SSH/RDP/VNC）
-menu_quick_remote() {
-  clear
-  echo -e "${BOLD}${BLUE}========== Quick Remote Forward ==========${PLAIN}"
-  local SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
-  ENGINE=$(select_engine)
-  ensure_engine_ready "$ENGINE"
-  read -rp "Target host or IP: " target_host
-  [ -z "$target_host" ] && { echo -e "${ERROR_SYMBOL} Target required"; return; }
-  echo "  1) SSH (22)"
-  echo "  2) RDP (3389)"
-  echo "  3) VNC (5901)"
-  echo "  4) Custom"
-  read -rp "Select [1-4] (default: 1): " svc
-  svc=${svc:-1}
-  case "$svc" in
-    1) local_port=$(find_available_port 2200 2299); t_port=22; name=ssh ;;
-    2) local_port=$(find_available_port 3300 3399); t_port=3389; name=rdp ;;
-    3) local_port=$(find_available_port 5900 5999); t_port=5901; name=vnc ;;
-    4) read -rp "Target port: " t_port; local_port=$(find_available_port 10000 19999); name=custom ;;
-  esac
-  "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen ":$local_port" --target "${target_host}:$t_port" --name "remote-$name-$local_port"
-  echo -e "${SUCCESS_SYMBOL} remote -> :$local_port => ${target_host}:$t_port"
-}
-
-# 解析参数
-CMD="${1:-}"
-if [ $# -gt 0 ]; then shift || true; fi
-
-ENGINE=""; PROTO=""; LISTEN=""; TARGET=""; TARGET_UDP=""; IPVER=""; NAME=""; RANGE=""; OUTPUT="text"
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --engine) ENGINE="$2"; shift 2 ;;
-    --proto) PROTO="$2"; shift 2 ;;
-    --listen) LISTEN="$2"; shift 2 ;;
-    --target) TARGET="$2"; shift 2 ;;
-    --target-udp) TARGET_UDP="$2"; shift 2 ;;
-    --ipver) IPVER="$2"; shift 2 ;;
-    --name) NAME="$2"; shift 2 ;;
-    --range) RANGE="$2"; shift 2 ;;
-    --output) OUTPUT="$2"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo -e "${ERROR_SYMBOL} Unknown parameter: $1"; usage; exit 2 ;;
-  esac
-done
-
-ensure_dirs() {
-  [ -d "$BROOK_CONFIG_DIR" ] || $SUDO mkdir -p "$BROOK_CONFIG_DIR"
-  [ -f "$BROOK_CONFIG_FILE" ] || $SUDO touch "$BROOK_CONFIG_FILE"
-  [ -d "$GOST_CONFIG_DIR" ] || $SUDO mkdir -p "$GOST_CONFIG_DIR"
-  [ -f "$GOST_CONFIG_FILE" ] || echo '{"services":[]}' | $SUDO tee "$GOST_CONFIG_FILE" >/dev/null
-}
-
-# 引擎适配：brook（系统级 systemd + forwards.conf）
-engine_brook_add() {
-  local proto="$1" listen="$2" target="$3" name="$4"
-  local service_name
-  local normalized_listen="$listen"
-  # brook relay 支持 -f <listen> -t <remote>
-  service_name="brook-forward-$(echo "$listen" | sed 's/[^0-9]//g')-${proto}"
-  [ -n "$name" ] && service_name="$name"
-
-  # 生成 service 文件
-  ensure_brook_installed || { echo -e "${ERROR_SYMBOL} brook 未就绪"; exit 1; }
-  local brook_exec
-  if command -v brook &>/dev/null; then brook_exec=$(command -v brook); else brook_exec="/usr/local/bin/brook"; fi
-
-  local unit="${BROOK_SERVICE_DIR}/${service_name}.service"
-  local cmd="${brook_exec} relay -f ${normalized_listen} -t ${target}"
-  cat <<EOF | $SUDO tee "$unit" >/dev/null
-[Unit]
-Description=Brook Forward ${listen} -> ${target} (${proto})
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=$cmd
-Restart=always
-RestartSec=5
-User=brook
-Group=brook
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-LimitNOFILE=infinity
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  $SUDO systemctl daemon-reload
-  $SUDO systemctl enable "$service_name" >/dev/null 2>&1 || true
-  $SUDO systemctl restart "$service_name"
-  echo "${service_name}|${listen}|${target}|${proto}" | $SUDO tee -a "$BROOK_CONFIG_FILE" >/dev/null
-  echo -e "${SUCCESS_SYMBOL} Brook rule added successfully: $service_name"
-}
-
-engine_brook_list() {
-  if [ "$OUTPUT" = "json" ]; then
-    echo -n '['
-    local first=1
-    while IFS='|' read -r s l r p; do
-      [ -z "$s" ] && continue
-      [ $first -eq 0 ] && echo -n ','
-      first=0
-      local active
-      active=$(systemctl is-active "$s" 2>/dev/null || echo "unknown")
-      echo -n "{\"engine\":\"brook\",\"service\":$(json_escape "$s"),\"listen\":$(json_escape "$l"),\"target\":$(json_escape "$r"),\"proto\":\"$p\",\"active\":\"$active\"}"
-    done < "$BROOK_CONFIG_FILE"
-    echo ']'
-  else
-    printf "%-28s %-20s %-24s %-6s %-8s\n" "SERVICE" "LISTEN" "TARGET" "PROTO" "ACTIVE"
-    if [ -f "$BROOK_CONFIG_FILE" ]; then
-      while IFS='|' read -r s l r p; do
-        [ -z "$s" ] && continue
-        active=$(systemctl is-active "$s" 2>/dev/null || echo "unknown")
-        printf "%-28s %-20s %-24s %-6s %-8s\n" "$s" "$l" "$r" "$p" "$active"
-      done < "$BROOK_CONFIG_FILE"
-    fi
-  fi
-}
-
-engine_brook_delete() {
-  local name="$1"
-  [ -z "$name" ] && { echo -e "${ERROR_SYMBOL} 请提供 --name"; exit 2; }
-  $SUDO systemctl stop "$name" 2>/dev/null || true
-  $SUDO systemctl disable "$name" 2>/dev/null || true
-  $SUDO rm -f "${BROOK_SERVICE_DIR}/${name}.service"
-  $SUDO systemctl daemon-reload
-  $SUDO sed -i "/^${name}|/d" "$BROOK_CONFIG_FILE" 2>/dev/null || true
-  echo -e "${SUCCESS_SYMBOL} 已删除: $name"
-}
-
-# 引擎适配：gost（配置文件 JSON）
-engine_gost_add() {
-  local proto="$1" listen="$2" target="$3" name="$4"
-  command -v jq >/dev/null 2>&1 || { echo -e "${ERROR_SYMBOL} Missing jq"; exit 1; }
-  [ -f "$GOST_CONFIG_FILE" ] || echo '{"services":[]}' | $SUDO tee "$GOST_CONFIG_FILE" >/dev/null
-  local tmp=$(mktemp)
-  local svc_name
-  if [ -n "$name" ]; then svc_name="$name"; else svc_name="forward-$(echo "$listen"|sed 's/[^0-9]//g')-$proto"; fi
-  jq --arg n "$svc_name" --arg a "$listen" --arg t "$target" --arg p "$proto" \
-     '.services += [{name:$n, addr:$a, handler:{type:$p}, listener:{type:$p}, forwarder:{nodes:[{name:"target-0", addr:$t}]}}]' \
-     "$GOST_CONFIG_FILE" > "$tmp"
-  $SUDO mv "$tmp" "$GOST_CONFIG_FILE"
-  $SUDO chown root:root "$GOST_CONFIG_FILE"; $SUDO chmod 644 "$GOST_CONFIG_FILE"
-  $SUDO systemctl restart gost || $SUDO systemctl start gost || true
-  echo -e "${SUCCESS_SYMBOL} Gost rule added successfully: $svc_name"
-}
-
-engine_gost_list() {
-  command -v jq >/dev/null 2>&1 || { echo -e "${ERROR_SYMBOL} Missing jq"; exit 1; }
-  if [ "$OUTPUT" = "json" ]; then
-    jq -r '.services[] | {engine:"gost", name:.name, listen:.addr, proto:(.handler.type), target:(.forwarder.nodes[0].addr // "") }' "$GOST_CONFIG_FILE" 2>/dev/null | \
-    python3 -c 'import sys,json; print(json.dumps([json.loads(l) for l in sys.stdin if l.strip()], ensure_ascii=False))' 2>/dev/null || echo '[]'
-  else
-    printf "%-28s %-20s %-6s %-24s\n" "NAME" "LISTEN" "PROTO" "TARGET"
-    jq -r '.services[] | [.name, .addr, .handler.type, (.forwarder.nodes[0].addr // "")] | @tsv' "$GOST_CONFIG_FILE" 2>/dev/null | \
-    awk -F'\t' '{printf "%-28s %-20s %-6s %-24s\n", $1,$2,$3,$4}' || true
-  fi
-}
-
-engine_gost_delete() {
-  local name="$1" tmp=$(mktemp)
-  command -v jq >/dev/null 2>&1 || { echo -e "${ERROR_SYMBOL} Missing jq"; exit 1; }
-  [ -z "$name" ] && { echo -e "${ERROR_SYMBOL} 请提供 --name"; exit 2; }
-  jq --arg n "$name" '.services = [.services[] | select(.name != $n)]' "$GOST_CONFIG_FILE" > "$tmp"
-  $SUDO mv "$tmp" "$GOST_CONFIG_FILE"
-  $SUDO systemctl restart gost || true
-  echo -e "${SUCCESS_SYMBOL} 已删除: $name"
-}
-
-# 引擎适配：realm（config.toml 直接追加）
-ensure_realm_network() {
-  if ! grep -q '^\[network\]' "$REALM_CONFIG" 2>/dev/null; then
-    cat <<EOF | $SUDO tee -a "$REALM_CONFIG" >/dev/null
-[network]
-no_tcp = false
-use_udp = true
-ipv6_only = false
-EOF
-  fi
-}
-
-engine_realm_add() {
-  local proto="$1" listen="$2" target="$3" name="$4"
-  $SUDO mkdir -p "$(dirname "$REALM_CONFIG")" 2>/dev/null || true
-  [ -f "$REALM_CONFIG" ] || $SUDO touch "$REALM_CONFIG"
-  ensure_realm_network
-  local use_tcp=false use_udp=false
-  case "$proto" in
-    tcp) use_tcp=true; use_udp=false ;;
-    udp) use_tcp=false; use_udp=true ;;
-    both) use_tcp=true; use_udp=true ;;
-  esac
-  cat <<EOF | $SUDO tee -a "$REALM_CONFIG" >/dev/null
-
-[[endpoints]]
-# Remark: ${name:-fwrd}
-listen = "${listen}"
-remote = "${target}"
-use_tcp = ${use_tcp}
-use_udp = ${use_udp}
-EOF
-  $SUDO systemctl restart realm || $SUDO systemctl start realm || true
-  echo -e "${SUCCESS_SYMBOL} Realm rule added successfully"
-}
-
-engine_realm_list() {
-  # 简单解析 endpoints（按脚本里展示格式）
-  if [ "$OUTPUT" = "json" ]; then
-    awk '/^\[\[endpoints\]\]/{f=1;next} f&&/^# Remark:/{r=substr($0,index($0,":")+2)} f&&/^listen/{l=$3;gsub(/\"/,"",l)} f&&/^remote/{m=$3;gsub(/\"/,"",m); printf "%s | %s -> %s\n", r,l,m; f=0}' "$REALM_CONFIG" 2>/dev/null | \
-    python3 -c 'import sys,json;print(json.dumps([{"engine":"realm","remark":(l.split("|")[0] if "|" in l else ""),"listen":(l.split("|")[1] if "|" in l else ""),"target":(l.split("|")[2] if "|" in l else "")} for l in sys.stdin if l.strip()], ensure_ascii=False))' 2>/dev/null || echo '[]'
-  else
-    echo "Remark | Listen -> Target"
-    awk '/^\[\[endpoints\]\]/{f=1;next} f&&/^# Remark:/{r=substr($0,index($0,":")+2)} f&&/^listen/{l=$3;gsub(/\"/,"",l)} f&&/^remote/{m=$3;gsub(/\"/,"",m); printf "%s | %s -> %s\n", r,l,m; f=0}' "$REALM_CONFIG" 2>/dev/null || true
-  fi
-}
-
-# realm 删除：基于 remark 或 name 模式（name=listen 或 remark）
-engine_realm_delete() {
-  local key="$1"
-  [ -z "$key" ] && { echo -e "${ERROR_SYMBOL} Please provide --name"; exit 2; }
-  [ -f "$REALM_CONFIG" ] || { echo -e "${ERROR_SYMBOL} 未找到 $REALM_CONFIG"; exit 1; }
-  local tmp_map=$(mktemp)
-  # 输出: start end remark listen
-  awk '
-    BEGIN{start=0; remark=""; listen=""}
-    /^\[\[endpoints\]\]/{
-      if (start>0) { printf "%d %d %s %s\n", start, NR-1, remark, listen }
-      start=NR; remark=""; listen=""; next
-    }
-    { if (start>0) {
-        if ($0 ~ /^# Remark:[ \t]*/) { r=$0; sub(/^# Remark:[ \t]*/, "", r); remark=r }
-        if ($0 ~ /^listen[ \t]*=/) { l=$0; match(l, /\"[^\"]+\"/); if (RSTART>0) listen=substr(l, RSTART+1, RLENGTH-2) }
-      }
-    }
-    END{ if (start>0) printf "%d %d %s %s\n", start, NR, remark, listen }
-  ' "$REALM_CONFIG" > "$tmp_map"
-  # 精确匹配 remark==key 或 listen==key 的块，按范围删除
-  local changed=0
-  while read -r s e r l; do
-    if [ "$r" = "$key" ] || [ "$l" = "$key" ]; then
-      $SUDO sed -i "${s},${e}d" "$REALM_CONFIG"
-      changed=1
-    fi
-  done < "$tmp_map"
-  rm -f "$tmp_map"
-  if [ "$changed" -eq 1 ]; then
-    $SUDO systemctl restart realm || true
-    echo -e "${SUCCESS_SYMBOL} realm deleted matching rules"
-  else
-    echo -e "${WARN_SYMBOL} No exact matching rule found"
-  fi
-}
-
-# nftables：仅提供简化添加（DNAT），list 由 nft 自身输出
-engine_nftables_add() {
-  local proto="$1" listen="$2" target="$3" name="$4"
-  # listen 仅提取外部端口
-  local port
-  port=$(echo "$listen" | awk -F: '{print $NF}')
-  local tgt_host=$(echo "$target" | sed -E 's/^\[?([^\]]+)\]?:(.+)$/\1/')
-  local tgt_port=$(echo "$target" | sed -E 's/^\[?([^\]]+)\]?:(.+)$/\2/')
-  local family="ip"; [[ "$tgt_host" == *":"* ]] && family="ip6"
-  local to_expr="$tgt_host:$tgt_port"; [ "$family" = "ip6" ] && to_expr="[$tgt_host]:$tgt_port"
-  # 确保 nat 表存在
-  nft list table $family nat >/dev/null 2>&1 || {
-    $SUDO nft add table $family nat
-    $SUDO nft add chain $family nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }'
-    $SUDO nft add chain $family nat postrouting '{ type nat hook postrouting priority srcnat; policy accept; }'
-    $SUDO nft add rule $family nat postrouting masquerade || true
-  }
-  if [ "$proto" = "tcp" ] || [ "$proto" = "both" ]; then
-    $SUDO nft add rule $family nat prerouting tcp dport $port dnat to $to_expr comment "${name:-fwrd}"
-  fi
-  if [ "$proto" = "udp" ] || [ "$proto" = "both" ]; then
-    $SUDO nft add rule $family nat prerouting udp dport $port dnat to $to_expr comment "${name:-fwrd}"
-  fi
-  echo -e "${SUCCESS_SYMBOL} nftables 添加 DNAT 成功"
-}
-
-engine_nftables_list() {
-  if [ "$OUTPUT" = "json" ]; then
-    echo '[]'
-  else
-    nft list table ip nat 2>/dev/null | cat
-    nft list table ip6 nat 2>/dev/null | cat
-  fi
-}
-
-# nftables delete: precisely delete prerouting rules by proto + dport, or delete by comment name
-engine_nftables_delete() {
-  local spec="$1"
-  [ -z "$spec" ] && { echo -e "${ERROR_SYMBOL} Please provide --name"; exit 2; }
-  if echo "$spec" | grep -Eq '^(tcp|udp):[0-9]+$'; then
-    local proto="${spec%%:*}"; local dport="${spec##*:}"
-    for fam in ip ip6; do
-      nft list ruleset -a 2>/dev/null | awk -v P="$proto" -v D="$dport" -v F="$fam" \
-        '$0 ~ "table "F" nat" {intab=1} intab && $0 ~ "prerouting" && $0 ~ P" dport "D {print}' | \
-        while read -r line; do
-          handle=$(echo "$line" | sed -n 's/.*handle \([0-9]\+\).*/\1/p')
-          [ -n "$handle" ] && $SUDO nft delete rule $fam nat prerouting handle "$handle" || true
-        done
-    done
-    echo -e "${SUCCESS_SYMBOL} nftables attempted to delete: $spec"
-  else
-    # Delete by comment name
-    local comment="$spec"
-    for fam in ip ip6; do
-      nft list ruleset -a 2>/dev/null | awk -v F="$fam" -v C="$comment" \
-        '$0 ~ "table "F" nat" {intab=1} intab && $0 ~ "prerouting" && $0 ~ "comment \""C"\"" {print}' | \
-        while read -r line; do
-          handle=$(echo "$line" | sed -n 's/.*handle \([0-9]\+\).*/\1/p')
-          [ -n "$handle" ] && $SUDO nft delete rule $fam nat prerouting handle "$handle" || true
-        done
-    done
-    echo -e "${SUCCESS_SYMBOL} nftables attempted to delete by comment: $comment"
-  fi
-}
-
-# Command dispatch
-ensure_dirs
-case "$CMD" in
-  menu|"")
-    # Interactive menu mode
-    SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
     
-    # Show system information function
-    show_system_info() {
-      echo -e "${BOLD}${BLUE}============================================================${PLAIN}"
-      echo -e "${BOLD}${GREEN}                Smart Forwarding Management (fwrd)                ${PLAIN}"
-      echo -e "${BOLD}${BLUE}============================================================${PLAIN}"
-      echo ""
-      
-      # Show current active forwarding rules count
-      local brook_count=0 gost_count=0 realm_count=0
-      [ -f "$BROOK_CONFIG_FILE" ] && brook_count=$(grep -v '^$' "$BROOK_CONFIG_FILE" 2>/dev/null | wc -l)
-      [ -f "$GOST_CONFIG_FILE" ] && gost_count=$(jq '.services | length' "$GOST_CONFIG_FILE" 2>/dev/null || echo 0)
-      [ -f "$REALM_CONFIG" ] && realm_count=$(grep -c '^\[\[endpoints\]\]' "$REALM_CONFIG" 2>/dev/null || echo 0)
-      
-      local total_rules=$((brook_count + gost_count + realm_count))
-      echo -e "${INFO_SYMBOL} ${BOLD}System Status:${PLAIN}"
-      echo -e "  * Total forwarding rules: ${YELLOW}$total_rules${PLAIN}"
-      echo -e "  * Brook: ${GREEN}$brook_count${PLAIN} | Gost: ${GREEN}$gost_count${PLAIN} | Realm: ${GREEN}$realm_count${PLAIN}"
-      
-      # Check service status
-      local gost_status="stopped" realm_status="stopped"
-      systemctl is-active gost >/dev/null 2>&1 && gost_status="running"
-      systemctl is-active realm >/dev/null 2>&1 && realm_status="running"
-      echo -e "  * Gost service: ${GREEN}$gost_status${PLAIN} | Realm service: ${GREEN}$realm_status${PLAIN}"
-      echo ""
-    }
+    systemctl daemon-reload
+    systemctl enable realm
+}
+
+# Unified add rule interface
+add_forward_rule() {
+    local listen_port="$1"
+    local target_ip="$2"
+    local target_port="$3"
+    local protocol="$4"
+    local tool="${5:-auto}"
+    local listen_ip="${6:-0.0.0.0}"
+    
+    if [[ "$tool" == "auto" ]]; then
+        tool=$(recommend_tool "$protocol" "normal")
+        log_info "Auto-selected tool: $tool"
+    fi
+    
+    if [[ "${TOOL_STATUS[$tool]}" != "installed" ]]; then
+        log_error "Tool $tool not installed"
+        return 1
+    fi
+    
+    local rule_id=$(date +%s)_$(shuf -i 1000-9999 -n 1)
+    
+    case "$tool" in
+        gost) add_rule_gost "$rule_id" "$listen_port" "$target_ip" "$target_port" "$protocol" "$listen_ip" ;;
+        nftables) add_rule_nftables "$rule_id" "$listen_port" "$target_ip" "$target_port" "$protocol" "$listen_ip" ;;
+        realm) add_rule_realm "$rule_id" "$listen_port" "$target_ip" "$target_port" "$protocol" "$listen_ip" ;;
+        *) log_error "Unsupported tool: $tool"; return 1 ;;
+    esac    
+    update_config_rule "$rule_id" "$listen_port" "$target_ip" "$target_port" "$protocol" "$tool" "$listen_ip"
+}
+
+# Update config file with rule
+update_config_rule() {
+    local rule_id="$1"
+    local listen_port="$2"
+    local target_ip="$3"
+    local target_port="$4"
+    local protocol="$5"
+    local tool="$6"
+    local listen_ip="$7"
+    
+    local temp_file=$(mktemp)
+    jq --arg id "$rule_id" \
+       --arg listen_port "$listen_port" \
+       --arg target_ip "$target_ip" \
+       --arg target_port "$target_port" \
+       --arg protocol "$protocol" \
+       --arg tool "$tool" \
+       --arg listen_ip "$listen_ip" \
+       --arg created "$(date -Iseconds)" \
+       '.rules += [{
+           id: $id,
+           listen_port: ($listen_port | tonumber),
+           target_ip: $target_ip,
+           target_port: ($target_port | tonumber),
+           protocol: $protocol,
+           tool: $tool,
+           listen_ip: $listen_ip,
+           created: $created,
+           enabled: true
+       }]' "$CONFIG_FILE" > "$temp_file" && mv "$temp_file" "$CONFIG_FILE"
+}# List forward rules
+list_forward_rules() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        log_warn "No configuration found"
+        return 1
+    fi
+    
+    local rules_count=$(jq '.rules | length' "$CONFIG_FILE")
+    if [[ "$rules_count" -eq 0 ]]; then
+        log_warn "No rules found"
+        return 0
+    fi
+    
+    echo
+    printf "${COLORS[BOLD]}%-3s %-8s %-15s %-5s %-15s %-5s %-8s %-8s %-10s${COLORS[NC]}\n" \
+           "#" "TOOL" "LISTEN_IP" "PORT" "TARGET_IP" "PORT" "PROTOCOL" "STATUS" "CREATED"
+    echo "────────────────────────────────────────────────────────────────────────────────"
+    
+    local index=0
+    while read -r rule; do
+        ((index++))
+        local id=$(echo "$rule" | jq -r '.id')
+        local tool=$(echo "$rule" | jq -r '.tool')
+        local listen_ip=$(echo "$rule" | jq -r '.listen_ip')
+        local listen_port=$(echo "$rule" | jq -r '.listen_port')
+        local target_ip=$(echo "$rule" | jq -r '.target_ip')
+        local target_port=$(echo "$rule" | jq -r '.target_port')
+        local protocol=$(echo "$rule" | jq -r '.protocol')
+        local created=$(echo "$rule" | jq -r '.created' | cut -d'T' -f1)
+        
+        # Check service status
+        local status="unknown"
+        case "$tool" in
+            gost|realm)
+                if systemctl is-active --quiet "$tool"; then
+                    status="${COLORS[GREEN]}running${COLORS[NC]}"
+                else
+                    status="${COLORS[RED]}stopped${COLORS[NC]}"
+                fi
+                ;;
+            nftables)                if nft list ruleset | grep -q "fwrd-${id}"; then
+                    status="${COLORS[GREEN]}active${COLORS[NC]}"
+                else
+                    status="${COLORS[RED]}inactive${COLORS[NC]}"
+                fi
+                ;;
+        esac
+        
+        printf "%-3s %-8s %-15s %-5s %-15s %-5s %-8s %-16s %-10s\n" \
+               "$index" "$tool" "$listen_ip" "$listen_port" "$target_ip" "$target_port" \
+               "$protocol" "$status" "$created"
+    done < <(jq -c '.rules[]' "$CONFIG_FILE")
+    
+    echo
+    log_info "Total: $rules_count rules"
+}
+
+# Delete forward rule
+delete_forward_rule() {
+    local rule_index="$1"
+    
+    if [[ ! "$rule_index" =~ ^[0-9]+$ ]]; then
+        log_error "Invalid rule number"
+        return 1
+    fi
+    
+    local rules_count=$(jq '.rules | length' "$CONFIG_FILE")
+    if [[ "$rule_index" -lt 1 || "$rule_index" -gt "$rules_count" ]]; then
+        log_error "Rule number out of range (1-$rules_count)"
+        return 1
+    fi
+    
+    local rule=$(jq ".rules[$((rule_index-1))]" "$CONFIG_FILE")
+    local id=$(echo "$rule" | jq -r '.id')
+    local tool=$(echo "$rule" | jq -r '.tool')    local listen_port=$(echo "$rule" | jq -r '.listen_port')
+    local target_ip=$(echo "$rule" | jq -r '.target_ip')
+    local target_port=$(echo "$rule" | jq -r '.target_port')
+    local protocol=$(echo "$rule" | jq -r '.protocol')
+    
+    log_info "Deleting: $tool $listen_port -> $target_ip:$target_port ($protocol)"
+    
+    case "$tool" in
+        gost)
+            local config_file="/etc/gost/config.json"
+            if [[ -f "$config_file" ]]; then
+                jq --arg name "fwrd-${id}" \
+                   '.services = [.services[] | select(.name != $name and .name != ($name + "-tcp") and .name != ($name + "-udp"))]' \
+                   "$config_file" > "${config_file}.tmp" && mv "${config_file}.tmp" "$config_file"
+                systemctl restart gost 2>/dev/null || true
+            fi
+            ;;
+        nftables)
+            nft list ruleset -a | grep "fwrd-${id}" | while read line; do
+                local handle=$(echo "$line" | grep -o 'handle [0-9]*' | awk '{print $2}')
+                if [[ -n "$handle" ]]; then
+                    nft delete rule ip nat prerouting handle "$handle" 2>/dev/null || true
+                fi
+            done
+            nft list ruleset > /etc/nftables.conf
+            sed -i '1i#!/usr/sbin/nft -f' /etc/nftables.conf
+            sed -i "/^${id}|/d" "$CONFIG_DIR/nftables_rules.txt" 2>/dev/null || true
+            ;;
+        realm)
+            local config_file="/root/.realm/config.toml"
+            if [[ -f "$config_file" ]]; then
+                sed -i "/# Remark: Forward Rule ${id}/,/^$/d" "$config_file"
+                systemctl restart realm 2>/dev/null || true
+            fi
+            ;;
+    esac    
+    # Remove from config
+    local temp_file=$(mktemp)
+    jq "del(.rules[$((rule_index-1))])" "$CONFIG_FILE" > "$temp_file" && mv "$temp_file" "$CONFIG_FILE"
+    
+    log_success "Rule deleted"
+}
+
+# Modify forward rule
+modify_forward_rule() {
+    local rule_index="$1"
+    
+    if [[ ! "$rule_index" =~ ^[0-9]+$ ]]; then
+        log_error "Invalid rule number"
+        return 1
+    fi
+    
+    local rules_count=$(jq '.rules | length' "$CONFIG_FILE")
+    if [[ "$rule_index" -lt 1 || "$rule_index" -gt "$rules_count" ]]; then
+        log_error "Rule number out of range (1-$rules_count)"
+        return 1
+    fi
+    
+    local rule=$(jq ".rules[$((rule_index-1))]" "$CONFIG_FILE")
+    local old_listen_port=$(echo "$rule" | jq -r '.listen_port')
+    local old_target_ip=$(echo "$rule" | jq -r '.target_ip')
+    local old_target_port=$(echo "$rule" | jq -r '.target_port')
+    local old_protocol=$(echo "$rule" | jq -r '.protocol')
+    
+    echo "Current rule:"
+    echo "  Listen port: $old_listen_port"
+    echo "  Target: $old_target_ip:$old_target_port"
+    echo "  Protocol: $old_protocol"
+    echo
+    
+    # Get new values
+    echo "Enter new values (press Enter to keep current):"    local new_listen_port=$(get_valid_port "Listen port" "$old_listen_port")
+    local new_target_ip=$(get_valid_ip "Target IP" "$old_target_ip")
+    local new_target_port=$(get_valid_port "Target port" "$old_target_port")
+    
+    echo "Protocol options:"
+    echo "  1) TCP"
+    echo "  2) UDP"
+    echo "  3) TCP + UDP"
+    local current_proto_num
+    case "$old_protocol" in
+        tcp) current_proto_num=1 ;;
+        udp) current_proto_num=2 ;;
+        both) current_proto_num=3 ;;
+    esac
+    
+    read -p "Select protocol [$current_proto_num]: " proto_choice
+    proto_choice=${proto_choice:-$current_proto_num}
+    
+    local new_protocol
+    case "$proto_choice" in
+        1) new_protocol="tcp" ;;
+        2) new_protocol="udp" ;;
+        3) new_protocol="both" ;;
+        *) new_protocol="$old_protocol" ;;
+    esac
+    
+    # Check if anything changed
+    if [[ "$new_listen_port" == "$old_listen_port" && \
+          "$new_target_ip" == "$old_target_ip" && \
+          "$new_target_port" == "$old_target_port" && \
+          "$new_protocol" == "$old_protocol" ]]; then
+        log_info "No changes made"
+        return 0
+    fi    
+    echo
+    echo "Changes:"
+    echo "  Listen port: $old_listen_port -> $new_listen_port"
+    echo "  Target: $old_target_ip:$old_target_port -> $new_target_ip:$new_target_port"
+    echo "  Protocol: $old_protocol -> $new_protocol"
+    
+    read -p "Apply changes? [y/N]: " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { log_info "Cancelled"; return 0; }
+    
+    # Delete old rule and add new one
+    delete_forward_rule "$rule_index"
+    add_forward_rule "$new_listen_port" "$new_target_ip" "$new_target_port" "$new_protocol"
+    
+    log_success "Rule modified"
+}
+
+# System status
+show_system_status() {
+    log_info "System Status"
+    echo
+    
+    # IP forwarding
+    local ip_forward=$(sysctl -n net.ipv4.ip_forward)
+    echo "IP Forwarding: $([[ "$ip_forward" == "1" ]] && echo -e "${COLORS[GREEN]}enabled${COLORS[NC]}" || echo -e "${COLORS[RED]}disabled${COLORS[NC]}")"
+    
+    echo
+    echo "Tool Status:"
+    printf "%-12s %-12s %-15s %-12s\n" "TOOL" "INSTALLED" "VERSION" "SERVICE"
+    echo "───────────────────────────────────────────────────────"    
+    for tool in "${!FORWARD_TOOLS[@]}"; do
+        local install_status="${TOOL_STATUS[$tool]}"
+        local version="${TOOL_VERSION[$tool]:-unknown}"
+        local service_status="${TOOL_SERVICE_STATUS[$tool]:-disabled}"
+        
+        case "$install_status" in
+            installed) install_status="${COLORS[GREEN]}yes${COLORS[NC]}" ;;
+            *) install_status="${COLORS[RED]}no${COLORS[NC]}" ;;
+        esac
+        
+        case "$service_status" in
+            active) service_status="${COLORS[GREEN]}running${COLORS[NC]}" ;;
+            inactive) service_status="${COLORS[YELLOW]}stopped${COLORS[NC]}" ;;
+            *) service_status="${COLORS[RED]}disabled${COLORS[NC]}" ;;
+        esac
+        
+        printf "%-20s %-20s %-15s %-20s\n" "$tool" "$install_status" "${version:0:12}" "$service_status"
+    done
+    
+    echo
+    local rules_count=$(jq '.rules | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
+    echo "Active rules: $rules_count"
+    local connections=$(netstat -ant | grep ESTABLISHED | wc -l)
+    echo "Active connections: $connections"
+}
+
+# Find available port
+find_available_port() {
+    local start_port=${1:-10000}
+    local end_port=${2:-65000}
+    
+    for ((i=0; i<100; i++)); do
+        local port=$((RANDOM % (end_port - start_port) + start_port))
+        if ! lsof -i :"$port" >/dev/null 2>&1; then
+            echo "$port"
+            return 0
+        fi
+    done
+    
+    log_error "No available port found"
+    return 1
+}# ==================== Interactive Menus ====================
+
+show_main_menu() {
+    clear
+    echo -e "${COLORS[BOLD]}${COLORS[BLUE]}======================================${COLORS[NC]}"
+    echo -e "${COLORS[BOLD]}${COLORS[BLUE]}    Forward Manager v${VERSION}${COLORS[NC]}"
+    echo -e "${COLORS[BOLD]}${COLORS[BLUE]}======================================${COLORS[NC]}"
+    echo
+    echo "Tools:"
+    echo "  1. Install tools"
+    echo "  2. System status"
+    echo
+    echo "Rules:"
+    echo "  3. Add rule"
+    echo "  4. List rules"
+    echo "  5. Modify rule"
+    echo "  6. Delete rule"
+    echo
+    echo "System:"
+    echo "  7. Service control"
+    echo "  8. Performance test"
+    echo
+    echo "  0. Exit"
+    echo
+}
+
+show_install_menu() {
+    clear
+    echo -e "${COLORS[BOLD]}Tool Installation${COLORS[NC]}"
+    echo
+    
+    local index=1
+    for tool in "${!FORWARD_TOOLS[@]}"; do
+        local status="${TOOL_STATUS[$tool]}"
+        local status_color
+        case "$status" in
+            installed) status_color="${COLORS[GREEN]}installed${COLORS[NC]}" ;;
+            *) status_color="${COLORS[RED]}not installed${COLORS[NC]}" ;;
+        esac
+        echo "  $index. $tool - ${FORWARD_TOOLS[$tool]} ($status_color)"
+        ((index++))
+    done
+    
+    echo
+    echo "  0. Back"
+    echo
+}# Interactive add rule
+interactive_add_rule() {
+    clear
+    echo -e "${COLORS[BOLD]}Add Forward Rule${COLORS[NC]}"
+    echo
+    
+    # Progressive input
+    local listen_port
+    read -p "Listen port (leave empty for auto): " listen_port
+    if [[ -z "$listen_port" ]]; then
+        listen_port=$(find_available_port)
+        echo "Auto-selected port: $listen_port"
+    else
+        listen_port=$(get_valid_port "Listen port" "$listen_port")
+    fi
+    
+    local target_ip=$(get_valid_ip "Target IP")
+    local target_port=$(get_valid_port "Target port")
+    local protocol=$(get_protocol)
+    
+    echo "Tool selection:"
+    echo "  1. Auto-select (recommended)"
+    local index=2
+    for tool in "${!FORWARD_TOOLS[@]}"; do
+        if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
+            echo "  $index. $tool"
+            ((index++))
+        fi
+    done
+    
+    read -p "Select tool [1]: " tool_choice
+    tool_choice=${tool_choice:-1}
+    
+    local tool="auto"
+    if [[ "$tool_choice" != "1" ]]; then
+        local tools_array=()
+        for t in "${!FORWARD_TOOLS[@]}"; do
+            [[ "${TOOL_STATUS[$t]}" == "installed" ]] && tools_array+=("$t")
+        done
+        if [[ "${#tools_array[@]}" -ge $((tool_choice-1)) ]]; then
+            tool="${tools_array[$((tool_choice-2))]}"
+        fi
+    fi    
+    local listen_ip="0.0.0.0"
+    read -p "Listen IP [0.0.0.0]: " input_listen_ip
+    [[ -n "$input_listen_ip" ]] && listen_ip=$(get_valid_ip "Listen IP" "$input_listen_ip")
+    
+    echo
+    echo -e "${COLORS[YELLOW]}Rule Summary:${COLORS[NC]}"
+    echo "  Listen: $listen_ip:$listen_port"
+    echo "  Target: $target_ip:$target_port"
+    echo "  Protocol: $protocol"
+    echo "  Tool: $tool"
+    echo
+    
+    read -p "Create rule? [Y/n]: " confirm
+    confirm=${confirm:-Y}
+    
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        if add_forward_rule "$listen_port" "$target_ip" "$target_port" "$protocol" "$tool" "$listen_ip"; then
+            log_success "Rule created successfully!"
+            echo "Access: $listen_ip:$listen_port -> $target_ip:$target_port"
+        else
+            log_error "Failed to create rule"
+        fi
+    else
+        log_info "Cancelled"
+    fi
+    
+    echo
+    read -p "Press Enter to continue..."
+}
+
+# Service control
+service_control_menu() {
+    while true; do
+        clear
+        echo -e "${COLORS[BOLD]}Service Control${COLORS[NC]}"
+        echo
+        
+        echo "Services:"
+        for tool in "${!FORWARD_TOOLS[@]}"; do            if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
+                local status="${TOOL_SERVICE_STATUS[$tool]}"
+                local status_color
+                case "$status" in
+                    active) status_color="${COLORS[GREEN]}running${COLORS[NC]}" ;;
+                    inactive) status_color="${COLORS[YELLOW]}stopped${COLORS[NC]}" ;;
+                    *) status_color="${COLORS[RED]}disabled${COLORS[NC]}" ;;
+                esac
+                echo "  $tool: $status_color"
+            fi
+        done
+        
+        echo
+        echo "Actions:"
+        echo "  1. Start all"
+        echo "  2. Stop all" 
+        echo "  3. Restart all"
+        echo "  4. View logs"
+        echo "  5. Enable IP forwarding"
+        echo "  0. Back"
+        echo
+        
+        read -p "Select: " choice
+        case "$choice" in
+            1)
+                log_info "Starting services..."
+                for tool in "${!FORWARD_TOOLS[@]}"; do
+                    if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
+                        systemctl start "$tool" 2>/dev/null && log_success "$tool started" || log_warn "$tool start failed"
+                    fi
+                done
+                ;;
+            2)
+                log_info "Stopping services..."
+                for tool in "${!FORWARD_TOOLS[@]}"; do
+                    systemctl stop "$tool" 2>/dev/null && log_success "$tool stopped" || log_warn "$tool stop failed"
+                done
+                ;;
+            3)
+                log_info "Restarting services..."                for tool in "${!FORWARD_TOOLS[@]}"; do
+                    if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
+                        systemctl restart "$tool" 2>/dev/null && log_success "$tool restarted" || log_warn "$tool restart failed"
+                    fi
+                done
+                ;;
+            4)
+                echo "Service logs:"
+                for tool in "${!FORWARD_TOOLS[@]}"; do
+                    if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
+                        echo "=== $tool ==="
+                        journalctl -u "$tool" --no-pager -n 5 2>/dev/null || echo "No logs"
+                    fi
+                done
+                ;;
+            5)
+                sysctl -w net.ipv4.ip_forward=1
+                echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf 2>/dev/null || true
+                log_success "IP forwarding enabled"
+                ;;
+            0) return ;;
+            *) log_error "Invalid choice" ;;
+        esac
+        
+        [[ "$choice" != "0" ]] && { echo; read -p "Press Enter to continue..."; }
+    done
+}
+
+# Performance test
+performance_test() {
+    local target_ip
+    local target_port
+    local duration
+    
+    target_ip=$(get_valid_ip "Test target IP")
+    target_port=$(get_valid_port "Test target port")
+    read -p "Test duration (seconds) [10]: " duration
+    duration=${duration:-10}    
+    log_info "Testing $target_ip:$target_port for ${duration}s..."
+    
+    local start_time=$(date +%s)
+    local success_count=0
+    local total_count=0
+    
+    while [[ $(($(date +%s) - start_time)) -lt $duration ]]; do
+        ((total_count++))
+        if timeout 1 bash -c "echo >/dev/tcp/$target_ip/$target_port" 2>/dev/null; then
+            ((success_count++))
+        fi
+        sleep 0.1
+    done
+    
+    local success_rate=$((success_count * 100 / total_count))
+    
+    echo "Results:"
+    echo "  Total attempts: $total_count"
+    echo "  Successful: $success_count"
+    echo "  Success rate: ${success_rate}%"
+    
+    if [[ $success_rate -ge 90 ]]; then
+        log_success "Excellent performance"
+    elif [[ $success_rate -ge 70 ]]; then
+        log_warn "Moderate performance"
+    else
+        log_error "Poor performance"
+    fi
+}
+
+# Main loop
+main() {
+    check_system
+    setup_config
+    detect_tools
     
     while true; do
-      clear
-      show_system_info
-      
-      echo -e "${BOLD}${YELLOW}QUICK SCENARIOS${PLAIN}"
-      echo -e "  ${GREEN}1.${PLAIN} Web Forwarding (HTTP/HTTPS)"
-      echo -e "  ${GREEN}2.${PLAIN} DNS Forwarding (port 53)"
-      echo -e "  ${GREEN}3.${PLAIN} Remote Access (SSH/RDP/VNC)"
-      echo ""
-      
-      echo -e "${BOLD}${YELLOW}GENERAL MANAGEMENT${PLAIN}"
-      echo -e "  ${GREEN}4.${PLAIN} Quick Add Rule"
-      echo -e "  ${GREEN}5.${PLAIN} Advanced Add (port range/split UDP)"
-      echo -e "  ${GREEN}6.${PLAIN} List Forwarding Rules"
-      echo -e "  ${GREEN}7.${PLAIN} Delete Forwarding Rule"
-      echo ""
-      
-      echo -e "${BOLD}${YELLOW}SYSTEM MANAGEMENT${PLAIN}"
-      echo -e "  ${GREEN}8.${PLAIN} Restart Service"
-      echo -e "  ${GREEN}9.${PLAIN} View Status"
-      echo -e "  ${GREEN}10.${PLAIN} View Logs"
-      echo ""
-      
-      echo -e "${BOLD}${RED}0.${PLAIN} Exit"
-      echo ""
-      echo -e "${BOLD}${BLUE}============================================================${PLAIN}"
-      read -rp "$(echo -e "${BOLD}${GREEN}Please select operation [0-10]:${PLAIN} ")" msel
-      case "$msel" in
-        1)
-          menu_quick_web
-          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
-        2)
-          menu_quick_dns
-          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
-        3)
-          menu_quick_remote
-          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
-        4)
-          quick_add
-          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
-        5)
-          echo -e "${BOLD}${BLUE}Advanced Add Forwarding Rule${PLAIN}"
-          echo -e "${YELLOW}Select forwarding engine:${PLAIN}"
-          echo -e "  1) brook   (stable & efficient)  2) gost    (feature-rich)"
-          echo -e "  3) realm   (high-perf Rust)      4) nftables (kernel-level)"
-          read -rp "Select [1-4]: " engine_choice
-          case "${engine_choice:-2}" in
-            1) ENGINE="brook" ;;
-            2) ENGINE="gost" ;;
-            3) ENGINE="realm" ;;
-            4) ENGINE="nftables" ;;
-            *) echo -e "${ERROR_SYMBOL} Invalid selection, using default gost"; ENGINE="gost" ;;
-          esac
-          [ -n "$ENGINE" ] && ensure_engine_ready "$ENGINE"
-          
-          echo -e "${YELLOW}Select protocol:${PLAIN}"
-          echo -e "  1) tcp (default)  2) udp  3) both (tcp+udp)"
-          read -rp "Select [1-3]: " proto_choice
-          case "${proto_choice:-1}" in
-            1) PROTO="tcp" ;;
-            2) PROTO="udp" ;;
-            3) PROTO="both" ;;
-            *) PROTO="tcp" ;;
-          esac
-          
-          read -rp "$(echo -e "${YELLOW}Listen address${PLAIN} (e.g. :8080 or 0.0.0.0:8080): ")" LISTEN
-          [ -z "$LISTEN" ] && { echo -e "${ERROR_SYMBOL} Listen address cannot be empty"; read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"; continue; }
-          if ! validate_listen_addr "$LISTEN"; then
-            echo -e "${ERROR_SYMBOL} Invalid listen address format, please use format: :port or IP:port"
-            read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"
-            continue
-          fi
-          
-          read -rp "$(echo -e "${YELLOW}Target address${PLAIN} (e.g. 1.2.3.4:80 or example.com:443): ")" TARGET
-          [ -z "$TARGET" ] && { echo -e "${ERROR_SYMBOL} Target address cannot be empty"; read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"; continue; }
-          if ! validate_host_port "$TARGET"; then
-            echo -e "${ERROR_SYMBOL} Invalid target address format, please use format: host:port"
-            read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"
-            continue
-          fi
-          SPLIT_UDP="n"
-          if [ "$PROTO" = "both" ]; then
-            echo -e "${YELLOW}TCP+UDP mode options:${PLAIN}"
-            read -rp "Use different target address for UDP? [y/N]: " SPLIT_UDP
-            if [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
-              read -rp "$(echo -e "${YELLOW}UDP target address${PLAIN} (e.g. 1.2.3.4:53): ")" TARGET_UDP
-              if [ -z "$TARGET_UDP" ]; then
-                echo -e "${WARN_SYMBOL} UDP target address is empty, will use TCP target address"
-              elif ! validate_host_port "$TARGET_UDP"; then
-                echo -e "${ERROR_SYMBOL} Invalid UDP target address format, please use format: host:port"
-                read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"
-                continue
-              fi
-            fi
-          fi
-          
-          echo -e "${YELLOW}Advanced options:${PLAIN}"
-          read -rp "Use port range? [y/N]: " USE_RANGE
-          read -rp "$(echo -e "${YELLOW}Rule name${PLAIN} (optional): ")" NAME
-
-          if [[ "$USE_RANGE" =~ ^[Yy]$ ]]; then
-            echo -e "${BOLD}${BLUE}Port Range Configuration${PLAIN}"
-            read -rp "$(echo -e "${YELLOW}Local port range${PLAIN} (e.g. 8000-8003): ")" RANGE
-            [ -z "$RANGE" ] && { echo -e "${ERROR_SYMBOL} Port range cannot be empty"; read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"; continue; }
-            
-            echo -e "${YELLOW}Mapping type:${PLAIN}"
-            echo -e "  1) Many-to-one (all local ports -> single target port)"
-            echo -e "  2) One-to-one (local port range -> target port range)"
-            read -rp "Select [1-2]: " MAP_TYPE
-            MAP_TYPE=${MAP_TYPE:-1}
-
-            # 解析 listen 主机与端口
-            L_HOST="${LISTEN%:*}"; L_PORT_BASE="${LISTEN##*:}"
-            # 解析 target 主机与端口
-            T_HOST="${TARGET%:*}"; T_PORT="${TARGET##*:}"
-            # 如果 UDP 分离
-            if [ -n "${TARGET_UDP:-}" ]; then
-              TU_HOST="${TARGET_UDP%:*}"; TU_PORT="${TARGET_UDP##*:}"
-            fi
-
-            L_START="${RANGE%-*}"; L_END="${RANGE#*-}"
-            if ! [[ "$L_START" =~ ^[0-9]+$ && "$L_END" =~ ^[0-9]+$ && "$L_START" -le "$L_END" ]]; then
-              echo -e "${ERROR_SYMBOL} Invalid port range format, please use format: start_port-end_port (e.g. 8000-8003)"; read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"; continue
-            fi
-
-            if [ "$MAP_TYPE" = "2" ]; then
-              read -rp "$(echo -e "${YELLOW}Target start port${PLAIN} (for one-to-one mapping): ")" T_START
-              if ! [[ "$T_START" =~ ^[0-9]+$ ]]; then echo -e "${ERROR_SYMBOL} Invalid target start port format"; read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"; continue; fi
-            fi
-
-            # Show preview of rules to be created
-            echo -e "${BOLD}${BLUE}Rule Preview (port range: $L_START-$L_END)${PLAIN}"
-            rule_count=$((L_END - L_START + 1))
-            if [ "$PROTO" = "both" ] && [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
-              rule_count=$((rule_count * 2))  # TCP + UDP split
-            elif [ "$PROTO" = "both" ]; then
-              rule_count=$((rule_count * 2))  # TCP + UDP same target
-            fi
-            echo -e "${INFO_SYMBOL} Will create ${YELLOW}$rule_count${PLAIN} forwarding rules"
-            echo -e "${INFO_SYMBOL} Engine: ${GREEN}$ENGINE${PLAIN} | Protocol: ${GREEN}$PROTO${PLAIN}"
-            if [ "$MAP_TYPE" = "2" ]; then
-              echo -e "${INFO_SYMBOL} Mapping: ${YELLOW}one-to-one${PLAIN} (port $L_START -> ${T_START})"
-            else
-              echo -e "${INFO_SYMBOL} Mapping: ${YELLOW}many-to-one${PLAIN} (ports $L_START-$L_END -> ${T_PORT})"
-            fi
-            read -rp "$(echo -e "${BOLD}${GREEN}Confirm creation? [Y/n]:${PLAIN} ")" confirm
-            if [[ "$confirm" =~ ^[Nn]$ ]]; then
-              echo -e "${WARN_SYMBOL} Operation cancelled"
-              read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"
-              continue
-            fi
-
-            # Loop creation
-            echo -e "${INFO_SYMBOL} Starting rule creation..."
-            p=$L_START
-            while [ "$p" -le "$L_END" ]; do
-              # 构造 listen
-              if [ -z "$L_HOST" ] || [ "$L_HOST" = "$LISTEN" ]; then NEW_LISTEN=":$p"; else NEW_LISTEN="${L_HOST}:$p"; fi
-              # 构造 target
-              if [ "$MAP_TYPE" = "2" ]; then
-                CUR_T_PORT=$(( T_START + p - L_START ))
-              else
-                CUR_T_PORT="$T_PORT"
-              fi
-              NEW_TARGET="${T_HOST}:${CUR_T_PORT}"
-
-              # 处理 split UDP
-              if [ "$PROTO" = "both" ] && [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
-                # TCP
-                "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
-                # UDP
-                if [ -n "${TARGET_UDP:-}" ]; then
-                  if [ "$MAP_TYPE" = "2" ]; then
-                    CUR_U_PORT=$(( ${TU_PORT:-$CUR_T_PORT} + p - L_START ))
-                  else
-                    CUR_U_PORT="${TU_PORT:-$CUR_T_PORT}"
-                  fi
-                  NEW_UDP_TARGET="${TU_HOST:-$T_HOST}:${CUR_U_PORT}"
-                else
-                  NEW_UDP_TARGET="$NEW_TARGET"
-                fi
-                "$SCRIPT_PATH" add --engine "$ENGINE" --proto udp --listen "$NEW_LISTEN" --target "$NEW_UDP_TARGET" ${NAME:+--name "${NAME}-udp-$p"}
-              else
-                # 非分离：按选择的 proto 处理
-                if [ "$PROTO" = "both" ]; then
-                  "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-tcp-$p"}
-                  "$SCRIPT_PATH" add --engine "$ENGINE" --proto udp --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-udp-$p"}
-                else
-                  "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$NEW_LISTEN" --target "$NEW_TARGET" ${NAME:+--name "${NAME}-$p"}
-                fi
-              fi
-              p=$((p+1))
-            done
-            echo -e "${SUCCESS_SYMBOL} Port range rules creation completed!"
-          else
-            # Non-range: single rule
-            echo -e "${BOLD}${BLUE}Rule Preview${PLAIN}"
-            echo -e "${INFO_SYMBOL} Engine: ${GREEN}$ENGINE${PLAIN} | Protocol: ${GREEN}$PROTO${PLAIN}"
-            echo -e "${INFO_SYMBOL} Listen: ${YELLOW}$LISTEN${PLAIN} -> Target: ${YELLOW}$TARGET${PLAIN}"
-            if [ "$PROTO" = "both" ] && [[ "$SPLIT_UDP" =~ ^[Yy]$ ]] && [ -n "${TARGET_UDP:-}" ]; then
-              echo -e "${INFO_SYMBOL} UDP target: ${YELLOW}$TARGET_UDP${PLAIN} (split mode)"
-            fi
-            [ -n "$NAME" ] && echo -e "${INFO_SYMBOL} Rule name: ${GREEN}$NAME${PLAIN}"
-            
-            read -rp "$(echo -e "${BOLD}${GREEN}Confirm creation? [Y/n]:${PLAIN} ")" confirm
-            if [[ "$confirm" =~ ^[Nn]$ ]]; then
-              echo -e "${WARN_SYMBOL} Operation cancelled"
-              read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")"
-              continue
-            fi
-            
-            if [ "$PROTO" = "both" ] && [[ "$SPLIT_UDP" =~ ^[Yy]$ ]]; then
-              "$SCRIPT_PATH" add --engine "$ENGINE" --proto tcp --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "${NAME}-tcp"}
-              "$SCRIPT_PATH" add --engine "$ENGINE" --proto udp --listen "$LISTEN" --target "${TARGET_UDP:-$TARGET}" ${NAME:+--name "${NAME}-udp"}
-              echo -e "${SUCCESS_SYMBOL} TCP/UDP split rules creation completed!"
-            else
-              "$SCRIPT_PATH" add --engine "$ENGINE" --proto "$PROTO" --listen "$LISTEN" --target "$TARGET" ${NAME:+--name "$NAME"}
-              echo -e "${SUCCESS_SYMBOL} Forwarding rule creation completed!"
-            fi
-          fi
-          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
-        6)
-          echo -e "${BOLD}${BLUE}List Forwarding Rules${PLAIN}"
-          echo -e "${YELLOW}Select engine (press enter to show all):${PLAIN}"
-          echo -e "  1) brook  2) gost  3) realm  4) nftables  5) all"
-          read -rp "Select [1-5]: " engine_choice
-          case "${engine_choice:-5}" in
-            1) ENGINE="brook" ;;
-            2) ENGINE="gost" ;;
-            3) ENGINE="realm" ;;
-            4) ENGINE="nftables" ;;
-            5) ENGINE="" ;;
-          esac
-          if [ -n "$ENGINE" ]; then "$SCRIPT_PATH" list --engine "$ENGINE"; else "$SCRIPT_PATH" list; fi
-          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
-        7)
-          echo -e "${BOLD}${BLUE}Delete Forwarding Rule${PLAIN}"
-          echo -e "${YELLOW}Select engine:${PLAIN}"
-          echo -e "  1) brook  2) gost  3) realm  4) nftables"
-          read -rp "Select [1-4]: " engine_choice
-          case "${engine_choice:-1}" in
-            1) ENGINE="brook" ;;
-            2) ENGINE="gost" ;;
-            3) ENGINE="realm" ;;
-            4) ENGINE="nftables" ;;
-          esac
-          read -rp "Rule name or service name: " NAME
-          [ -n "$NAME" ] && "$SCRIPT_PATH" delete --engine "$ENGINE" --name "$NAME" || echo -e "${ERROR_SYMBOL} Rule name cannot be empty"
-          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
-        8)
-          echo -e "${BOLD}${BLUE}Restart Service${PLAIN}"
-          echo -e "${YELLOW}Select service to restart:${PLAIN}"
-          echo -e "  1) gost  2) realm"
-          read -rp "Select [1-2]: " service_choice
-          case "${service_choice:-1}" in
-            1) ENGINE="gost" ;;
-            2) ENGINE="realm" ;;
-          esac
-          "$SCRIPT_PATH" restart --engine "$ENGINE"
-          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
-        9)
-          echo -e "${BOLD}${BLUE}View Status${PLAIN}"
-          echo -e "${YELLOW}Select engine:${PLAIN}"
-          echo -e "  1) brook  2) gost  3) realm  4) nftables"
-          read -rp "Select [1-4]: " engine_choice
-          case "${engine_choice:-2}" in
-            1) ENGINE="brook" ;;
-            2) ENGINE="gost" ;;
-            3) ENGINE="realm" ;;
-            4) ENGINE="nftables" ;;
-          esac
-          "$SCRIPT_PATH" status --engine "$ENGINE"
-          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
-        10)
-          echo -e "${BOLD}${BLUE}View Logs${PLAIN}"
-          echo -e "${YELLOW}Select engine:${PLAIN}"
-          echo -e "  1) brook  2) gost  3) realm"
-          read -rp "Select [1-3]: " engine_choice
-          case "${engine_choice:-2}" in
-            1) ENGINE="brook" ;;
-            2) ENGINE="gost" ;;
-            3) ENGINE="realm" ;;
-          esac
-          "$SCRIPT_PATH" logs --engine "$ENGINE"
-          read -n1 -r -p "$(echo -e "${BOLD}${GREEN}Press any key to continue...${PLAIN} ")" ;;
-        0) echo -e "${SUCCESS_SYMBOL} Goodbye!"; exit 0 ;;
-        *) echo -e "${ERROR_SYMBOL} Invalid selection, please enter 0-10"; sleep 1 ;;
-      esac
+        show_main_menu
+        read -p "Select: " choice        
+        case "$choice" in
+            1) 
+                show_install_menu
+                read -p "Install tool: " install_choice
+                case "$install_choice" in
+                    1) [[ "${TOOL_STATUS[gost]}" == "installed" ]] && log_info "GOST already installed" || install_gost ;;
+                    2) [[ "${TOOL_STATUS[nftables]}" == "installed" ]] && log_info "NFTables already installed" || install_nftables ;;
+                    3) [[ "${TOOL_STATUS[realm]}" == "installed" ]] && log_info "Realm already installed" || install_realm ;;
+                    0) continue ;;
+                    *) log_error "Invalid choice" ;;
+                esac
+                detect_tools
+                ;;
+            2) show_system_status ;;
+            3) interactive_add_rule ;;
+            4) list_forward_rules ;;
+            5)
+                list_forward_rules
+                echo
+                read -p "Rule number to modify: " rule_num
+                [[ "$rule_num" =~ ^[0-9]+$ ]] && modify_forward_rule "$rule_num" || log_error "Invalid input"
+                ;;
+            6)
+                list_forward_rules
+                echo
+                read -p "Rule number to delete: " rule_num
+                [[ "$rule_num" =~ ^[0-9]+$ ]] && delete_forward_rule "$rule_num" || log_error "Invalid input"
+                ;;
+            7) service_control_menu ;;
+            8) performance_test ;;
+            0) 
+                log_info "Goodbye!"
+                exit 0
+                ;;
+            *) log_error "Invalid choice" ;;
+        esac        
+        [[ "$choice" != "0" ]] && { echo; read -p "Press Enter to continue..."; }
     done
-    ;;
-  add)
-    [ -n "$ENGINE" ] && ensure_engine_ready "$ENGINE" || true
-    [ -z "$ENGINE" ] && { echo -e "${ERROR_SYMBOL} --engine required"; usage; exit 2; }
-    [ -z "$PROTO" ] && { echo -e "${ERROR_SYMBOL} --proto required"; usage; exit 2; }
-    [ -z "$LISTEN" ] && { echo -e "${ERROR_SYMBOL} --listen required"; usage; exit 2; }
-    [ -z "$TARGET" ] && { echo -e "${ERROR_SYMBOL} --target required"; usage; exit 2; }
+}
 
-    # 非交互自动扩展：--range 与 --target-udp
-    if [ -n "${RANGE}" ]; then
-      L_HOST="${LISTEN%:*}"; L_PORT_BASE="${LISTEN##*:}"
-      T_HOST="${TARGET%:*}"; T_PORT="${TARGET##*:}"
-      # 目标端口是否提供范围
-      if [[ "$T_PORT" =~ ^[0-9]+-[0-9]+$ ]]; then
-        T_START="${T_PORT%-*}"
-        MAP_TYPE=2
-      else
-        MAP_TYPE=1
-      fi
-      if [ -n "${TARGET_UDP:-}" ]; then
-        TU_HOST="${TARGET_UDP%:*}"; TU_PORT="${TARGET_UDP##*:}"
-        if [[ "$TU_PORT" =~ ^[0-9]+-[0-9]+$ ]]; then
-          TU_START="${TU_PORT%-*}"
-        fi
-      fi
-      L_START="${RANGE%-*}"; L_END="${RANGE#*-}"
-      if ! [[ "$L_START" =~ ^[0-9]+$ && "$L_END" =~ ^[0-9]+$ && "$L_START" -le "$L_END" ]]; then
-        echo -e "${ERROR_SYMBOL} Invalid port range"; exit 2
-      fi
-      p=$L_START
-      while [ "$p" -le "$L_END" ]; do
-        if [ -z "$L_HOST" ] || [ "$L_HOST" = "$LISTEN" ]; then NEW_LISTEN=":$p"; else NEW_LISTEN="${L_HOST}:$p"; fi
-        if [ "$MAP_TYPE" = "2" ]; then CUR_T_PORT=$(( T_START + p - L_START )); else CUR_T_PORT="$T_PORT"; fi
-        NEW_TARGET="${T_HOST}:${CUR_T_PORT}"
-
-        if [ "$PROTO" = "both" ] && [ -n "${TARGET_UDP:-}" ]; then
-          # TCP
-          case "$ENGINE" in
-            brook) engine_brook_add tcp "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-tcp-$p"} ;;
-            gost) engine_gost_add tcp "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-tcp-$p"} ;;
-            realm) engine_realm_add tcp "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-tcp-$p"} ;;
-            nftables) engine_nftables_add tcp "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-tcp-$p"} ;;
-          esac
-          # UDP
-          if [ -n "${TU_HOST:-}" ]; then
-            if [ -n "${TU_START:-}" ]; then CUR_U_PORT=$(( TU_START + p - L_START )); else CUR_U_PORT=$CUR_T_PORT; fi
-            NEW_UDP_TARGET="${TU_HOST}:${CUR_U_PORT}"
-          else
-            NEW_UDP_TARGET="$NEW_TARGET"
-          fi
-          case "$ENGINE" in
-            brook) engine_brook_add udp "$NEW_LISTEN" "$NEW_UDP_TARGET" ${NAME:+"${NAME}-udp-$p"} ;;
-            gost) engine_gost_add udp "$NEW_LISTEN" "$NEW_UDP_TARGET" ${NAME:+"${NAME}-udp-$p"} ;;
-            realm) engine_realm_add udp "$NEW_LISTEN" "$NEW_UDP_TARGET" ${NAME:+"${NAME}-udp-$p"} ;;
-            nftables) engine_nftables_add udp "$NEW_LISTEN" "$NEW_UDP_TARGET" ${NAME:+"${NAME}-udp-$p"} ;;
-          esac
-        else
-          # 非分离：按协议处理
-          if [ "$PROTO" = "both" ]; then
-            case "$ENGINE" in
-              brook) engine_brook_add tcp "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-tcp-$p"} ; engine_brook_add udp "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-udp-$p"} ;;
-              gost) engine_gost_add tcp "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-tcp-$p"} ; engine_gost_add udp "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-udp-$p"} ;;
-              realm) engine_realm_add tcp "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-tcp-$p"} ; engine_realm_add udp "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-udp-$p"} ;;
-              nftables) engine_nftables_add tcp "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-tcp-$p"} ; engine_nftables_add udp "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-udp-$p"} ;;
-            esac
-          else
-            case "$ENGINE" in
-              brook) engine_brook_add "$PROTO" "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-$p"} ;;
-              gost) engine_gost_add "$PROTO" "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-$p"} ;;
-              realm) engine_realm_add "$PROTO" "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-$p"} ;;
-              nftables) engine_nftables_add "$PROTO" "$NEW_LISTEN" "$NEW_TARGET" ${NAME:+"${NAME}-$p"} ;;
-            esac
-          fi
-        fi
-        p=$((p+1))
-      done
-    else
-      # 单条：若 both 且提供 --target-udp，则拆分为两条
-      if [ "$PROTO" = "both" ] && [ -n "${TARGET_UDP:-}" ]; then
-        case "$ENGINE" in
-          brook) engine_brook_add tcp "$LISTEN" "$TARGET" ${NAME:+"${NAME}-tcp"} ; engine_brook_add udp "$LISTEN" "$TARGET_UDP" ${NAME:+"${NAME}-udp"} ;;
-          gost) engine_gost_add tcp "$LISTEN" "$TARGET" ${NAME:+"${NAME}-tcp"} ; engine_gost_add udp "$LISTEN" "$TARGET_UDP" ${NAME:+"${NAME}-udp"} ;;
-          realm) engine_realm_add tcp "$LISTEN" "$TARGET" ${NAME:+"${NAME}-tcp"} ; engine_realm_add udp "$LISTEN" "$TARGET_UDP" ${NAME:+"${NAME}-udp"} ;;
-          nftables) engine_nftables_add tcp "$LISTEN" "$TARGET" ${NAME:+"${NAME}-tcp"} ; engine_nftables_add udp "$LISTEN" "$TARGET_UDP" ${NAME:+"${NAME}-udp"} ;;
-          *) echo -e "${ERROR_SYMBOL} Unsupported engine: $ENGINE"; exit 2 ;;
-        esac
-      else
-        case "$ENGINE" in
-          brook) engine_brook_add "$PROTO" "$LISTEN" "$TARGET" "$NAME" ;;
-          gost) engine_gost_add "$PROTO" "$LISTEN" "$TARGET" "$NAME" ;;
-          realm) engine_realm_add "$PROTO" "$LISTEN" "$TARGET" "$NAME" ;;
-          nftables) engine_nftables_add "$PROTO" "$LISTEN" "$TARGET" "$NAME" ;;
-          *) echo -e "${ERROR_SYMBOL} Unsupported engine: $ENGINE"; exit 2 ;;
-        esac
-      fi
-    fi
-    ;;
-  list)
-    case "$ENGINE" in
-      brook|"" ) engine_brook_list ;;
-    esac
-    case "$ENGINE" in
-      gost|"" ) engine_gost_list ;;
-    esac
-    case "$ENGINE" in
-      realm|"" ) engine_realm_list ;;
-    esac
-    case "$ENGINE" in
-      nftables|"" ) engine_nftables_list ;;
-    esac
-    ;;
-  delete)
-    [ -z "$ENGINE" ] && { echo -e "${ERROR_SYMBOL} --engine required"; exit 2; }
-    case "$ENGINE" in
-      brook) engine_brook_delete "$NAME" ;;
-      gost) engine_gost_delete "$NAME" ;;
-      realm) engine_realm_delete "$NAME" ;;
-      nftables) engine_nftables_delete "$NAME" ;;
-      *) echo -e "${ERROR_SYMBOL} Delete not supported for engine: $ENGINE"; exit 2 ;;
-    esac
-    ;;
-  restart)
-    case "$ENGINE" in
-      gost) $SUDO systemctl restart gost && echo -e "${SUCCESS_SYMBOL} Gost service restarted" ;;
-      realm) $SUDO systemctl restart realm && echo -e "${SUCCESS_SYMBOL} Realm service restarted" ;;
-      *) echo -e "${ERROR_SYMBOL} 不支持的引擎: $ENGINE"; exit 2 ;;
-    esac
-    ;;
-  status)
-    case "$ENGINE" in
-      gost) systemctl status gost --no-pager | cat ;;
-      realm) systemctl status realm --no-pager | cat ;;
-      brook) systemctl list-units | grep brook-forward | cat ;;
-      nftables) systemctl status nftables --no-pager | cat ;;
-      *) echo -e "${ERROR_SYMBOL} 不支持的引擎: $ENGINE"; exit 2 ;;
-    esac
-    ;;
-  logs)
-    case "$ENGINE" in
-      gost) journalctl -u gost -n 50 --no-pager | cat ;;
-      realm) journalctl -u realm -n 50 --no-pager | cat ;;
-      brook) journalctl -u "brook-forward*" -n 20 --no-pager | cat || true ;;
-      *) echo -e "${ERROR_SYMBOL} 不支持的引擎: $ENGINE"; exit 2 ;;
-    esac
-    ;;
-  * ) usage; exit 2 ;;
-esac
+# Script entry point
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
