@@ -628,28 +628,135 @@ list_all_rules() {
   fi
 }
 
-# 统一规则删除
+# 统一规则删除 - 直接选择编号删除
 delete_any_rule() {
-  list_all_rules
-  local total_rules
-  total_rules=$(count_total_rules)
-  if [ -z "$total_rules" ] || [ "$total_rules" -eq 0 ]; then 
+  # 构建规则列表
+  local rule_list=()
+  local rule_engines=()
+  local rule_names=()
+  local count=0
+  
+  printf "\n${BOLD}${BLUE}=== 删除转发规则 ===${PLAIN}\n"
+  printf "%-3s %-8s %-35s %-18s %-24s %-8s\n" "#" "引擎" "名称/备注" "监听地址" "目标地址" "协议"
+  printf "%s\n" "--------------------------------------------------------------------------------"
+  
+  # 收集 GOST 规则
+  if [ -f "$GOST_CONFIG_FILE" ]; then
+    while IFS="|" read -r name listen_addr target_addr proto; do
+      if [ -n "$name" ]; then
+        count=$((count + 1))
+        # 清理目标地址
+        target_addr=$(echo "$target_addr" | cut -d'⚠' -f1 | sed 's/[[:space:]]*$//')
+        printf "%-3s %-8s %-35s %-18s %-24s %-8s\n" "$count" "GOST" "$name" "$listen_addr" "$target_addr" "$proto"
+        rule_engines+=("gost")
+        rule_names+=("$name")
+      fi
+    done < <(jq -r '.services[] | select(.forwarder!=null) | [.name,.addr, (.forwarder.nodes[0].addr//""), (.handler.type//"")] | @tsv' "$GOST_CONFIG_FILE" 2>/dev/null | tr '\t' '|')
+  fi
+  
+  # 收集 Realm 规则
+  if [ -f "$REALM_CONFIG_FILE" ]; then
+    local realm_idx=0
+    local in_endpoint=0
+    local listen_val remote_val tcp_val udp_val remark_val
+    
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^\[\[endpoints\]\] ]]; then
+        if [ $in_endpoint -eq 1 ] && [ -n "$listen_val" ]; then
+          # 输出上一个端点
+          realm_idx=$((realm_idx + 1))
+          count=$((count + 1))
+          local proto_display="both"
+          if [ "$tcp_val" = "true" ] && [ "$udp_val" = "false" ]; then proto_display="tcp"; fi
+          if [ "$tcp_val" = "false" ] && [ "$udp_val" = "true" ]; then proto_display="udp"; fi
+          printf "%-3s %-8s %-35s %-18s %-24s %-8s\n" "$count" "Realm" "${remark_val:-规则-$realm_idx}" "$listen_val" "$remote_val" "$proto_display"
+          rule_engines+=("realm")
+          rule_names+=("$realm_idx")
+        fi
+        in_endpoint=1
+        listen_val=""; remote_val=""; tcp_val=""; udp_val=""; remark_val=""
+      elif [ $in_endpoint -eq 1 ]; then
+        if [[ "$line" =~ ^#.*Remark:.*(.*)$ ]]; then
+          remark_val=$(echo "$line" | sed 's/^#.*Remark: *//')
+        elif [[ "$line" =~ ^listen.*=.*\"(.*)\" ]]; then
+          listen_val=$(echo "$line" | sed 's/^listen.*= *"\([^"]*\)".*/\1/')
+        elif [[ "$line" =~ ^remote.*=.*\"(.*)\" ]]; then
+          remote_val=$(echo "$line" | sed 's/^remote.*= *"\([^"]*\)".*/\1/')
+        elif [[ "$line" =~ ^use_tcp.*=.*(.*)$ ]]; then
+          tcp_val=$(echo "$line" | sed 's/^use_tcp.*= *//' | tr -d ' ')
+        elif [[ "$line" =~ ^use_udp.*=.*(.*)$ ]]; then
+          udp_val=$(echo "$line" | sed 's/^use_udp.*= *//' | tr -d ' ')
+        fi
+      fi
+    done < "$REALM_CONFIG_FILE"
+    
+    # 处理最后一个端点
+    if [ $in_endpoint -eq 1 ] && [ -n "$listen_val" ]; then
+      realm_idx=$((realm_idx + 1))
+      count=$((count + 1))
+      local proto_display="both"
+      if [ "$tcp_val" = "true" ] && [ "$udp_val" = "false" ]; then proto_display="tcp"; fi
+      if [ "$tcp_val" = "false" ] && [ "$udp_val" = "true" ]; then proto_display="udp"; fi
+      printf "%-3s %-8s %-35s %-18s %-24s %-8s\n" "$count" "Realm" "${remark_val:-规则-$realm_idx}" "$listen_val" "$remote_val" "$proto_display"
+      rule_engines+=("realm")
+      rule_names+=("$realm_idx")
+    fi
+  fi
+  
+  if [ $count -eq 0 ]; then
     printf "${WARN_SYMBOL} 没有可删除的规则${PLAIN}\n"
     return
   fi
   
-  printf "\n${INFO_SYMBOL} 选择要删除的规则:\n"
-  printf "  ${YELLOW}g) 删除 GOST 规则${PLAIN}\n"
-  printf "  ${YELLOW}r) 删除 Realm 规则${PLAIN}\n"
-  printf "  0) 返回\n"
-  printf "选择: "; read -r engine_choice
+  printf "\n${INFO_SYMBOL} 共 ${BLUE}%d${PLAIN} 条规则\n" "$count"
+  printf "${YELLOW}请输入要删除的规则编号 (1-%d)，或输入 0 返回: ${PLAIN}" "$count"
+  read -r choice
   
-  case $engine_choice in
-    g|G) delete_gost_rule ;;
-    r|R) delete_realm_rule ;;
-    0) return ;;
-    *) printf "${WARN_SYMBOL} 无效选择${PLAIN}\n" ;;
-  esac
+  if [ "$choice" = "0" ]; then
+    printf "${INFO_SYMBOL} 已取消删除${PLAIN}\n"
+    return
+  fi
+  
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt $count ]; then
+    printf "${ERROR_SYMBOL} 无效选择${PLAIN}\n"
+    return
+  fi
+  
+  local selected_engine="${rule_engines[$((choice-1))]}"
+  local selected_name="${rule_names[$((choice-1))]}"
+  
+  printf "${WARN_SYMBOL} 确定要删除规则 #%d (%s) 吗? [y/N]: ${PLAIN}" "$choice" "$selected_engine"
+  read -r confirm
+  
+  if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    if [ "$selected_engine" = "gost" ]; then
+      # 删除 GOST 规则
+      local tmp=$(mktemp)
+      jq --arg n "$selected_name" '.services = [.services[] | select(.name!=$n)]' "$GOST_CONFIG_FILE" > "$tmp" || { rm -f "$tmp"; printf "${ERROR_SYMBOL} 删除失败${PLAIN}\n"; return; }
+      $SUDO mv "$tmp" "$GOST_CONFIG_FILE"
+      apply_gost_config
+      printf "${SUCCESS_SYMBOL} GOST 规则已删除${PLAIN}\n"
+    else
+      # 删除 Realm 规则 (按索引)
+      local starts
+      mapfile -t starts < <(nl -ba "$REALM_CONFIG_FILE" | grep "\[\[endpoints\]\]" | awk '{print $1}')
+      if [ "$selected_name" -le ${#starts[@]} ]; then
+        local s=${starts[$((selected_name-1))]}
+        local e
+        e=$(nl -ba "$REALM_CONFIG_FILE" | awk -v S=$s 'NR>S && /\[\[endpoints\]\]/{print $1; exit}')
+        if [ -z "$e" ]; then e=$(wc -l < "$REALM_CONFIG_FILE"); fi
+        $SUDO sed -i "${s},${e}d" "$REALM_CONFIG_FILE"
+        if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
+          $SUDO systemctl restart realm || true
+        fi
+        printf "${SUCCESS_SYMBOL} Realm 规则已删除${PLAIN}\n"
+      else
+        printf "${ERROR_SYMBOL} Realm 规则删除失败${PLAIN}\n"
+      fi
+    fi
+  else
+    printf "${INFO_SYMBOL} 已取消删除${PLAIN}\n"
+  fi
 }
 
 # 统计总规则数
@@ -694,12 +801,13 @@ add_new_rule() {
 engine_rule_menu() {
   while true; do
     printf "\n${BOLD}${BLUE}=== 规则管理 ===${PLAIN}\n"
-    printf "  ${GREEN}1) 新建规则${PLAIN}\n"
-    printf "  ${BLUE}2) 列出所有规则${PLAIN}\n"
-    printf "  ${YELLOW}3) 删除规则${PLAIN}\n"
-    printf "  ${BLUE}4) 列出 GOST 规则${PLAIN}\n"
-    printf "  ${BLUE}5) 列出 Realm 规则${PLAIN}\n"
-    printf "  0) 返回\n"
+    printf "  ${GREEN}1) 新建规则${PLAIN} (选择引擎)\n"
+    printf "  ${BLUE}2) 列出所有规则${PLAIN} (统一显示)\n"
+    printf "  ${YELLOW}3) 删除规则${PLAIN} (直接选择编号)\n"
+    printf "  ${BLUE}━━━━━━━━━━━━━━━━━━━━━━${PLAIN}\n"
+    printf "  ${BLUE}4) 列出 GOST 规则${PLAIN} (单独查看)\n"
+    printf "  ${BLUE}5) 列出 Realm 规则${PLAIN} (单独查看)\n"
+    printf "  0) 返回主菜单\n"
     printf "选择: "; read -r c
     case $c in
       1) add_new_rule; pause_any ;;
