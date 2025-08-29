@@ -226,7 +226,7 @@ check_service_health() {
   
   # 最近日志
   printf "\n${BLUE}最近日志 (5 条):${PLAIN}\n"
-  journalctl -u "$service_name" --no-pager -n 5 --output=short-precise 2>/dev/null || printf "${WARN_SYMBOL} 无法获取日志${PLAIN}\n"
+  journalctl -u "$service_name" --no-pager -n 5 --output=short-precise 2>/dev/null || printf "${WARN_SYMBOL} Unable to get logs${PLAIN}\n"
 }
 
 # 服务自愈功能
@@ -264,7 +264,7 @@ get_public_ip() {
   
   # 获取 IPv4 信息和 ASN
   if command -v curl &>/dev/null; then
-    printf "${INFO_SYMBOL} 获取 IPv4 信息...\r"
+    printf "${INFO_SYMBOL} Getting IPv4 info...\r"
     local ipv4_info
     ipv4_info=$(timeout 5 curl -4 -s --max-time 5 "https://ipapi.co/json" 2>/dev/null || true)
     
@@ -294,7 +294,7 @@ get_public_ip() {
   
   # 获取 IPv6 地址和 ASN
   if command -v curl &>/dev/null; then
-    printf "${INFO_SYMBOL} 获取 IPv6 信息...\r"
+    printf "${INFO_SYMBOL} Getting IPv6 info...\r"
     
     # 先获取 IPv6 地址
     for method in api6_ipify dig_cloudflare ipapi_co; do
@@ -318,9 +318,10 @@ get_public_ip() {
     
     # 如果获取到 IPv6，查询其 ASN 信息
     if [ -n "$ipv6" ] && [ "$ipv6" != "N/A" ]; then
-      printf "${INFO_SYMBOL} 获取 IPv6 ASN 信息...\r"
+      printf "${INFO_SYMBOL} Getting IPv6 ASN info...\r"
       local ipv6_info
-      ipv6_info=$(timeout 5 curl -6 -s --max-time 5 "https://ipapi.co/json" 2>/dev/null || true)
+      # 使用IPv6地址查询其地理和ASN信息
+      ipv6_info=$(timeout 5 curl -s --max-time 5 "https://ipapi.co/${ipv6}/json" 2>/dev/null || true)
       
       if [ -n "$ipv6_info" ] && echo "$ipv6_info" | grep -q '"ip"'; then
         if command -v jq &>/dev/null; then
@@ -605,7 +606,7 @@ install_realm() {
   
   # 验证版本号格式
   if [ -z "$ver" ] || ! [[ "$ver" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    printf "${WARN_SYMBOL} 无法获取有效版本号，使用默认版本${PLAIN}\n"
+    printf "${WARN_SYMBOL} Unable to get valid version, using default${PLAIN}\n"
     ver="v2.6.2"
   fi
   
@@ -1326,17 +1327,13 @@ show_environment_info() {
   
   # 获取公网IP信息 (后台运行，避免阻塞)
   if [ -z "${PUBLIC_IPV4:-}" ]; then
-    printf "${INFO_SYMBOL} 正在获取网络信息...\r"
+    printf "${INFO_SYMBOL} Getting network information...\r"
     get_public_ip
     printf "                                \r"  # 清除提示
   fi
   
-  printf "\n${BOLD}${BLUE}==== 环境信息 ====${PLAIN}\n"
-  printf "操作系统: %s\n" "$OS_TYPE"
-  printf "用户权限: %s\n" "$([ "$(id -u)" -eq 0 ] && echo "root" || echo "普通用户")"
-  
   # 显示网络信息 - 分别显示 IPv4 和 IPv6 的 ASN 信息
-  printf "\n${BOLD}网络信息:${PLAIN}\n"
+  printf "\n${BOLD}${BLUE}==== Network Information ====${PLAIN}\n"
   
   # IPv4 信息和 ASN
   if [ "${PUBLIC_IPV4:-N/A}" != "N/A" ]; then
@@ -1366,7 +1363,7 @@ show_environment_info() {
       printf "  ASN:  ${YELLOW}%s${PLAIN}\n" "$ipv4_asn_info"
     fi
   else
-    printf "  IPv4: ${YELLOW}获取中...${PLAIN}\n"
+    printf "  IPv4: ${YELLOW}Loading...${PLAIN}\n"
   fi
   
   # IPv6 信息和 ASN
