@@ -427,10 +427,51 @@ install_realm() {
   if [ -x "${REALM_DIR}/realm" ]; then printf "${SUCCESS_SYMBOL} 已检测到realm${PLAIN}\n"; return 0; fi
   printf "${INFO_SYMBOL} 安装realm...${PLAIN}\n"
   
+  # macOS 上也尝试安装，但使用不同的策略
   if [ "$OS_TYPE" = "macos" ]; then
-    printf "${WARN_SYMBOL} macOS 环境检测到，跳过 realm 安装${PLAIN}\n"
-    printf "${INFO_SYMBOL} 在 macOS 上请手动安装: brew install realm 或从 GitHub 下载${PLAIN}\n"
-    return 0
+    # 尝试使用 brew 安装
+    if command -v brew &>/dev/null; then
+      printf "${INFO_SYMBOL} 尝试使用 brew 安装 realm...${PLAIN}\n"
+      if brew install realm 2>/dev/null; then
+        printf "${SUCCESS_SYMBOL} realm 通过 brew 安装成功${PLAIN}\n"
+        return 0
+      else
+        printf "${WARN_SYMBOL} brew 安装失败，尝试手动下载...${PLAIN}\n"
+      fi
+    fi
+    
+    # 手动下载 macOS 版本
+    local arch=$(uname -m)
+    local ver="v2.6.2"  # 使用稳定版本
+    local url=""
+    
+    case "$arch" in
+      x86_64) url="https://github.com/zhboner/realm/releases/download/${ver}/realm-x86_64-apple-darwin.tar.gz";;
+      arm64) url="https://github.com/zhboner/realm/releases/download/${ver}/realm-aarch64-apple-darwin.tar.gz";;
+      *) 
+        printf "${ERROR_SYMBOL} 不支持的 macOS 架构: %s${PLAIN}\n" "$arch"
+        printf "${INFO_SYMBOL} 请手动从 GitHub 下载适合的版本${PLAIN}\n"
+        return 1
+        ;;
+    esac
+    
+    # 创建目录并下载
+    mkdir -p "$REALM_DIR" 2>/dev/null || true
+    if command -v curl &>/dev/null; then
+      printf "${INFO_SYMBOL} 下载 macOS 版本...${PLAIN}\n"
+      (cd "$REALM_DIR" && curl -L -o realm.tar.gz "$url" && tar -xzf realm.tar.gz && chmod +x realm && rm -f realm.tar.gz) &
+      show_loading $!
+      if [ -x "${REALM_DIR}/realm" ]; then
+        printf "${SUCCESS_SYMBOL} realm 安装成功${PLAIN}\n"
+        return 0
+      else
+        printf "${ERROR_SYMBOL} realm 安装失败${PLAIN}\n"
+        return 1
+      fi
+    else
+      printf "${ERROR_SYMBOL} 缺少 curl，无法下载${PLAIN}\n"
+      return 1
+    fi
   fi
   
   local api; api=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest || true)
@@ -1077,13 +1118,21 @@ show_environment_info() {
   printf "操作系统: %s\n" "$OS_TYPE"
   printf "用户权限: %s\n" "$([ "$(id -u)" -eq 0 ] && echo "root" || echo "普通用户")"
   
-  # 显示网络信息
+  # 显示网络信息 - 简洁模式
   printf "\n${BOLD}网络信息:${PLAIN}\n"
-  printf "  IPv4: ${GREEN}%s${PLAIN}\n" "${PUBLIC_IPV4:-N/A}"
-  printf "  IPv6: ${GREEN}%s${PLAIN}\n" "${PUBLIC_IPV6:-N/A}"
-  if [ "${PUBLIC_COUNTRY:-N/A}" != "N/A" ] || [ "${PUBLIC_ISP:-N/A}" != "N/A" ]; then
-    printf "  位置: ${YELLOW}%s${PLAIN}\n" "${PUBLIC_COUNTRY:-N/A}"
-    printf "  ISP:  ${YELLOW}%s${PLAIN}\n" "${PUBLIC_ISP:-N/A}"
+  if [ "${PUBLIC_IPV4:-N/A}" != "N/A" ]; then
+    local location_info=""
+    if [ "${PUBLIC_COUNTRY:-N/A}" != "N/A" ]; then
+      location_info=" (${PUBLIC_COUNTRY})"
+    fi
+    printf "  服务器: ${GREEN}%s${PLAIN}%s\n" "${PUBLIC_IPV4}" "$location_info"
+  else
+    printf "  服务器: ${YELLOW}获取中...${PLAIN}\n"
+  fi
+  
+  # IPv6 信息（如果可用）
+  if [ "${PUBLIC_IPV6:-N/A}" != "N/A" ]; then
+    printf "  IPv6: ${GREEN}%s${PLAIN}\n" "${PUBLIC_IPV6}"
   fi
   
   if [ "$OS_TYPE" != "linux" ]; then
