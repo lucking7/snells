@@ -1337,7 +1337,7 @@ show_environment_info() {
     
     printf "  IPv4: ${GREEN}%s${PLAIN}%s\n" "${PUBLIC_IPV4}" "$ipv4_location"
     
-    # IPv4 ASN 信息
+    # IPv4 ASN 信息 - 对齐显示
     if [ "${PUBLIC_IPV4_ASN:-N/A}" != "N/A" ] || [ "${PUBLIC_IPV4_ISP:-N/A}" != "N/A" ]; then
       local ipv4_asn_info=""
       if [ "${PUBLIC_IPV4_ASN:-N/A}" != "N/A" ]; then
@@ -1350,7 +1350,7 @@ show_environment_info() {
           ipv4_asn_info="${PUBLIC_IPV4_ISP}"
         fi
       fi
-      printf "        ${YELLOW}%s${PLAIN}\n" "$ipv4_asn_info"
+      printf "  ASN:  ${YELLOW}%s${PLAIN}\n" "$ipv4_asn_info"
     fi
   else
     printf "  IPv4: ${YELLOW}获取中...${PLAIN}\n"
@@ -1368,7 +1368,7 @@ show_environment_info() {
     
     printf "  IPv6: ${GREEN}%s${PLAIN}%s\n" "${PUBLIC_IPV6}" "$ipv6_location"
     
-    # IPv6 ASN 信息
+    # IPv6 ASN 信息 - 对齐显示
     if [ "${PUBLIC_IPV6_ASN:-N/A}" != "N/A" ] || [ "${PUBLIC_IPV6_ISP:-N/A}" != "N/A" ]; then
       local ipv6_asn_info=""
       if [ "${PUBLIC_IPV6_ASN:-N/A}" != "N/A" ]; then
@@ -1381,7 +1381,7 @@ show_environment_info() {
           ipv6_asn_info="${PUBLIC_IPV6_ISP}"
         fi
       fi
-      printf "        ${YELLOW}%s${PLAIN}\n" "$ipv6_asn_info"
+      printf "  ASN:  ${YELLOW}%s${PLAIN} (IPv6)\n" "$ipv6_asn_info"
     fi
   fi
   
