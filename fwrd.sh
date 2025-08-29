@@ -592,8 +592,8 @@ list_all_rules() {
         else
           status="${YELLOW}手动${PLAIN}"
         fi
-        # 清理目标地址，移除可能的警告信息
-        target_addr=$(echo "$target_addr" | cut -d'⚠' -f1 | sed 's/[[:space:]]*$//')
+        # 清理目标地址，移除可能的警告信息和特殊字符
+        target_addr=$(echo "$target_addr" | sed 's/⚠️.*$//' | sed 's/[[:space:]]*$//')
         printf "%-3s %-8s %-35s %-18s %-24s %-8s %b\n" "$count" "GOST" "$name" "$listen_addr" "$target_addr" "$proto" "$status"
       fi
     done < <(jq -r '.services[] | select(.forwarder!=null) | [.name,.addr, (.forwarder.nodes[0].addr//""), (.handler.type//"")] | @tsv' "$GOST_CONFIG_FILE" 2>/dev/null | tr '\t' '|')
@@ -645,8 +645,8 @@ delete_any_rule() {
     while IFS="|" read -r name listen_addr target_addr proto; do
       if [ -n "$name" ]; then
         count=$((count + 1))
-        # 清理目标地址
-        target_addr=$(echo "$target_addr" | cut -d'⚠' -f1 | sed 's/[[:space:]]*$//')
+        # 清理目标地址，移除可能的警告信息和特殊字符
+        target_addr=$(echo "$target_addr" | sed 's/⚠️.*$//' | sed 's/[[:space:]]*$//')
         printf "%-3s %-8s %-35s %-18s %-24s %-8s\n" "$count" "GOST" "$name" "$listen_addr" "$target_addr" "$proto"
         rule_engines+=("gost")
         rule_names+=("$name")
