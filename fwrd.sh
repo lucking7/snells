@@ -592,6 +592,8 @@ list_all_rules() {
         else
           status="${YELLOW}手动${PLAIN}"
         fi
+        # 清理目标地址，移除可能的警告信息
+        target_addr=$(echo "$target_addr" | cut -d'⚠' -f1 | sed 's/[[:space:]]*$//')
         printf "%-3s %-8s %-35s %-18s %-24s %-8s %b\n" "$count" "GOST" "$name" "$listen_addr" "$target_addr" "$proto" "$status"
       fi
     done < <(jq -r '.services[] | select(.forwarder!=null) | [.name,.addr, (.forwarder.nodes[0].addr//""), (.handler.type//"")] | @tsv' "$GOST_CONFIG_FILE" 2>/dev/null | tr '\t' '|')
@@ -629,7 +631,12 @@ list_all_rules() {
 # 统一规则删除
 delete_any_rule() {
   list_all_rules
-  if [ "$(count_total_rules)" -eq 0 ]; then return; fi
+  local total_rules
+  total_rules=$(count_total_rules)
+  if [ -z "$total_rules" ] || [ "$total_rules" -eq 0 ]; then 
+    printf "${WARN_SYMBOL} 没有可删除的规则${PLAIN}\n"
+    return
+  fi
   
   printf "\n${INFO_SYMBOL} 选择要删除的规则:\n"
   printf "  ${YELLOW}g) 删除 GOST 规则${PLAIN}\n"
@@ -649,14 +656,22 @@ delete_any_rule() {
 count_total_rules() {
   local total=0
   if [ -f "$GOST_CONFIG_FILE" ]; then
-    local gost_count=$(jq -r '.services[] | select(.forwarder!=null) | .name' "$GOST_CONFIG_FILE" 2>/dev/null | wc -l)
-    total=$((total + gost_count))
+    local gost_count
+    gost_count=$(jq -r '.services[] | select(.forwarder!=null) | .name' "$GOST_CONFIG_FILE" 2>/dev/null | wc -l || echo 0)
+    # 确保 gost_count 是数字
+    if [[ "$gost_count" =~ ^[0-9]+$ ]]; then
+      total=$((total + gost_count))
+    fi
   fi
   if [ -f "$REALM_CONFIG_FILE" ]; then
-    local realm_count=$(grep -c '^\[\[endpoints\]\]' "$REALM_CONFIG_FILE" 2>/dev/null || echo 0)
-    total=$((total + realm_count))
+    local realm_count
+    realm_count=$(grep -c '^\[\[endpoints\]\]' "$REALM_CONFIG_FILE" 2>/dev/null || echo 0)
+    # 确保 realm_count 是数字
+    if [[ "$realm_count" =~ ^[0-9]+$ ]]; then
+      total=$((total + realm_count))
+    fi
   fi
-  echo $total
+  echo "$total"
 }
 
 # 新建规则选择引擎
