@@ -1092,7 +1092,6 @@ show_environment_info() {
   fi
   
   # 检查关键工具
-  printf "\n工具状态:\n"
   local tools=(curl tar sed awk grep)
   if [ "$OS_TYPE" = "linux" ]; then
     tools+=(systemctl jq lsof wget dig)
@@ -1100,26 +1099,38 @@ show_environment_info() {
     tools+=(jq lsof wget dig)
   fi
   
-  local available=0 total=${#tools[@]}
+  local available=0 total=${#tools[@]} missing_tools=()
   for tool in "${tools[@]}"; do
     if command -v "$tool" &>/dev/null; then
-      printf "  ✓ %s\n" "$tool"
       available=$((available + 1))
     else
-      printf "  ✗ %s (缺失)\n" "$tool"
+      missing_tools+=("$tool")
     fi
   done
   
-  # 显示工具完整度
-  if [ $total -gt 0 ]; then
+  # 只在有缺失工具时显示工具状态
+  if [ ${#missing_tools[@]} -gt 0 ]; then
+    printf "\n${WARN_SYMBOL} 缺失工具:\n"
+    for tool in "${missing_tools[@]}"; do
+      printf "  ✗ %s\n" "$tool"
+    done
+    
     local percentage=$((available * 100 / total))
-    if [ $percentage -ge 90 ]; then
-      printf "\n${SUCCESS_SYMBOL} 工具完整度: ${GREEN}%d%%${PLAIN} (%d/%d)\n" "$percentage" "$available" "$total"
-    elif [ $percentage -ge 70 ]; then
-      printf "\n${WARN_SYMBOL} 工具完整度: ${YELLOW}%d%%${PLAIN} (%d/%d)\n" "$percentage" "$available" "$total"
+    if [ $percentage -ge 70 ]; then
+      printf "\n${WARN_SYMBOL} 工具完整度: ${YELLOW}%d%%${PLAIN} (%d/%d) - 部分功能可能受限\n" "$percentage" "$available" "$total"
     else
-      printf "\n${ERROR_SYMBOL} 工具完整度: ${RED}%d%%${PLAIN} (%d/%d)\n" "$percentage" "$available" "$total"
+      printf "\n${ERROR_SYMBOL} 工具完整度: ${RED}%d%%${PLAIN} (%d/%d) - 建议安装缺失工具\n" "$percentage" "$available" "$total"
     fi
+    
+    # 提供安装建议
+    if [ "$OS_TYPE" = "linux" ]; then
+      printf "${INFO_SYMBOL} 安装建议: ${BLUE}apt install ${missing_tools[*]}${PLAIN} 或 ${BLUE}yum install ${missing_tools[*]}${PLAIN}\n"
+    elif [ "$OS_TYPE" = "macos" ]; then
+      printf "${INFO_SYMBOL} 安装建议: ${BLUE}brew install ${missing_tools[*]}${PLAIN}\n"
+    fi
+  else
+    # 所有工具都可用时的简洁显示
+    printf "\n${SUCCESS_SYMBOL} 所有工具已就绪 (${GREEN}%d/%d${PLAIN})\n" "$available" "$total"
   fi
 }
 
