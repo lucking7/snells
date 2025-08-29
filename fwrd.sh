@@ -581,7 +581,7 @@ list_all_rules() {
   if [ -f "$GOST_CONFIG_FILE" ]; then
     while IFS="|" read -r name listen_addr target_addr proto; do
       if [ -n "$name" ]; then
-        ((count++))
+        count=$((count + 1))
         local status="未知"
         if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
           if systemctl is-active --quiet gost 2>/dev/null; then
@@ -853,20 +853,22 @@ show_environment_info() {
   for tool in "${tools[@]}"; do
     if command -v "$tool" &>/dev/null; then
       printf "  ✓ %s\n" "$tool"
-      ((available++))
+      available=$((available + 1))
     else
       printf "  ✗ %s (缺失)\n" "$tool"
     fi
   done
   
   # 显示工具完整度
-  local percentage=$((available * 100 / total))
-  if [ $percentage -ge 90 ]; then
-    printf "\n${SUCCESS_SYMBOL} 工具完整度: ${GREEN}%d%%${PLAIN} (%d/%d)\n" "$percentage" "$available" "$total"
-  elif [ $percentage -ge 70 ]; then
-    printf "\n${WARN_SYMBOL} 工具完整度: ${YELLOW}%d%%${PLAIN} (%d/%d)\n" "$percentage" "$available" "$total"
-  else
-    printf "\n${ERROR_SYMBOL} 工具完整度: ${RED}%d%%${PLAIN} (%d/%d)\n" "$percentage" "$available" "$total"
+  if [ $total -gt 0 ]; then
+    local percentage=$((available * 100 / total))
+    if [ $percentage -ge 90 ]; then
+      printf "\n${SUCCESS_SYMBOL} 工具完整度: ${GREEN}%d%%${PLAIN} (%d/%d)\n" "$percentage" "$available" "$total"
+    elif [ $percentage -ge 70 ]; then
+      printf "\n${WARN_SYMBOL} 工具完整度: ${YELLOW}%d%%${PLAIN} (%d/%d)\n" "$percentage" "$available" "$total"
+    else
+      printf "\n${ERROR_SYMBOL} 工具完整度: ${RED}%d%%${PLAIN} (%d/%d)\n" "$percentage" "$available" "$total"
+    fi
   fi
 }
 
