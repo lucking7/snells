@@ -134,8 +134,10 @@ show_system_status() {
   # System load (if available)
   if command -v uptime &>/dev/null; then
     local load_avg
-    load_avg=$(uptime | sed 's/.*load average: //' | cut -d',' -f1 | tr -d ' ')
-    printf "Load:     ${YELLOW}%s${PLAIN}\n" "${load_avg:-N/A}"
+    load_avg=$(uptime | grep -o 'load average[s]*: [0-9.]*' | sed 's/.*: //' | head -1)
+    if [ -n "$load_avg" ]; then
+      printf "Load:     ${YELLOW}%s${PLAIN}\n" "$load_avg"
+    fi
   fi
 }
 
@@ -426,8 +428,6 @@ get_public_ip() {
     local ipv4_info
     ipv4_info=$(cat "/tmp/fwrd_ipv4_$$")
     rm -f "/tmp/fwrd_ipv4_$$"
-    
-    if [ -n "$ipv4_info" ] && echo "$ipv4_info" | grep -q '"ip"'; then
     
     if [ -n "$ipv4_info" ] && echo "$ipv4_info" | grep -q '"ip"'; then
       if command -v jq &>/dev/null; then
