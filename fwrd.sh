@@ -475,8 +475,20 @@ install_realm() {
   fi
   
   local api; api=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest || true)
-  local ver; ver=$(echo "$api" | grep -o '"tag_name": *"[^"]*' | sed 's/.*"\(.*\)"/\1/' | head -1)
-  [ -z "$ver" ] && ver="v2.6.2"
+  local ver
+  if command -v jq &>/dev/null && [ -n "$api" ]; then
+    ver=$(echo "$api" | jq -r '.tag_name // ""')
+  else
+    ver=$(echo "$api" | grep -o '"tag_name": *"[^"]*' | sed 's/.*"\([^"]*\)".*/\1/' | head -1)
+  fi
+  
+  # 验证版本号格式
+  if [ -z "$ver" ] || ! [[ "$ver" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf "${WARN_SYMBOL} 无法获取有效版本号，使用默认版本${PLAIN}\n"
+    ver="v2.6.2"
+  fi
+  
+  printf "${INFO_SYMBOL} 使用版本: %s${PLAIN}\n" "$ver"
   local arch=$(uname -m); local os=$(uname -s | tr '[:upper:]' '[:lower:]')
   local url=""
   case "$arch-$os" in
@@ -487,14 +499,52 @@ install_realm() {
     *) url="https://github.com/zhboner/realm/releases/download/${ver}/realm-x86_64-unknown-linux-gnu.tar.gz";;
   esac
   
-  if ! command -v wget &>/dev/null; then
-    printf "${ERROR_SYMBOL} 缺少 wget，无法下载 realm${PLAIN}\n"
+  # 确保下载目录存在
+  $SUDO mkdir -p "$REALM_DIR"
+  
+  printf "${INFO_SYMBOL} 下载 URL: %s${PLAIN}\n" "$url"
+  
+  # 使用 curl 或 wget 下载
+  local download_success=false
+  if command -v curl &>/dev/null; then
+    printf "${INFO_SYMBOL} 使用 curl 下载...${PLAIN}\n"
+    if curl -L --connect-timeout 30 --max-time 300 -o "${REALM_DIR}/realm.tar.gz" "$url"; then
+      download_success=true
+    fi
+  elif command -v wget &>/dev/null; then
+    printf "${INFO_SYMBOL} 使用 wget 下载...${PLAIN}\n"
+    if wget -O "${REALM_DIR}/realm.tar.gz" "$url"; then
+      download_success=true
+    fi
+  else
+    printf "${ERROR_SYMBOL} 缺少下载工具 (curl 或 wget)${PLAIN}\n"
     return 1
   fi
   
-  (cd "$REALM_DIR" && wget -qO realm.tar.gz "$url" && tar -xzf realm.tar.gz && chmod +x realm && rm -f realm.tar.gz) &
-  show_loading $!
-  [ -x "${REALM_DIR}/realm" ] || { printf "${ERROR_SYMBOL} realm安装失败${PLAIN}\n"; return 1; }
+  if [ "$download_success" = false ]; then
+    printf "${ERROR_SYMBOL} 下载失败${PLAIN}\n"
+    return 1
+  fi
+  
+  # 检查下载文件
+  if [ ! -f "${REALM_DIR}/realm.tar.gz" ] || [ ! -s "${REALM_DIR}/realm.tar.gz" ]; then
+    printf "${ERROR_SYMBOL} 下载的文件无效或为空${PLAIN}\n"
+    rm -f "${REALM_DIR}/realm.tar.gz"
+    return 1
+  fi
+  
+  printf "${INFO_SYMBOL} 解压文件...${PLAIN}\n"
+  if (cd "$REALM_DIR" && tar -xzf realm.tar.gz && chmod +x realm && rm -f realm.tar.gz); then
+    if [ -x "${REALM_DIR}/realm" ]; then
+      printf "${SUCCESS_SYMBOL} realm 下载解压成功${PLAIN}\n"
+    else
+      printf "${ERROR_SYMBOL} 解压后找不到 realm 可执行文件${PLAIN}\n"
+      return 1
+    fi
+  else
+    printf "${ERROR_SYMBOL} 解压失败${PLAIN}\n"
+    return 1
+  fi
   
   # 只在 Linux 上创建 systemd 服务
   if [ "$OS_TYPE" = "linux" ]; then
