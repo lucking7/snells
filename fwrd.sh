@@ -257,11 +257,12 @@ auto_heal_service() {
   fi
 }
 
-# 获取公网IP信息 - 使用 ipapi.co 获取完整信息
+# 获取公网IP信息 - 分别查询 IPv4 和 IPv6 的完整信息
 get_public_ip() {
-  local ipv4="" ipv6="" country="" city="" asn="" isp=""
+  local ipv4="" ipv6="" ipv4_country="" ipv4_city="" ipv4_asn="" ipv4_isp=""
+  local ipv6_country="" ipv6_city="" ipv6_asn="" ipv6_isp=""
   
-  # 获取 IPv4 信息和详细地理/ASN 信息
+  # 获取 IPv4 信息和 ASN
   if command -v curl &>/dev/null; then
     printf "${INFO_SYMBOL} 获取 IPv4 信息...\r"
     local ipv4_info
@@ -271,17 +272,17 @@ get_public_ip() {
       if command -v jq &>/dev/null; then
         # 使用 jq 解析 JSON
         ipv4=$(echo "$ipv4_info" | jq -r '.ip // ""')
-        country=$(echo "$ipv4_info" | jq -r '.country_name // ""')
-        city=$(echo "$ipv4_info" | jq -r '.city // ""')
-        asn=$(echo "$ipv4_info" | jq -r '.asn // ""')
-        isp=$(echo "$ipv4_info" | jq -r '.org // ""')
+        ipv4_country=$(echo "$ipv4_info" | jq -r '.country_name // ""')
+        ipv4_city=$(echo "$ipv4_info" | jq -r '.city // ""')
+        ipv4_asn=$(echo "$ipv4_info" | jq -r '.asn // ""')
+        ipv4_isp=$(echo "$ipv4_info" | jq -r '.org // ""')
       else
         # 使用 grep 解析 JSON
         ipv4=$(echo "$ipv4_info" | grep -o '"ip":"[^"]*' | cut -d'"' -f4)
-        country=$(echo "$ipv4_info" | grep -o '"country_name":"[^"]*' | cut -d'"' -f4)
-        city=$(echo "$ipv4_info" | grep -o '"city":"[^"]*' | cut -d'"' -f4)
-        asn=$(echo "$ipv4_info" | grep -o '"asn":"[^"]*' | cut -d'"' -f4)
-        isp=$(echo "$ipv4_info" | grep -o '"org":"[^"]*' | cut -d'"' -f4)
+        ipv4_country=$(echo "$ipv4_info" | grep -o '"country_name":"[^"]*' | cut -d'"' -f4)
+        ipv4_city=$(echo "$ipv4_info" | grep -o '"city":"[^"]*' | cut -d'"' -f4)
+        ipv4_asn=$(echo "$ipv4_info" | grep -o '"asn":"[^"]*' | cut -d'"' -f4)
+        ipv4_isp=$(echo "$ipv4_info" | grep -o '"org":"[^"]*' | cut -d'"' -f4)
       fi
     fi
     
@@ -291,46 +292,75 @@ get_public_ip() {
     fi
   fi
   
-  # 获取 IPv6 地址
+  # 获取 IPv6 地址和 ASN
   if command -v curl &>/dev/null; then
     printf "${INFO_SYMBOL} 获取 IPv6 信息...\r"
     
-    # 尝试多种方法获取 IPv6
-    for method in ipapi_co api6_ipify dig_cloudflare; do
+    # 先获取 IPv6 地址
+    for method in api6_ipify dig_cloudflare ipapi_co; do
       case $method in
-        "ipapi_co")
-          ipv6=$(timeout 3 curl -6 -s --max-time 3 "https://ipapi.co/ip" 2>/dev/null | grep -E '^[0-9a-fA-F:]+$' || true)
-          ;;
         "api6_ipify")
-          if [ -z "$ipv6" ]; then
-            ipv6=$(timeout 3 curl -6 -s --max-time 3 https://api6.ipify.org 2>/dev/null | grep -E '^[0-9a-fA-F:]+$' || true)
-          fi
+          ipv6=$(timeout 3 curl -6 -s --max-time 3 https://api6.ipify.org 2>/dev/null | grep -E '^[0-9a-fA-F:]+$' || true)
           ;;
         "dig_cloudflare")
           if [ -z "$ipv6" ] && command -v dig &>/dev/null; then
             ipv6=$(timeout 3 dig +short -6 TXT ch whoami.cloudflare @2606:4700:4700::1111 2>/dev/null | tr -d '"' | grep -E '^[0-9a-fA-F:]+$' | head -1 || true)
           fi
           ;;
+        "ipapi_co")
+          if [ -z "$ipv6" ]; then
+            ipv6=$(timeout 3 curl -6 -s --max-time 3 "https://ipapi.co/ip" 2>/dev/null | grep -E '^[0-9a-fA-F:]+$' || true)
+          fi
+          ;;
       esac
       [ -n "$ipv6" ] && break
     done
+    
+    # 如果获取到 IPv6，查询其 ASN 信息
+    if [ -n "$ipv6" ] && [ "$ipv6" != "N/A" ]; then
+      printf "${INFO_SYMBOL} 获取 IPv6 ASN 信息...\r"
+      local ipv6_info
+      ipv6_info=$(timeout 5 curl -6 -s --max-time 5 "https://ipapi.co/json" 2>/dev/null || true)
+      
+      if [ -n "$ipv6_info" ] && echo "$ipv6_info" | grep -q '"ip"'; then
+        if command -v jq &>/dev/null; then
+          ipv6_country=$(echo "$ipv6_info" | jq -r '.country_name // ""')
+          ipv6_city=$(echo "$ipv6_info" | jq -r '.city // ""')
+          ipv6_asn=$(echo "$ipv6_info" | jq -r '.asn // ""')
+          ipv6_isp=$(echo "$ipv6_info" | jq -r '.org // ""')
+        else
+          ipv6_country=$(echo "$ipv6_info" | grep -o '"country_name":"[^"]*' | cut -d'"' -f4)
+          ipv6_city=$(echo "$ipv6_info" | grep -o '"city":"[^"]*' | cut -d'"' -f4)
+          ipv6_asn=$(echo "$ipv6_info" | grep -o '"asn":"[^"]*' | cut -d'"' -f4)
+          ipv6_isp=$(echo "$ipv6_info" | grep -o '"org":"[^"]*' | cut -d'"' -f4)
+        fi
+      fi
+    fi
   fi
   
   # 清理和验证数据
   [ -z "$ipv4" ] && ipv4="N/A"
   [ -z "$ipv6" ] && ipv6="N/A"
-  [ -z "$country" ] && country="N/A"
-  [ -z "$city" ] && city="N/A"
-  [ -z "$asn" ] && asn="N/A"
-  [ -z "$isp" ] && isp="N/A"
+  [ -z "$ipv4_country" ] && ipv4_country="N/A"
+  [ -z "$ipv4_city" ] && ipv4_city="N/A"
+  [ -z "$ipv4_asn" ] && ipv4_asn="N/A"
+  [ -z "$ipv4_isp" ] && ipv4_isp="N/A"
+  [ -z "$ipv6_country" ] && ipv6_country="N/A"
+  [ -z "$ipv6_city" ] && ipv6_city="N/A"
+  [ -z "$ipv6_asn" ] && ipv6_asn="N/A"
+  [ -z "$ipv6_isp" ] && ipv6_isp="N/A"
   
   # 导出变量供其他函数使用
   PUBLIC_IPV4="$ipv4"
   PUBLIC_IPV6="$ipv6"
-  PUBLIC_COUNTRY="$country"
-  PUBLIC_CITY="$city"
-  PUBLIC_ASN="$asn"
-  PUBLIC_ISP="$isp"
+  PUBLIC_IPV4_COUNTRY="$ipv4_country"
+  PUBLIC_IPV4_CITY="$ipv4_city"
+  PUBLIC_IPV4_ASN="$ipv4_asn"
+  PUBLIC_IPV4_ISP="$ipv4_isp"
+  PUBLIC_IPV6_COUNTRY="$ipv6_country"
+  PUBLIC_IPV6_CITY="$ipv6_city"
+  PUBLIC_IPV6_ASN="$ipv6_asn"
+  PUBLIC_IPV6_ISP="$ipv6_isp"
   
   printf "                    \r"  # 清除获取信息提示
 }
@@ -1292,41 +1322,67 @@ show_environment_info() {
   printf "操作系统: %s\n" "$OS_TYPE"
   printf "用户权限: %s\n" "$([ "$(id -u)" -eq 0 ] && echo "root" || echo "普通用户")"
   
-  # 显示网络信息 - 包含 ASN 信息
+  # 显示网络信息 - 分别显示 IPv4 和 IPv6 的 ASN 信息
   printf "\n${BOLD}网络信息:${PLAIN}\n"
+  
+  # IPv4 信息和 ASN
   if [ "${PUBLIC_IPV4:-N/A}" != "N/A" ]; then
-    # 构建位置信息
-    local location_info=""
-    if [ "${PUBLIC_CITY:-N/A}" != "N/A" ] && [ "${PUBLIC_COUNTRY:-N/A}" != "N/A" ]; then
-      location_info=" (${PUBLIC_CITY}, ${PUBLIC_COUNTRY})"
-    elif [ "${PUBLIC_COUNTRY:-N/A}" != "N/A" ]; then
-      location_info=" (${PUBLIC_COUNTRY})"
+    # 构建 IPv4 位置信息
+    local ipv4_location=""
+    if [ "${PUBLIC_IPV4_CITY:-N/A}" != "N/A" ] && [ "${PUBLIC_IPV4_COUNTRY:-N/A}" != "N/A" ]; then
+      ipv4_location=" (${PUBLIC_IPV4_CITY}, ${PUBLIC_IPV4_COUNTRY})"
+    elif [ "${PUBLIC_IPV4_COUNTRY:-N/A}" != "N/A" ]; then
+      ipv4_location=" (${PUBLIC_IPV4_COUNTRY})"
     fi
     
-    printf "  IPv4: ${GREEN}%s${PLAIN}%s\n" "${PUBLIC_IPV4}" "$location_info"
+    printf "  IPv4: ${GREEN}%s${PLAIN}%s\n" "${PUBLIC_IPV4}" "$ipv4_location"
     
-    # 显示 ASN 和 ISP 信息
-    if [ "${PUBLIC_ASN:-N/A}" != "N/A" ] || [ "${PUBLIC_ISP:-N/A}" != "N/A" ]; then
-      local asn_info=""
-      if [ "${PUBLIC_ASN:-N/A}" != "N/A" ]; then
-        asn_info="${PUBLIC_ASN}"
+    # IPv4 ASN 信息
+    if [ "${PUBLIC_IPV4_ASN:-N/A}" != "N/A" ] || [ "${PUBLIC_IPV4_ISP:-N/A}" != "N/A" ]; then
+      local ipv4_asn_info=""
+      if [ "${PUBLIC_IPV4_ASN:-N/A}" != "N/A" ]; then
+        ipv4_asn_info="${PUBLIC_IPV4_ASN}"
       fi
-      if [ "${PUBLIC_ISP:-N/A}" != "N/A" ]; then
-        if [ -n "$asn_info" ]; then
-          asn_info="${asn_info} - ${PUBLIC_ISP}"
+      if [ "${PUBLIC_IPV4_ISP:-N/A}" != "N/A" ]; then
+        if [ -n "$ipv4_asn_info" ]; then
+          ipv4_asn_info="${ipv4_asn_info} - ${PUBLIC_IPV4_ISP}"
         else
-          asn_info="${PUBLIC_ISP}"
+          ipv4_asn_info="${PUBLIC_IPV4_ISP}"
         fi
       fi
-      printf "  ASN:  ${YELLOW}%s${PLAIN}\n" "$asn_info"
+      printf "        ${YELLOW}%s${PLAIN}\n" "$ipv4_asn_info"
     fi
   else
     printf "  IPv4: ${YELLOW}获取中...${PLAIN}\n"
   fi
   
-  # IPv6 信息（如果可用）
+  # IPv6 信息和 ASN
   if [ "${PUBLIC_IPV6:-N/A}" != "N/A" ]; then
-    printf "  IPv6: ${GREEN}%s${PLAIN}\n" "${PUBLIC_IPV6}"
+    # 构建 IPv6 位置信息
+    local ipv6_location=""
+    if [ "${PUBLIC_IPV6_CITY:-N/A}" != "N/A" ] && [ "${PUBLIC_IPV6_COUNTRY:-N/A}" != "N/A" ]; then
+      ipv6_location=" (${PUBLIC_IPV6_CITY}, ${PUBLIC_IPV6_COUNTRY})"
+    elif [ "${PUBLIC_IPV6_COUNTRY:-N/A}" != "N/A" ]; then
+      ipv6_location=" (${PUBLIC_IPV6_COUNTRY})"
+    fi
+    
+    printf "  IPv6: ${GREEN}%s${PLAIN}%s\n" "${PUBLIC_IPV6}" "$ipv6_location"
+    
+    # IPv6 ASN 信息
+    if [ "${PUBLIC_IPV6_ASN:-N/A}" != "N/A" ] || [ "${PUBLIC_IPV6_ISP:-N/A}" != "N/A" ]; then
+      local ipv6_asn_info=""
+      if [ "${PUBLIC_IPV6_ASN:-N/A}" != "N/A" ]; then
+        ipv6_asn_info="${PUBLIC_IPV6_ASN}"
+      fi
+      if [ "${PUBLIC_IPV6_ISP:-N/A}" != "N/A" ]; then
+        if [ -n "$ipv6_asn_info" ]; then
+          ipv6_asn_info="${ipv6_asn_info} - ${PUBLIC_IPV6_ISP}"
+        else
+          ipv6_asn_info="${PUBLIC_IPV6_ISP}"
+        fi
+      fi
+      printf "        ${YELLOW}%s${PLAIN}\n" "$ipv6_asn_info"
+    fi
   fi
   
   if [ "$OS_TYPE" != "linux" ]; then
@@ -1356,7 +1412,8 @@ main_menu() {
       4) uninstall_menu ;;
       r|R) 
         printf "${INFO_SYMBOL} 正在刷新网络信息...\n"
-        unset PUBLIC_IPV4 PUBLIC_IPV6 PUBLIC_COUNTRY PUBLIC_CITY PUBLIC_ASN PUBLIC_ISP
+        unset PUBLIC_IPV4 PUBLIC_IPV6 PUBLIC_IPV4_COUNTRY PUBLIC_IPV4_CITY PUBLIC_IPV4_ASN PUBLIC_IPV4_ISP
+        unset PUBLIC_IPV6_COUNTRY PUBLIC_IPV6_CITY PUBLIC_IPV6_ASN PUBLIC_IPV6_ISP
         get_public_ip
         printf "${SUCCESS_SYMBOL} 网络信息已刷新${PLAIN}\n"
         sleep 1
