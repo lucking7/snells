@@ -93,7 +93,7 @@ install_pkgs() {
       brew install "${pkgs[@]}" || true
       ;;
     *)
-      $SUDO "$pkg_manager" install -y "${pkgs[@]}"
+  $SUDO "$pkg_manager" install -y "${pkgs[@]}"
       ;;
   esac
 }
@@ -193,90 +193,82 @@ find_free_port() {
 
 pause_any() { read -n1 -r -p "按任意键继续..."; echo; }
 
-# 获取公网IP信息
+# 获取公网IP信息 - 使用 ipapi.co 获取完整信息
 get_public_ip() {
-  local ipv4="" ipv6="" country="" isp=""
+  local ipv4="" ipv6="" country="" city="" asn="" isp=""
   
-  # 获取 IPv4 地址 (多种方式，容错处理)
-  for method in dig_opendns dig_google api_ipify api_httpbin; do
-    case $method in
-      "dig_opendns")
-        if command -v dig &>/dev/null; then
-          ipv4=$(timeout 3 dig +short myip.opendns.com @resolver1.opendns.com 2>/dev/null | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' | head -1 || true)
-        fi
-        ;;
-      "dig_google")
-        if command -v dig &>/dev/null && [ -z "$ipv4" ]; then
-          ipv4=$(timeout 3 dig +short txt ch whoami.cloudflare @1.1.1.1 2>/dev/null | tr -d '"' | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' | head -1 || true)
-        fi
-        ;;
-      "api_ipify")
-        if [ -z "$ipv4" ] && command -v curl &>/dev/null; then
-          ipv4=$(timeout 3 curl -s4 --max-time 3 https://api.ipify.org 2>/dev/null | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || true)
-        fi
-        ;;
-      "api_httpbin")
-        if [ -z "$ipv4" ] && command -v curl &>/dev/null; then
-          ipv4=$(timeout 3 curl -s4 --max-time 3 https://httpbin.org/ip 2>/dev/null | grep -o '"origin":"[^"]*' | cut -d'"' -f4 | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || true)
-        fi
-        ;;
-    esac
-    [ -n "$ipv4" ] && break
-  done
-  
-  # 获取 IPv6 地址 (多种方式，容错处理)
-  for method in dig_google api_ipify api_httpbin; do
-    case $method in
-      "dig_google")
-        if command -v dig &>/dev/null; then
-          ipv6=$(timeout 3 dig +short -6 TXT ch whoami.cloudflare @2606:4700:4700::1111 2>/dev/null | tr -d '"' | grep -E '^[0-9a-fA-F:]+$' | head -1 || true)
-        fi
-        ;;
-      "api_ipify")
-        if [ -z "$ipv6" ] && command -v curl &>/dev/null; then
-          ipv6=$(timeout 3 curl -s6 --max-time 3 https://api6.ipify.org 2>/dev/null | grep -E '^[0-9a-fA-F:]+$' || true)
-        fi
-        ;;
-      "api_httpbin")
-        if [ -z "$ipv6" ] && command -v curl &>/dev/null; then
-          ipv6=$(timeout 3 curl -s6 --max-time 3 https://httpbin.org/ip 2>/dev/null | grep -o '"origin":"[^"]*' | cut -d'"' -f4 | grep -E '^[0-9a-fA-F:]+$' || true)
-        fi
-        ;;
-    esac
-    [ -n "$ipv6" ] && break
-  done
-  
-  # 获取地理位置信息 (基于IPv4，容错处理)
-  if [ -n "$ipv4" ] && command -v curl &>/dev/null; then
-    local geo_info
-    # 尝试 ipapi.co
-    geo_info=$(timeout 3 curl -s --max-time 3 "https://ipapi.co/${ipv4}/json/" 2>/dev/null || true)
-    if [ -n "$geo_info" ]; then
-      country=$(echo "$geo_info" | grep -o '"country_name":"[^"]*' | cut -d'"' -f4 | head -1 || true)
-      isp=$(echo "$geo_info" | grep -o '"org":"[^"]*' | cut -d'"' -f4 | head -1 || true)
+  # 获取 IPv4 信息和详细地理/ASN 信息
+  if command -v curl &>/dev/null; then
+    printf "${INFO_SYMBOL} 获取 IPv4 信息...\r"
+    local ipv4_info
+    ipv4_info=$(timeout 5 curl -4 -s --max-time 5 "https://ipapi.co/json" 2>/dev/null || true)
+    
+    if [ -n "$ipv4_info" ] && echo "$ipv4_info" | grep -q '"ip"'; then
+      if command -v jq &>/dev/null; then
+        # 使用 jq 解析 JSON
+        ipv4=$(echo "$ipv4_info" | jq -r '.ip // ""')
+        country=$(echo "$ipv4_info" | jq -r '.country_name // ""')
+        city=$(echo "$ipv4_info" | jq -r '.city // ""')
+        asn=$(echo "$ipv4_info" | jq -r '.asn // ""')
+        isp=$(echo "$ipv4_info" | jq -r '.org // ""')
+      else
+        # 使用 grep 解析 JSON
+        ipv4=$(echo "$ipv4_info" | grep -o '"ip":"[^"]*' | cut -d'"' -f4)
+        country=$(echo "$ipv4_info" | grep -o '"country_name":"[^"]*' | cut -d'"' -f4)
+        city=$(echo "$ipv4_info" | grep -o '"city":"[^"]*' | cut -d'"' -f4)
+        asn=$(echo "$ipv4_info" | grep -o '"asn":"[^"]*' | cut -d'"' -f4)
+        isp=$(echo "$ipv4_info" | grep -o '"org":"[^"]*' | cut -d'"' -f4)
+      fi
     fi
     
-    # 备用: ip-api.com
-    if [ -z "$country" ]; then
-      geo_info=$(timeout 3 curl -s --max-time 3 "http://ip-api.com/json/${ipv4}?fields=country,isp" 2>/dev/null || true)
-      if [ -n "$geo_info" ]; then
-        country=$(echo "$geo_info" | grep -o '"country":"[^"]*' | cut -d'"' -f4 | head -1 || true)
-        isp=$(echo "$geo_info" | grep -o '"isp":"[^"]*' | cut -d'"' -f4 | head -1 || true)
-      fi
+    # 如果 ipapi.co 失败，尝试备用方法获取 IPv4
+    if [ -z "$ipv4" ]; then
+      ipv4=$(timeout 3 curl -4 -s --max-time 3 https://api.ipify.org 2>/dev/null | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || true)
     fi
   fi
   
-  # 设置默认值
+  # 获取 IPv6 地址
+  if command -v curl &>/dev/null; then
+    printf "${INFO_SYMBOL} 获取 IPv6 信息...\r"
+    
+    # 尝试多种方法获取 IPv6
+    for method in ipapi_co api6_ipify dig_cloudflare; do
+      case $method in
+        "ipapi_co")
+          ipv6=$(timeout 3 curl -6 -s --max-time 3 "https://ipapi.co/ip" 2>/dev/null | grep -E '^[0-9a-fA-F:]+$' || true)
+          ;;
+        "api6_ipify")
+          if [ -z "$ipv6" ]; then
+            ipv6=$(timeout 3 curl -6 -s --max-time 3 https://api6.ipify.org 2>/dev/null | grep -E '^[0-9a-fA-F:]+$' || true)
+          fi
+          ;;
+        "dig_cloudflare")
+          if [ -z "$ipv6" ] && command -v dig &>/dev/null; then
+            ipv6=$(timeout 3 dig +short -6 TXT ch whoami.cloudflare @2606:4700:4700::1111 2>/dev/null | tr -d '"' | grep -E '^[0-9a-fA-F:]+$' | head -1 || true)
+          fi
+          ;;
+      esac
+      [ -n "$ipv6" ] && break
+    done
+  fi
+  
+  # 清理和验证数据
   [ -z "$ipv4" ] && ipv4="N/A"
-  [ -z "$ipv6" ] && ipv6="N/A"  
+  [ -z "$ipv6" ] && ipv6="N/A"
   [ -z "$country" ] && country="N/A"
+  [ -z "$city" ] && city="N/A"
+  [ -z "$asn" ] && asn="N/A"
   [ -z "$isp" ] && isp="N/A"
   
   # 导出变量供其他函数使用
   PUBLIC_IPV4="$ipv4"
   PUBLIC_IPV6="$ipv6"
   PUBLIC_COUNTRY="$country"
+  PUBLIC_CITY="$city"
+  PUBLIC_ASN="$asn"
   PUBLIC_ISP="$isp"
+  
+  printf "                    \r"  # 清除获取信息提示
 }
 # 依赖初始化
 ensure_base_deps
@@ -338,7 +330,7 @@ apply_gost_config() {
   # Linux 环境创建 systemd 服务
   local abs
   if command -v realpath &>/dev/null; then
-    abs=$(realpath "$GOST_CONFIG_FILE")
+  abs=$(realpath "$GOST_CONFIG_FILE")
   else
     abs="$GOST_CONFIG_FILE"
   fi
@@ -548,8 +540,8 @@ install_realm() {
   
   # 只在 Linux 上创建 systemd 服务
   if [ "$OS_TYPE" = "linux" ]; then
-    if ! id realm &>/dev/null; then $SUDO useradd --system --no-create-home --shell /bin/false realm || true; fi
-    cat <<EOF | $SUDO tee "${SERVICE_DIR}/realm.service" >/dev/null
+  if ! id realm &>/dev/null; then $SUDO useradd --system --no-create-home --shell /bin/false realm || true; fi
+  cat <<EOF | $SUDO tee "${SERVICE_DIR}/realm.service" >/dev/null
 [Unit]
 Description=Realm Service
 After=network-online.target
@@ -574,9 +566,9 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 [Install]
 WantedBy=multi-user.target
 EOF
-    $SUDO systemctl daemon-reload
-    $SUDO systemctl enable realm >/dev/null 2>&1 || true
-    $SUDO systemctl restart realm || true
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl enable realm >/dev/null 2>&1 || true
+  $SUDO systemctl restart realm || true
   else
     printf "${INFO_SYMBOL} 非 Linux 环境，跳过 systemd 服务创建${PLAIN}\n"
     printf "${INFO_SYMBOL} 手动启动: %s/realm -c %s${PLAIN}\n" "$REALM_DIR" "$REALM_CONFIG_FILE"
@@ -607,8 +599,8 @@ use_tcp = ${use_tcp}
 use_udp = ${use_udp}
 EOF
   if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
-    $SUDO systemctl restart realm || true
-    printf "${SUCCESS_SYMBOL} 已添加Realm规则并重启服务${PLAIN}\n"
+  $SUDO systemctl restart realm || true
+  printf "${SUCCESS_SYMBOL} 已添加Realm规则并重启服务${PLAIN}\n"
   else
     printf "${SUCCESS_SYMBOL} 已添加Realm规则${PLAIN}\n"
     printf "${INFO_SYMBOL} 手动重启: %s/realm -c %s${PLAIN}\n" "$REALM_DIR" "$REALM_CONFIG_FILE"
@@ -1045,14 +1037,14 @@ service_menu() {
   printf "\n${BOLD}${BLUE}=== 服务管理 ===${PLAIN}\n"
   
   if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
-    printf "  1) 启动 gost.service\n"
-    printf "  2) 停止 gost.service\n"
-    printf "  3) 重启 gost.service\n"
-    printf "  4) 查看 gost 日志\n"
-    printf "  5) 启动 realm.service\n"
-    printf "  6) 停止 realm.service\n"
-    printf "  7) 重启 realm.service\n"
-    printf "  8) 查看 realm 日志\n"
+  printf "  1) 启动 gost.service\n"
+  printf "  2) 停止 gost.service\n"
+  printf "  3) 重启 gost.service\n"
+  printf "  4) 查看 gost 日志\n"
+  printf "  5) 启动 realm.service\n"
+  printf "  6) 停止 realm.service\n"
+  printf "  7) 重启 realm.service\n"
+  printf "  8) 查看 realm 日志\n"
   else
     printf "  ${YELLOW}1) 手动启动 GOST${PLAIN}\n"
     printf "  ${YELLOW}2) 查看 GOST 配置${PLAIN}\n"
@@ -1063,18 +1055,18 @@ service_menu() {
   printf "选择: "; read -r c
   
   if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
-    case $c in
-      1) $SUDO systemctl start gost || true; ;;
-      2) $SUDO systemctl stop gost || true; ;;
-      3) $SUDO systemctl restart gost || true; ;;
-      4) $SUDO journalctl -u gost --no-pager -n 50 || true; ;;
-      5) $SUDO systemctl start realm || true; ;;
-      6) $SUDO systemctl stop realm || true; ;;
-      7) $SUDO systemctl restart realm || true; ;;
-      8) $SUDO journalctl -u realm --no-pager -n 50 || true; ;;
-      0) return ;;
-      *) printf "${WARN_SYMBOL} 无效选择${PLAIN}\n" ;;
-    esac
+  case $c in
+    1) $SUDO systemctl start gost || true; ;;
+    2) $SUDO systemctl stop gost || true; ;;
+    3) $SUDO systemctl restart gost || true; ;;
+    4) $SUDO journalctl -u gost --no-pager -n 50 || true; ;;
+    5) $SUDO systemctl start realm || true; ;;
+    6) $SUDO systemctl stop realm || true; ;;
+    7) $SUDO systemctl restart realm || true; ;;
+    8) $SUDO journalctl -u realm --no-pager -n 50 || true; ;;
+    0) return ;;
+    *) printf "${WARN_SYMBOL} 无效选择${PLAIN}\n" ;;
+  esac
   else
     case $c in
       1) 
@@ -1168,16 +1160,36 @@ show_environment_info() {
   printf "操作系统: %s\n" "$OS_TYPE"
   printf "用户权限: %s\n" "$([ "$(id -u)" -eq 0 ] && echo "root" || echo "普通用户")"
   
-  # 显示网络信息 - 简洁模式
+  # 显示网络信息 - 包含 ASN 信息
   printf "\n${BOLD}网络信息:${PLAIN}\n"
   if [ "${PUBLIC_IPV4:-N/A}" != "N/A" ]; then
+    # 构建位置信息
     local location_info=""
-    if [ "${PUBLIC_COUNTRY:-N/A}" != "N/A" ]; then
+    if [ "${PUBLIC_CITY:-N/A}" != "N/A" ] && [ "${PUBLIC_COUNTRY:-N/A}" != "N/A" ]; then
+      location_info=" (${PUBLIC_CITY}, ${PUBLIC_COUNTRY})"
+    elif [ "${PUBLIC_COUNTRY:-N/A}" != "N/A" ]; then
       location_info=" (${PUBLIC_COUNTRY})"
     fi
-    printf "  服务器: ${GREEN}%s${PLAIN}%s\n" "${PUBLIC_IPV4}" "$location_info"
+    
+    printf "  IPv4: ${GREEN}%s${PLAIN}%s\n" "${PUBLIC_IPV4}" "$location_info"
+    
+    # 显示 ASN 和 ISP 信息
+    if [ "${PUBLIC_ASN:-N/A}" != "N/A" ] || [ "${PUBLIC_ISP:-N/A}" != "N/A" ]; then
+      local asn_info=""
+      if [ "${PUBLIC_ASN:-N/A}" != "N/A" ]; then
+        asn_info="${PUBLIC_ASN}"
+      fi
+      if [ "${PUBLIC_ISP:-N/A}" != "N/A" ]; then
+        if [ -n "$asn_info" ]; then
+          asn_info="${asn_info} - ${PUBLIC_ISP}"
+        else
+          asn_info="${PUBLIC_ISP}"
+        fi
+      fi
+      printf "  ASN:  ${YELLOW}%s${PLAIN}\n" "$asn_info"
+    fi
   else
-    printf "  服务器: ${YELLOW}获取中...${PLAIN}\n"
+    printf "  IPv4: ${YELLOW}获取中...${PLAIN}\n"
   fi
   
   # IPv6 信息（如果可用）
@@ -1212,7 +1224,7 @@ main_menu() {
       4) uninstall_menu ;;
       r|R) 
         printf "${INFO_SYMBOL} 正在刷新网络信息...\n"
-        unset PUBLIC_IPV4 PUBLIC_IPV6 PUBLIC_COUNTRY PUBLIC_ISP
+        unset PUBLIC_IPV4 PUBLIC_IPV6 PUBLIC_COUNTRY PUBLIC_CITY PUBLIC_ASN PUBLIC_ISP
         get_public_ip
         printf "${SUCCESS_SYMBOL} 网络信息已刷新${PLAIN}\n"
         sleep 1
