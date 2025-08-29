@@ -709,14 +709,99 @@ delete_any_rule() {
   fi
   
   printf "\n${INFO_SYMBOL} 共 ${BLUE}%d${PLAIN} 条规则\n" "$count"
-  printf "${YELLOW}请输入要删除的规则编号 (1-%d)，或输入 0 返回: ${PLAIN}" "$count"
-  read -r choice
+  printf "${YELLOW}删除选项:${PLAIN}\n"
+  printf "  ${GREEN}单个删除${PLAIN}: 输入规则编号 (1-%d)\n" "$count"
+  printf "  ${YELLOW}批量删除${PLAIN}: 输入多个编号，用空格分隔 (如: 1 3 5)\n"
+  printf "  ${RED}全部删除${PLAIN}: 输入 'all' 删除所有规则\n"
+  printf "  ${BLUE}返回${PLAIN}: 输入 0\n"
+  printf "请选择: "; read -r choice
   
   if [ "$choice" = "0" ]; then
     printf "${INFO_SYMBOL} 已取消删除${PLAIN}\n"
     return
   fi
   
+  # 处理 'all' 全部删除
+  if [ "$choice" = "all" ]; then
+    printf "${RED}${WARN_SYMBOL} 警告: 这将删除所有 %d 条转发规则！${PLAIN}\n" "$count"
+    printf "${YELLOW}确定要删除所有规则吗? 请输入 'YES' 确认: ${PLAIN}"
+    read -r confirm_all
+    if [ "$confirm_all" = "YES" ]; then
+      delete_all_rules
+      return
+    else
+      printf "${INFO_SYMBOL} 已取消全部删除${PLAIN}\n"
+      return
+    fi
+  fi
+  
+  # 处理批量删除 (空格分隔的数字)
+  if [[ "$choice" =~ [[:space:]] ]]; then
+    local choices_array=($choice)
+    local valid_choices=()
+    
+    # 验证所有输入的编号
+    for num in "${choices_array[@]}"; do
+      if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le $count ]; then
+        valid_choices+=("$num")
+      else
+        printf "${ERROR_SYMBOL} 无效编号: %s${PLAIN}\n" "$num"
+        return
+      fi
+    done
+    
+    if [ ${#valid_choices[@]} -eq 0 ]; then
+      printf "${ERROR_SYMBOL} 没有有效的规则编号${PLAIN}\n"
+      return
+    fi
+    
+    printf "${WARN_SYMBOL} 确定要删除 %d 条规则吗? [y/N]: ${PLAIN}" "${#valid_choices[@]}"
+    read -r confirm_batch
+    
+    if [[ "$confirm_batch" =~ ^[Yy]$ ]]; then
+      # 按倒序删除，避免编号变化影响
+      local sorted_choices=($(printf '%s\n' "${valid_choices[@]}" | sort -nr))
+      local deleted_count=0
+      
+      for num in "${sorted_choices[@]}"; do
+        local selected_engine="${rule_engines[$((num-1))]}"
+        local selected_name="${rule_names[$((num-1))]}"
+        
+        if [ "$selected_engine" = "gost" ]; then
+          local tmp=$(mktemp)
+          jq --arg n "$selected_name" '.services = [.services[] | select(.name!=$n)]' "$GOST_CONFIG_FILE" > "$tmp" && {
+            $SUDO mv "$tmp" "$GOST_CONFIG_FILE"
+            deleted_count=$((deleted_count + 1))
+          } || rm -f "$tmp"
+        else
+          # Realm 规则删除逻辑
+          local starts
+          mapfile -t starts < <(nl -ba "$REALM_CONFIG_FILE" | grep "\[\[endpoints\]\]" | awk '{print $1}')
+          if [ "$selected_name" -le ${#starts[@]} ]; then
+            local s=${starts[$((selected_name-1))]}
+            local e
+            e=$(nl -ba "$REALM_CONFIG_FILE" | awk -v S=$s 'NR>S && /\[\[endpoints\]\]/{print $1; exit}')
+            if [ -z "$e" ]; then e=$(wc -l < "$REALM_CONFIG_FILE"); fi
+            $SUDO sed -i "${s},${e}d" "$REALM_CONFIG_FILE"
+            deleted_count=$((deleted_count + 1))
+          fi
+        fi
+      done
+      
+      # 重启服务
+      if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
+        apply_gost_config
+        $SUDO systemctl restart realm || true
+      fi
+      
+      printf "${SUCCESS_SYMBOL} 批量删除完成，共删除 %d 条规则${PLAIN}\n" "$deleted_count"
+    else
+      printf "${INFO_SYMBOL} 已取消批量删除${PLAIN}\n"
+    fi
+    return
+  fi
+  
+  # 处理单个删除
   if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt $count ]; then
     printf "${ERROR_SYMBOL} 无效选择${PLAIN}\n"
     return
@@ -757,6 +842,49 @@ delete_any_rule() {
   else
     printf "${INFO_SYMBOL} 已取消删除${PLAIN}\n"
   fi
+}
+
+# 一键删除所有规则
+delete_all_rules() {
+  local deleted_gost=0 deleted_realm=0
+  
+  printf "${INFO_SYMBOL} 正在删除所有规则...${PLAIN}\n"
+  
+  # 删除所有 GOST 规则
+  if [ -f "$GOST_CONFIG_FILE" ]; then
+    local gost_count
+    gost_count=$(jq -r '.services[] | select(.forwarder!=null) | .name' "$GOST_CONFIG_FILE" 2>/dev/null | wc -l || echo 0)
+    if [ "$gost_count" -gt 0 ]; then
+      echo '{"services":[]}' | $SUDO tee "$GOST_CONFIG_FILE" >/dev/null
+      deleted_gost=$gost_count
+      printf "${SUCCESS_SYMBOL} 删除了 %d 条 GOST 规则${PLAIN}\n" "$deleted_gost"
+    fi
+  fi
+  
+  # 删除所有 Realm 规则
+  if [ -f "$REALM_CONFIG_FILE" ]; then
+    local realm_count
+    realm_count=$(grep -c '^\[\[endpoints\]\]' "$REALM_CONFIG_FILE" 2>/dev/null || echo 0)
+    if [ "$realm_count" -gt 0 ]; then
+      # 保留 [network] 部分，删除所有 [[endpoints]]
+      $SUDO sed -i '/^\[\[endpoints\]\]/,$d' "$REALM_CONFIG_FILE"
+      deleted_realm=$realm_count
+      printf "${SUCCESS_SYMBOL} 删除了 %d 条 Realm 规则${PLAIN}\n" "$deleted_realm"
+    fi
+  fi
+  
+  # 重启服务
+  if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
+    if [ $deleted_gost -gt 0 ]; then
+      apply_gost_config
+    fi
+    if [ $deleted_realm -gt 0 ]; then
+      $SUDO systemctl restart realm || true
+    fi
+  fi
+  
+  local total_deleted=$((deleted_gost + deleted_realm))
+  printf "${SUCCESS_SYMBOL} ${GREEN}全部删除完成！共删除 %d 条规则${PLAIN}\n" "$total_deleted"
 }
 
 # 统计总规则数
