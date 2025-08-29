@@ -193,6 +193,70 @@ find_free_port() {
 
 pause_any() { read -n1 -r -p "按任意键继续..."; echo; }
 
+# 检查服务状态和健康度
+check_service_health() {
+  local service_name=$1
+  if [ "$OS_TYPE" != "linux" ] || ! command -v systemctl &>/dev/null; then
+    printf "${WARN_SYMBOL} 非 Linux 环境，无法检查 systemd 服务状态${PLAIN}\n"
+    return 1
+  fi
+  
+  printf "\n${BOLD}${BLUE}=== %s 服务状态 ===${PLAIN}\n" "$service_name"
+  
+  # 基本状态检查
+  if systemctl is-active --quiet "$service_name"; then
+    printf "${SUCCESS_SYMBOL} 服务状态: ${GREEN}运行中${PLAIN}\n"
+  elif systemctl is-failed --quiet "$service_name"; then
+    printf "${ERROR_SYMBOL} 服务状态: ${RED}失败${PLAIN}\n"
+  else
+    printf "${WARN_SYMBOL} 服务状态: ${YELLOW}已停止${PLAIN}\n"
+  fi
+  
+  # 启用状态
+  if systemctl is-enabled --quiet "$service_name" 2>/dev/null; then
+    printf "${SUCCESS_SYMBOL} 开机启动: ${GREEN}已启用${PLAIN}\n"
+  else
+    printf "${WARN_SYMBOL} 开机启动: ${YELLOW}未启用${PLAIN}\n"
+  fi
+  
+  # 重启次数和失败检查
+  local restart_count
+  restart_count=$(systemctl show "$service_name" --property=NRestarts --value 2>/dev/null || echo "0")
+  printf "${INFO_SYMBOL} 重启次数: %s\n" "$restart_count"
+  
+  # 最近日志
+  printf "\n${BLUE}最近日志 (5 条):${PLAIN}\n"
+  journalctl -u "$service_name" --no-pager -n 5 --output=short-precise 2>/dev/null || printf "${WARN_SYMBOL} 无法获取日志${PLAIN}\n"
+}
+
+# 服务自愈功能
+auto_heal_service() {
+  local service_name=$1
+  if [ "$OS_TYPE" != "linux" ] || ! command -v systemctl &>/dev/null; then
+    return 1
+  fi
+  
+  printf "${INFO_SYMBOL} 正在检查 %s 服务健康状态...${PLAIN}\n" "$service_name"
+  
+  if ! systemctl is-active --quiet "$service_name"; then
+    printf "${WARN_SYMBOL} 服务未运行，尝试启动...${PLAIN}\n"
+    if systemctl start "$service_name"; then
+      printf "${SUCCESS_SYMBOL} 服务启动成功${PLAIN}\n"
+    else
+      printf "${ERROR_SYMBOL} 服务启动失败，尝试重置...${PLAIN}\n"
+      systemctl reset-failed "$service_name" 2>/dev/null || true
+      if systemctl start "$service_name"; then
+        printf "${SUCCESS_SYMBOL} 重置后启动成功${PLAIN}\n"
+      else
+        printf "${ERROR_SYMBOL} 服务启动失败，请检查配置${PLAIN}\n"
+        return 1
+      fi
+    fi
+  else
+    printf "${SUCCESS_SYMBOL} 服务运行正常${PLAIN}\n"
+  fi
+}
+
 # 获取公网IP信息 - 使用 ipapi.co 获取完整信息
 get_public_ip() {
   local ipv4="" ipv6="" country="" city="" asn="" isp=""
@@ -336,7 +400,38 @@ apply_gost_config() {
   fi
   
   local svc="${SERVICE_DIR}/gost.service"
-  local content="[Unit]\nDescription=GOST Proxy Service\nAfter=network.target\nWants=network.target\n\n[Service]\nExecStart=/usr/local/bin/gost -C \"$abs\"\nRestart=always\nRestartSec=5\nUser=gost\nGroup=gost\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\nLimitNOFILE=infinity\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\n\n[Install]\nWantedBy=multi-user.target\n"
+  local content="[Unit]
+Description=GOST Proxy Service
+After=network-online.target
+Wants=network-online.target systemd-networkd-wait-online.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gost -C \"$abs\"
+Restart=on-failure
+RestartSec=5s
+User=gost
+Group=gost
+Environment=\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"
+
+# 安全性设置
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log
+
+# 高并发支持
+LimitNOFILE=infinity
+
+# 网络权限
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target"
   
   # 确保用户
   if ! id gost &>/dev/null; then $SUDO useradd --system --no-create-home --shell /bin/false gost || true; fi
@@ -540,12 +635,14 @@ install_realm() {
   
   # 只在 Linux 上创建 systemd 服务
   if [ "$OS_TYPE" = "linux" ]; then
-  if ! id realm &>/dev/null; then $SUDO useradd --system --no-create-home --shell /bin/false realm || true; fi
-  cat <<EOF | $SUDO tee "${SERVICE_DIR}/realm.service" >/dev/null
+    if ! id realm &>/dev/null; then $SUDO useradd --system --no-create-home --shell /bin/false realm || true; fi
+    cat <<EOF | $SUDO tee "${SERVICE_DIR}/realm.service" >/dev/null
 [Unit]
-Description=Realm Service
+Description=Realm Proxy Service
 After=network-online.target
 Wants=network-online.target systemd-networkd-wait-online.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -555,20 +652,28 @@ Restart=on-failure
 RestartSec=5s
 WorkingDirectory=${REALM_DIR}
 ExecStart=${REALM_DIR}/realm -c ${REALM_CONFIG_FILE}
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# 安全性设置
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+ReadWritePaths=/var/log
+
+# 高并发支持
 LimitNOFILE=infinity
+
+# 网络权限
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  $SUDO systemctl daemon-reload
-  $SUDO systemctl enable realm >/dev/null 2>&1 || true
-  $SUDO systemctl restart realm || true
+    $SUDO systemctl daemon-reload
+    $SUDO systemctl enable realm >/dev/null 2>&1 || true
+    $SUDO systemctl restart realm || true
   else
     printf "${INFO_SYMBOL} 非 Linux 环境，跳过 systemd 服务创建${PLAIN}\n"
     printf "${INFO_SYMBOL} 手动启动: %s/realm -c %s${PLAIN}\n" "$REALM_DIR" "$REALM_CONFIG_FILE"
@@ -1036,15 +1141,19 @@ service_menu() {
   detect_os
   printf "\n${BOLD}${BLUE}=== 服务管理 ===${PLAIN}\n"
   
-  if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
-  printf "  1) 启动 gost.service\n"
-  printf "  2) 停止 gost.service\n"
-  printf "  3) 重启 gost.service\n"
-  printf "  4) 查看 gost 日志\n"
-  printf "  5) 启动 realm.service\n"
-  printf "  6) 停止 realm.service\n"
-  printf "  7) 重启 realm.service\n"
-  printf "  8) 查看 realm 日志\n"
+    if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
+    printf "  ${GREEN}GOST 服务:${PLAIN}\n"
+    printf "    1) 启动 gost.service\n"
+    printf "    2) 停止 gost.service\n"
+    printf "    3) 重启 gost.service\n"
+    printf "    4) 查看 gost 状态和日志\n"
+    printf "  ${GREEN}Realm 服务:${PLAIN}\n"
+    printf "    5) 启动 realm.service\n"
+    printf "    6) 停止 realm.service\n"
+    printf "    7) 重启 realm.service\n"
+    printf "    8) 查看 realm 状态和日志\n"
+    printf "  ${BLUE}高级功能:${PLAIN}\n"
+    printf "    9) 服务健康检查和自愈\n"
   else
     printf "  ${YELLOW}1) 手动启动 GOST${PLAIN}\n"
     printf "  ${YELLOW}2) 查看 GOST 配置${PLAIN}\n"
@@ -1055,18 +1164,41 @@ service_menu() {
   printf "选择: "; read -r c
   
   if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
-  case $c in
-    1) $SUDO systemctl start gost || true; ;;
-    2) $SUDO systemctl stop gost || true; ;;
-    3) $SUDO systemctl restart gost || true; ;;
-    4) $SUDO journalctl -u gost --no-pager -n 50 || true; ;;
-    5) $SUDO systemctl start realm || true; ;;
-    6) $SUDO systemctl stop realm || true; ;;
-    7) $SUDO systemctl restart realm || true; ;;
-    8) $SUDO journalctl -u realm --no-pager -n 50 || true; ;;
-    0) return ;;
-    *) printf "${WARN_SYMBOL} 无效选择${PLAIN}\n" ;;
-  esac
+      case $c in
+      1) 
+        printf "${INFO_SYMBOL} 启动 GOST 服务...${PLAIN}\n"
+        $SUDO systemctl start gost && auto_heal_service gost
+        ;;
+      2) 
+        printf "${INFO_SYMBOL} 停止 GOST 服务...${PLAIN}\n"
+        $SUDO systemctl stop gost || true
+        ;;
+      3) 
+        printf "${INFO_SYMBOL} 重启 GOST 服务...${PLAIN}\n"
+        $SUDO systemctl restart gost && auto_heal_service gost
+        ;;
+      4) check_service_health gost ;;
+      5) 
+        printf "${INFO_SYMBOL} 启动 Realm 服务...${PLAIN}\n"
+        $SUDO systemctl start realm && auto_heal_service realm
+        ;;
+      6) 
+        printf "${INFO_SYMBOL} 停止 Realm 服务...${PLAIN}\n"
+        $SUDO systemctl stop realm || true
+        ;;
+      7) 
+        printf "${INFO_SYMBOL} 重启 Realm 服务...${PLAIN}\n"
+        $SUDO systemctl restart realm && auto_heal_service realm
+        ;;
+      8) check_service_health realm ;;
+      9) 
+        printf "${INFO_SYMBOL} 执行服务健康检查和自愈...${PLAIN}\n"
+        auto_heal_service gost
+        auto_heal_service realm
+        ;;
+      0) return ;;
+      *) printf "${WARN_SYMBOL} 无效选择${PLAIN}\n" ;;
+    esac
   else
     case $c in
       1) 
