@@ -40,6 +40,9 @@ REALM_DIR="/root/realm"
 REALM_CONFIG_DIR="/root/.realm"
 REALM_CONFIG_FILE="${REALM_CONFIG_DIR}/config.toml"
 
+# Navigation breadcrumb system
+BREADCRUMB_PATH="Main"
+
 # Common utilities
 show_loading() {
   local pid=$1
@@ -56,6 +59,105 @@ show_loading() {
   done
   printf "\\b\\b\\b\\b\\b"
   printf "${SUCCESS_SYMBOL}${GREEN}%s${PLAIN}\n" "[OK]"
+}
+
+# Enhanced progress bar with percentage
+show_progress() {
+  local current=$1
+  local total=$2
+  local message=${3:-"Processing"}
+  local width=20
+  local percentage=$((current * 100 / total))
+  local filled=$((current * width / total))
+  local empty=$((width - filled))
+  
+  printf "\r%s... [" "$message"
+  printf "%*s" "$filled" | tr ' ' '█'
+  printf "%*s" "$empty" | tr ' ' '░'
+  printf "] %d%%" "$percentage"
+  
+  if [ "$current" -eq "$total" ]; then
+    printf " ${SUCCESS_SYMBOL}\n"
+  fi
+}
+
+# Breadcrumb navigation
+show_breadcrumb() {
+  printf "\n${BOLD}${BLUE}==== %s ====${PLAIN}\n" "$BREADCRUMB_PATH"
+}
+
+set_breadcrumb() {
+  BREADCRUMB_PATH="$1"
+}
+
+# System status dashboard
+show_system_status() {
+  printf "\n${BOLD}${BLUE}==== System Status ====${PLAIN}\n"
+  
+  # Services status
+  local gost_status="${RED}✗ Stopped${PLAIN}"
+  local realm_status="${RED}✗ Stopped${PLAIN}"
+  
+  if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
+    if systemctl is-active --quiet gost 2>/dev/null; then
+      gost_status="${GREEN}✓ Running${PLAIN}"
+    fi
+    if systemctl is-active --quiet realm 2>/dev/null; then
+      realm_status="${GREEN}✓ Running${PLAIN}"
+    fi
+  else
+    gost_status="${YELLOW}Manual${PLAIN}"
+    realm_status="${YELLOW}Manual${PLAIN}"
+  fi
+  
+  printf "Services: GOST %b | Realm %b\n" "$gost_status" "$realm_status"
+  
+  # Rules count
+  local gost_rules=0 realm_rules=0 total_rules=0
+  if [ -f "$GOST_CONFIG_FILE" ]; then
+    gost_rules=$(jq -r '.services[] | select(.forwarder!=null) | .name' "$GOST_CONFIG_FILE" 2>/dev/null | wc -l || echo 0)
+  fi
+  if [ -f "$REALM_CONFIG_FILE" ]; then
+    realm_rules=$(grep -c '^\[\[endpoints\]\]' "$REALM_CONFIG_FILE" 2>/dev/null || echo 0)
+  fi
+  total_rules=$((gost_rules + realm_rules))
+  
+  printf "Rules:    ${BLUE}%d${PLAIN} active (${GREEN}%d GOST${PLAIN}, ${GREEN}%d Realm${PLAIN})\n" "$total_rules" "$gost_rules" "$realm_rules"
+  
+  # Network status
+  local ipv4_status="${RED}✗${PLAIN}" ipv6_status="${RED}✗${PLAIN}"
+  if [ "${PUBLIC_IPV4:-N/A}" != "N/A" ]; then ipv4_status="${GREEN}✓${PLAIN}"; fi
+  if [ "${PUBLIC_IPV6:-N/A}" != "N/A" ]; then ipv6_status="${GREEN}✓${PLAIN}"; fi
+  
+  printf "Network:  IPv4 %b | IPv6 %b\n" "$ipv4_status" "$ipv6_status"
+  
+  # System load (if available)
+  if command -v uptime &>/dev/null; then
+    local load_avg
+    load_avg=$(uptime | sed 's/.*load average: //' | cut -d',' -f1 | tr -d ' ')
+    printf "Load:     ${YELLOW}%s${PLAIN}\n" "${load_avg:-N/A}"
+  fi
+}
+
+# Operation confirmation with preview
+confirm_operation() {
+  local operation="$1"
+  local details="$2"
+  local warning="$3"
+  
+  printf "\n${BOLD}${YELLOW}About to %s:${PLAIN}\n" "$operation"
+  printf "%s\n" "$details"
+  
+  if [ -n "$warning" ]; then
+    printf "\n${WARN_SYMBOL} ${YELLOW}%s${PLAIN}\n" "$warning"
+  fi
+  
+  printf "\nContinue? [y/N]: "
+  read -r confirm
+  case "$confirm" in
+    [yY]|[yY][eE][sS]) return 0 ;;
+    *) printf "${INFO_SYMBOL} Operation cancelled${PLAIN}\n"; return 1 ;;
+  esac
 }
 
 require_cmd() {
@@ -258,15 +360,74 @@ auto_heal_service() {
 }
 
 # 获取公网IP信息 - 分别查询 IPv4 和 IPv6 的完整信息
+# Parallel IPv4 info retrieval
+get_ipv4_info() {
+  local temp_file="/tmp/fwrd_ipv4_$$"
+  if command -v curl &>/dev/null; then
+    local ipv4_info
+    ipv4_info=$(timeout 5 curl -4 -s --max-time 5 "https://ipapi.co/json" 2>/dev/null || true)
+    echo "$ipv4_info" > "$temp_file"
+  fi
+}
+
+# Parallel IPv6 info retrieval  
+get_ipv6_info() {
+  local temp_file="/tmp/fwrd_ipv6_$$"
+  if command -v curl &>/dev/null; then
+    local ipv6=""
+    # Try multiple methods to get IPv6
+    for method in api6_ipify dig_cloudflare ipapi_co; do
+      case $method in
+        "api6_ipify")
+          if [ -z "$ipv6" ]; then
+            ipv6=$(timeout 3 curl -6 -s --max-time 3 "https://api6.ipify.org" 2>/dev/null | grep -E '^[0-9a-fA-F:]+$' || true)
+          fi
+          ;;
+        "dig_cloudflare")
+          if [ -z "$ipv6" ] && command -v dig &>/dev/null; then
+            ipv6=$(timeout 3 dig +short -6 TXT ch whoami.cloudflare @2606:4700:4700::1111 2>/dev/null | tr -d '"' | grep -E '^[0-9a-fA-F:]+$' | head -1 || true)
+          fi
+          ;;
+        "ipapi_co")
+          if [ -z "$ipv6" ]; then
+            ipv6=$(timeout 3 curl -6 -s --max-time 3 "https://ipapi.co/ip" 2>/dev/null | grep -E '^[0-9a-fA-F:]+$' || true)
+          fi
+          ;;
+      esac
+      [ -n "$ipv6" ] && break
+    done
+    
+    # Get IPv6 ASN info if we have an address
+    if [ -n "$ipv6" ] && [ "$ipv6" != "N/A" ]; then
+      local ipv6_info
+      ipv6_info=$(timeout 5 curl -s --max-time 5 "https://ipapi.co/${ipv6}/json" 2>/dev/null || true)
+      echo "$ipv6_info" > "$temp_file"
+    fi
+  fi
+}
+
 get_public_ip() {
   local ipv4="" ipv6="" ipv4_country="" ipv4_city="" ipv4_asn="" ipv4_isp=""
   local ipv6_country="" ipv6_city="" ipv6_asn="" ipv6_isp=""
   
-  # 获取 IPv4 信息和 ASN
-  if command -v curl &>/dev/null; then
-    printf "${INFO_SYMBOL} Getting IPv4 info...\r"
+  printf "${INFO_SYMBOL} Getting network info...\r"
+  
+  # Parallel network detection
+  get_ipv4_info &
+  local ipv4_pid=$!
+  get_ipv6_info &
+  local ipv6_pid=$!
+  
+  # Wait for both to complete
+  wait $ipv4_pid $ipv6_pid
+  
+  # Process IPv4 results
+  if [ -f "/tmp/fwrd_ipv4_$$" ]; then
     local ipv4_info
-    ipv4_info=$(timeout 5 curl -4 -s --max-time 5 "https://ipapi.co/json" 2>/dev/null || true)
+    ipv4_info=$(cat "/tmp/fwrd_ipv4_$$")
+    rm -f "/tmp/fwrd_ipv4_$$"
+    
+    if [ -n "$ipv4_info" ] && echo "$ipv4_info" | grep -q '"ip"'; then
     
     if [ -n "$ipv4_info" ] && echo "$ipv4_info" | grep -q '"ip"'; then
       if command -v jq &>/dev/null; then
@@ -384,23 +545,28 @@ install_gost() {
   if command -v gost &>/dev/null; then
     printf "${SUCCESS_SYMBOL} Detected gost${PLAIN}\n"; return 0; fi
   
-  printf "${INFO_SYMBOL} Installing gost...${PLAIN}\n"
+  # Show installation progress
+  show_progress 1 4 "Installing GOST"
   
   if [ "$OS_TYPE" = "macos" ]; then
-    printf "${WARN_SYMBOL} macOS detected, skipping gost installation${PLAIN}\n"
+    printf "\n${WARN_SYMBOL} macOS detected, skipping gost installation${PLAIN}\n"
     printf "${INFO_SYMBOL} On macOS please install manually: brew install gost or download from GitHub${PLAIN}\n"
     return 0
   fi
   
+  show_progress 2 4 "Installing GOST"
+  
   if command -v curl &>/dev/null; then
     # 检查是否有足够权限
     if [ "$(id -u)" -ne 0 ] && [ -z "$SUDO" ]; then
-      printf "${ERROR_SYMBOL} Installing gost requires root privileges${PLAIN}\n"
+      printf "\n${ERROR_SYMBOL} Installing gost requires root privileges${PLAIN}\n"
       return 1
     fi
     
+    show_progress 3 4 "Installing GOST"
     (bash <(curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh) --install) &
     show_loading $!
+    show_progress 4 4 "Installing GOST"
   else
     printf "${ERROR_SYMBOL} Missing curl, cannot download gost${PLAIN}\n"
     return 1
@@ -950,14 +1116,12 @@ delete_any_rule() {
   
   # 处理 'all' 全部删除
   if [ "$choice" = "all" ]; then
-    printf "${RED}${WARN_SYMBOL} 警告: 这将删除所有 %d 条转发规则！${PLAIN}\n" "$count"
-    printf "${YELLOW}确定要删除所有规则吗? 请输入 'YES' 确认: ${PLAIN}"
-    read -r confirm_all
-    if [ "$confirm_all" = "YES" ]; then
+    local details="All $count forwarding rules will be deleted"
+    local warning="This will restart both GOST and Realm services"
+    if confirm_operation "delete all rules" "$details" "$warning"; then
       delete_all_rules
       return
     else
-      printf "${INFO_SYMBOL} 已取消全部删除${PLAIN}\n"
       return
     fi
   fi
@@ -1160,7 +1324,7 @@ add_new_rule() {
 
 engine_rule_menu() {
   while true; do
-    printf "\n${BOLD}${BLUE}=== Rule Management ===${PLAIN}\n"
+    show_breadcrumb
     printf "  ${GREEN}1) Create Rule${PLAIN}\n"
     printf "  ${BLUE}2) List All Rules${PLAIN}\n"
     printf "  ${YELLOW}3) Delete Rule${PLAIN}\n"
@@ -1406,20 +1570,24 @@ show_environment_info() {
 main_menu() {
   ensure_base_deps
   while true; do
+    set_breadcrumb "FWRD - Main Menu"
+    show_breadcrumb
+    show_system_status
     show_environment_info
-    printf "\n${BOLD}${BLUE}==== FWRD - Unified Forwarding Manager ====${PLAIN}\n"
+    printf "\n${BOLD}${GREEN}==== Menu Options ====${PLAIN}\n"
     printf "  1) Install/Update Engines\n"
     printf "  2) Rule Management (add/list/delete)\n"
     printf "  3) Service Management\n"
     printf "  4) Uninstall\n"
     printf "  ${BLUE}r) Refresh network info${PLAIN}\n"
-    printf "  0) Exit\n"}
+    printf "  ${BLUE}s) Show system status${PLAIN}\n"
+    printf "  0) Exit\n"
     printf "Choice: "; read -r c
     case $c in
-      1) install_or_update_menu ;;
-      2) engine_rule_menu ;;
-      3) service_menu ;;
-      4) uninstall_menu ;;
+      1) set_breadcrumb "FWRD > Install/Update"; install_or_update_menu ;;
+      2) set_breadcrumb "FWRD > Rule Management"; engine_rule_menu ;;
+      3) set_breadcrumb "FWRD > Service Management"; service_menu ;;
+      4) set_breadcrumb "FWRD > Uninstall"; uninstall_menu ;;
       r|R) 
         printf "${INFO_SYMBOL} Refreshing network information...\n"
         unset PUBLIC_IPV4 PUBLIC_IPV6 PUBLIC_IPV4_COUNTRY PUBLIC_IPV4_CITY PUBLIC_IPV4_ASN PUBLIC_IPV4_ISP
@@ -1428,8 +1596,13 @@ main_menu() {
         printf "${SUCCESS_SYMBOL} Network information refreshed${PLAIN}\n"
         sleep 1
         ;;
+      s|S)
+        clear
+        show_system_status
+        pause_any
+        ;;
       0) printf "${SUCCESS_SYMBOL} Goodbye${PLAIN}\n"; exit 0 ;;
-      *) printf "${WARN_SYMBOL} 无效选择${PLAIN}\n"; ;;
+      *) printf "${WARN_SYMBOL} Invalid choice${PLAIN}\n"; ;;
     esac
   done
 }
