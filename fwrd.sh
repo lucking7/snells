@@ -60,7 +60,7 @@ show_loading() {
 
 require_cmd() {
   if ! command -v "$1" &>/dev/null; then
-    printf "${ERROR_SYMBOL} 缺少命令: %s，请先安装。${PLAIN}\n" "$1"
+    printf "${ERROR_SYMBOL} Missing command: %s. Please install it first.${PLAIN}\n" "$1"
     return 1
   fi
 }
@@ -79,7 +79,7 @@ install_pkgs() {
   local pkgs=("$@")
   if [ ${#pkgs[@]} -eq 0 ]; then return 0; fi
   if ! detect_pkg_manager; then
-    printf "${WARN_SYMBOL} 未找到包管理器，请手动安装: %s${PLAIN}\n" "${pkgs[*]}"
+    printf "${WARN_SYMBOL} No package manager detected. Please install manually: %s${PLAIN}\n" "${pkgs[*]}"
     return 1
   fi
   
@@ -136,22 +136,22 @@ ensure_base_deps() {
   # 安装缺失的工具
   if [ ${#critical_miss[@]} -gt 0 ] || [ ${#optional_miss[@]} -gt 0 ]; then
     local all_miss=("${critical_miss[@]}" "${optional_miss[@]}")
-    printf "${INFO_SYMBOL} 检测到缺失工具: %s${PLAIN}\n" "${all_miss[*]}"
+    printf "${INFO_SYMBOL} Missing tools detected: %s${PLAIN}\n" "${all_miss[*]}"
     
     if detect_pkg_manager; then
-      printf "${INFO_SYMBOL} 尝试使用 %s 自动安装...${PLAIN}\n" "$pkg_manager"
+      printf "${INFO_SYMBOL} Attempting automatic installation with %s...${PLAIN}\n" "$pkg_manager"
       install_pkgs "${all_miss[@]}" || true
     else
-      printf "${WARN_SYMBOL} 无可用包管理器，请手动安装缺失工具${PLAIN}\n"
+      printf "${WARN_SYMBOL} No package manager available. Please install missing tools manually.${PLAIN}\n"
     fi
   fi
   
   # 最终检查关键工具
   for c in "${need[@]}"; do 
     if ! command -v "$c" &>/dev/null; then
-      printf "${ERROR_SYMBOL} 关键工具仍然缺失: %s${PLAIN}\n" "$c"
+      printf "${ERROR_SYMBOL} Critical tool still missing: %s${PLAIN}\n" "$c"
       if [ "$OS_TYPE" = "macos" ] && [ "$c" = "systemctl" ]; then
-        printf "${WARN_SYMBOL} macOS 上 systemctl 不可用，服务管理功能将被禁用${PLAIN}\n"
+        printf "${WARN_SYMBOL} systemctl is not available on macOS; service management features will be disabled.${PLAIN}\n"
         continue
       fi
       return 1
@@ -191,7 +191,7 @@ find_free_port() {
   fi
 }
 
-pause_any() { read -n1 -r -p "按任意键继续..."; echo; }
+pause_any() { read -n1 -r -p "Press any key to continue..."; echo; }
 
 # 检查服务状态和健康度
 check_service_health() {
@@ -236,19 +236,19 @@ auto_heal_service() {
     return 1
   fi
   
-  printf "${INFO_SYMBOL} 正在检查 %s 服务健康状态...${PLAIN}\n" "$service_name"
+  printf "${INFO_SYMBOL} Checking health for service %s...${PLAIN}\n" "$service_name"
   
   if ! systemctl is-active --quiet "$service_name"; then
-    printf "${WARN_SYMBOL} 服务未运行，尝试启动...${PLAIN}\n"
+    printf "${WARN_SYMBOL} Service not running, attempting to start...${PLAIN}\n"
     if systemctl start "$service_name"; then
-      printf "${SUCCESS_SYMBOL} 服务启动成功${PLAIN}\n"
+      printf "${SUCCESS_SYMBOL} Service started successfully${PLAIN}\n"
     else
-      printf "${ERROR_SYMBOL} 服务启动失败，尝试重置...${PLAIN}\n"
+      printf "${ERROR_SYMBOL} Service failed to start, attempting reset...${PLAIN}\n"
       systemctl reset-failed "$service_name" 2>/dev/null || true
       if systemctl start "$service_name"; then
-        printf "${SUCCESS_SYMBOL} 重置后启动成功${PLAIN}\n"
+        printf "${SUCCESS_SYMBOL} Started successfully after reset${PLAIN}\n"
       else
-        printf "${ERROR_SYMBOL} 服务启动失败，请检查配置${PLAIN}\n"
+        printf "${ERROR_SYMBOL} Service failed to start, please check configuration${PLAIN}\n"
         return 1
       fi
     fi
@@ -381,33 +381,33 @@ ensure_gost_layout() {
 
 install_gost() {
   if command -v gost &>/dev/null; then
-    printf "${SUCCESS_SYMBOL} 已检测到gost${PLAIN}\n"; return 0; fi
+    printf "${SUCCESS_SYMBOL} Detected gost${PLAIN}\n"; return 0; fi
   
-  printf "${INFO_SYMBOL} 安装gost...${PLAIN}\n"
+  printf "${INFO_SYMBOL} Installing gost...${PLAIN}\n"
   
   if [ "$OS_TYPE" = "macos" ]; then
-    printf "${WARN_SYMBOL} macOS 环境检测到，跳过 gost 安装${PLAIN}\n"
-    printf "${INFO_SYMBOL} 在 macOS 上请手动安装: brew install gost 或从 GitHub 下载${PLAIN}\n"
+    printf "${WARN_SYMBOL} macOS detected, skipping gost installation${PLAIN}\n"
+    printf "${INFO_SYMBOL} On macOS please install manually: brew install gost or download from GitHub${PLAIN}\n"
     return 0
   fi
   
   if command -v curl &>/dev/null; then
     # 检查是否有足够权限
     if [ "$(id -u)" -ne 0 ] && [ -z "$SUDO" ]; then
-      printf "${ERROR_SYMBOL} 安装 gost 需要 root 权限${PLAIN}\n"
+      printf "${ERROR_SYMBOL} Installing gost requires root privileges${PLAIN}\n"
       return 1
     fi
     
     (bash <(curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh) --install) &
     show_loading $!
   else
-    printf "${ERROR_SYMBOL} 缺少 curl，无法下载 gost${PLAIN}\n"
+    printf "${ERROR_SYMBOL} Missing curl, cannot download gost${PLAIN}\n"
     return 1
   fi
   
   if ! command -v gost &>/dev/null; then
-    printf "${ERROR_SYMBOL} gost安装失败，请手动安装。${PLAIN}\n"; return 1; fi
-  printf "${SUCCESS_SYMBOL} gost安装完成${PLAIN}\n"
+    printf "${ERROR_SYMBOL} gost installation failed, please install manually.${PLAIN}\n"; return 1; fi
+  printf "${SUCCESS_SYMBOL} gost installation completed${PLAIN}\n"
 }
 
 apply_gost_config() {
@@ -415,9 +415,9 @@ apply_gost_config() {
   if ! command -v gost &>/dev/null; then install_gost || return 1; fi
   
   if [ "$OS_TYPE" = "macos" ]; then
-    printf "${WARN_SYMBOL} macOS 环境，跳过 systemd 服务创建${PLAIN}\n"
-    printf "${INFO_SYMBOL} 配置已更新到: %s${PLAIN}\n" "$GOST_CONFIG_FILE"
-    printf "${INFO_SYMBOL} 手动启动: gost -C \"%s\"${PLAIN}\n" "$GOST_CONFIG_FILE"
+    printf "${WARN_SYMBOL} Non-Linux environment, skipping systemd service creation${PLAIN}\n"
+    printf "${INFO_SYMBOL} Configuration updated: %s${PLAIN}\n" "$GOST_CONFIG_FILE"
+    printf "${INFO_SYMBOL} Manual start: gost -C \"%s\"${PLAIN}\n" "$GOST_CONFIG_FILE"
     return 0
   fi
   
@@ -469,9 +469,9 @@ WantedBy=multi-user.target"
   $SUDO systemctl daemon-reload
   $SUDO systemctl enable gost >/dev/null 2>&1 || true
   if $SUDO systemctl restart gost; then
-    printf "${SUCCESS_SYMBOL} gost.service 已启动${PLAIN}\n"
+    printf "${SUCCESS_SYMBOL} gost.service started${PLAIN}\n"
   else
-    printf "${ERROR_SYMBOL} gost.service 启动失败${PLAIN}\n"
+    printf "${ERROR_SYMBOL} gost.service failed to start${PLAIN}\n"
     $SUDO journalctl -u gost --no-pager -n 20 || true
     return 1
   fi
@@ -479,13 +479,17 @@ WantedBy=multi-user.target"
 
 add_gost_rule() {
   ensure_gost_layout
-  printf "${INFO_SYMBOL} 选择协议: 1) TCP 2) UDP 3) 同时 (默认3): ${PLAIN}"; read -r psel; psel=${psel:-3}
+  printf "${INFO_SYMBOL} Select protocol:\n"
+  printf "    1) TCP\n"
+  printf "    2) UDP\n"
+  printf "    3) Both ${YELLOW}(default)${PLAIN}\n"
+  printf "Choice [1-3]: "; read -r psel; psel=${psel:-3}
   local proto="tcp-udp"; case $psel in 1) proto="tcp";; 2) proto="udp";; esac
-  printf "${INFO_SYMBOL} 本地端口(留空随机): ${PLAIN}"; read -r lp
-  if [ -z "$lp" ]; then lp=$(find_free_port); printf "${INFO_SYMBOL} 选择端口: %s${PLAIN}\n" "$lp"; fi
-  validate_port "$lp" || { printf "${ERROR_SYMBOL} 端口无效${PLAIN}\n"; return 1; }
-  printf "${INFO_SYMBOL} 目标IP/域名: ${PLAIN}"; read -r rip; validate_host "$rip" || { printf "${ERROR_SYMBOL} 地址无效${PLAIN}\n"; return 1; }
-  printf "${INFO_SYMBOL} 目标端口: ${PLAIN}"; read -r rp; validate_port "$rp" || { printf "${ERROR_SYMBOL} 端口无效${PLAIN}\n"; return 1; }
+  printf "${INFO_SYMBOL} Local port (empty for random): ${PLAIN}"; read -r lp
+  if [ -z "$lp" ]; then lp=$(find_free_port); printf "${INFO_SYMBOL} Selected port: %s${PLAIN}\n" "$lp"; fi
+  validate_port "$lp" || { printf "${ERROR_SYMBOL} Invalid port${PLAIN}\n"; return 1; }
+  printf "${INFO_SYMBOL} Target IP/Domain: ${PLAIN}"; read -r rip; validate_host "$rip" || { printf "${ERROR_SYMBOL} Invalid address${PLAIN}\n"; return 1; }
+  printf "${INFO_SYMBOL} Target port: ${PLAIN}"; read -r rp; validate_port "$rp" || { printf "${ERROR_SYMBOL} Invalid port${PLAIN}\n"; return 1; }
   if [[ $rip == *:* ]] && [[ $rip != \[*\]* ]]; then rip="[$rip]"; fi
   local listen=":$lp" target="${rip}:${rp}"
   local name_base="fwrd-${lp}-to-${rp}"; local nodes_json="[{\"name\":\"target-0\",\"addr\":\"$target\"}]"
@@ -502,28 +506,28 @@ add_gost_rule() {
       '.services += [{name:$sn, addr:$a, handler:{type:$p}, listener:{type:$p}, forwarder:{nodes:[{name:"target-0", addr:$n0}]}}]' \
       "$GOST_CONFIG_FILE" > "$tmp"
   fi
-  jq empty "$tmp" >/dev/null 2>&1 || { printf "${ERROR_SYMBOL} JSON生成失败${PLAIN}\n"; rm -f "$tmp"; return 1; }
+  jq empty "$tmp" >/dev/null 2>&1 || { printf "${ERROR_SYMBOL} JSON generation failed${PLAIN}\n"; rm -f "$tmp"; return 1; }
   $SUDO mv "$tmp" "$GOST_CONFIG_FILE"; $SUDO chmod 644 "$GOST_CONFIG_FILE"
   apply_gost_config
 }
 
 list_gost_rules() {
-  if [ ! -f "$GOST_CONFIG_FILE" ]; then printf "${WARN_SYMBOL} 无gost配置${PLAIN}\n"; return; fi
-  printf "${BLUE}GOST 规则：${PLAIN}\n"
+  if [ ! -f "$GOST_CONFIG_FILE" ]; then printf "${WARN_SYMBOL} No GOST config found${PLAIN}\n"; return; fi
+  printf "${BLUE}GOST Rules:${PLAIN}\n"
   jq -r '.services[] | select(.forwarder!=null) | [.name,.addr, (.forwarder.nodes[0].addr//""), (.handler.type//"")] | @tsv' "$GOST_CONFIG_FILE" 2>/dev/null \
     | awk 'BEGIN{FS="\t"; printf "%-3s %-35s %-18s %-24s %-6s\n","#","Name","Listen","Target","Proto"; print "--------------------------------------------------------------------------------"} {printf "%-3d %-35s %-18s %-24s %-6s\n", NR,$1,$2,$3,$4}'
 }
 
 delete_gost_rule() {
-  if [ ! -f "$GOST_CONFIG_FILE" ]; then printf "${WARN_SYMBOL} 无gost配置${PLAIN}\n"; return; fi
+  if [ ! -f "$GOST_CONFIG_FILE" ]; then printf "${WARN_SYMBOL} No GOST config found${PLAIN}\n"; return; fi
   mapfile -t L < <(jq -r '.services[] | select(.forwarder!=null) | .name' "$GOST_CONFIG_FILE")
   if [ ${#L[@]} -eq 0 ]; then printf "${WARN_SYMBOL} 没有规则${PLAIN}\n"; return; fi
   for i in "${!L[@]}"; do printf "%d) %s\n" "$((i+1))" "${L[$i]}"; done
-  printf "选择删除编号: "; read -r idx
-  [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le ${#L[@]} ] || { printf "${ERROR_SYMBOL} 无效选择${PLAIN}\n"; return; }
+  printf "Choose a rule number to delete: "; read -r idx
+  [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le ${#L[@]} ] || { printf "${ERROR_SYMBOL} Invalid choice${PLAIN}\n"; return; }
   local name="${L[$((idx-1))]}"
   local tmp=$(mktemp)
-  jq --arg n "$name" '.services = [.services[] | select(.name!=$n)]' "$GOST_CONFIG_FILE" > "$tmp" || { rm -f "$tmp"; printf "${ERROR_SYMBOL} 更新失败${PLAIN}\n"; return; }
+  jq --arg n "$name" '.services = [.services[] | select(.name!=$n)]' "$GOST_CONFIG_FILE" > "$tmp" || { rm -f "$tmp"; printf "${ERROR_SYMBOL} Update failed${PLAIN}\n"; return; }
   $SUDO mv "$tmp" "$GOST_CONFIG_FILE"
   apply_gost_config
 }
@@ -553,7 +557,7 @@ install_realm() {
         printf "${SUCCESS_SYMBOL} realm 通过 brew 安装成功${PLAIN}\n"
         return 0
       else
-        printf "${WARN_SYMBOL} brew 安装失败，尝试手动下载...${PLAIN}\n"
+        printf "${WARN_SYMBOL} brew installation failed, trying manual download...${PLAIN}\n"
       fi
     fi
     
@@ -582,7 +586,7 @@ install_realm() {
         printf "${SUCCESS_SYMBOL} realm 安装成功${PLAIN}\n"
         return 0
       else
-        printf "${ERROR_SYMBOL} realm 安装失败${PLAIN}\n"
+        printf "${ERROR_SYMBOL} realm installation failed${PLAIN}\n"
         return 1
       fi
     else
@@ -639,7 +643,7 @@ install_realm() {
   fi
   
   if [ "$download_success" = false ]; then
-    printf "${ERROR_SYMBOL} 下载失败${PLAIN}\n"
+    printf "${ERROR_SYMBOL} Download failed${PLAIN}\n"
     return 1
   fi
   
@@ -659,7 +663,7 @@ install_realm() {
       return 1
     fi
   else
-    printf "${ERROR_SYMBOL} 解压失败${PLAIN}\n"
+    printf "${ERROR_SYMBOL} Extraction failed${PLAIN}\n"
     return 1
   fi
   
@@ -712,18 +716,22 @@ EOF
 
 add_realm_rule() {
   ensure_realm_layout; install_realm || true
-  printf "${INFO_SYMBOL} 选择协议: 1) TCP 2) UDP 3) 同时 (默认3): ${PLAIN}"; read -r psel; psel=${psel:-3}
+  printf "${INFO_SYMBOL} Select protocol:\n"
+  printf "    1) TCP\n"
+  printf "    2) UDP\n"
+  printf "    3) Both ${YELLOW}(default)${PLAIN}\n"
+  printf "Choice [1-3]: "; read -r psel; psel=${psel:-3}
   local use_tcp=true use_udp=true
   case $psel in 1) use_udp=false;; 2) use_tcp=false;; esac
-  printf "${INFO_SYMBOL} 本地端口(留空随机): ${PLAIN}"; read -r lp
-  if [ -z "$lp" ]; then lp=$(find_free_port); printf "${INFO_SYMBOL} 选择端口: %s${PLAIN}\n" "$lp"; fi
-  validate_port "$lp" || { printf "${ERROR_SYMBOL} 端口无效${PLAIN}\n"; return 1; }
+  printf "${INFO_SYMBOL} Local port (empty for random): ${PLAIN}"; read -r lp
+  if [ -z "$lp" ]; then lp=$(find_free_port); printf "${INFO_SYMBOL} Selected port: %s${PLAIN}\n" "$lp"; fi
+  validate_port "$lp" || { printf "${ERROR_SYMBOL} Invalid port${PLAIN}\n"; return 1; }
   printf "${INFO_SYMBOL} 监听地址版本: 1) IPv4(0.0.0.0) 2) IPv6([::]) (默认1): ${PLAIN}"; read -r ipver; ipver=${ipver:-1}
   local listen="0.0.0.0"; [ "$ipver" = "2" ] && listen="[::]"
-  printf "${INFO_SYMBOL} 目标IP/域名: ${PLAIN}"; read -r rip; validate_host "$rip" || { printf "${ERROR_SYMBOL} 地址无效${PLAIN}\n"; return 1; }
-  printf "${INFO_SYMBOL} 目标端口: ${PLAIN}"; read -r rp; validate_port "$rp" || { printf "${ERROR_SYMBOL} 端口无效${PLAIN}\n"; return 1; }
+  printf "${INFO_SYMBOL} Target IP/Domain: ${PLAIN}"; read -r rip; validate_host "$rip" || { printf "${ERROR_SYMBOL} Invalid address${PLAIN}\n"; return 1; }
+  printf "${INFO_SYMBOL} Target port: ${PLAIN}"; read -r rp; validate_port "$rp" || { printf "${ERROR_SYMBOL} Invalid port${PLAIN}\n"; return 1; }
   local remark
-  printf "${INFO_SYMBOL} 备注(可选): ${PLAIN}"; read -r remark; remark=${remark:-"Forward"}
+  printf "${INFO_SYMBOL} Remark (optional): ${PLAIN}"; read -r remark; remark=${remark:-"Forward"}
   cat <<EOF | $SUDO tee -a "$REALM_CONFIG_FILE" >/dev/null
 
 [[endpoints]]
@@ -735,16 +743,16 @@ use_udp = ${use_udp}
 EOF
   if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
   $SUDO systemctl restart realm || true
-  printf "${SUCCESS_SYMBOL} 已添加Realm规则并重启服务${PLAIN}\n"
+  printf "${SUCCESS_SYMBOL} Realm rule added and service restarted${PLAIN}\n"
   else
-    printf "${SUCCESS_SYMBOL} 已添加Realm规则${PLAIN}\n"
-    printf "${INFO_SYMBOL} 手动重启: %s/realm -c %s${PLAIN}\n" "$REALM_DIR" "$REALM_CONFIG_FILE"
+    printf "${SUCCESS_SYMBOL} Realm rule added${PLAIN}\n"
+    printf "${INFO_SYMBOL} Manual restart: %s/realm -c %s${PLAIN}\n" "$REALM_DIR" "$REALM_CONFIG_FILE"
   fi
 }
 
 list_realm_rules() {
-  if [ ! -f "$REALM_CONFIG_FILE" ]; then printf "${WARN_SYMBOL} 无realm配置${PLAIN}\n"; return; fi
-  printf "${BLUE}Realm 规则：${PLAIN}\n"
+  if [ ! -f "$REALM_CONFIG_FILE" ]; then printf "${WARN_SYMBOL} No Realm config found${PLAIN}\n"; return; fi
+  printf "${BLUE}Realm Rules:${PLAIN}\n"
   awk '
     BEGIN{idx=0; in=0; printf "%-3s %-18s %-24s %-6s %-6s\n","#","Listen","Remote","TCP","UDP"; print "-----------------------------------------------------------"}
     /^\[\[endpoints\]\]/{in=1; l=""; r=""; t=""; u=""; next}
@@ -756,14 +764,14 @@ list_realm_rules() {
 }
 
 delete_realm_rule() {
-  if [ ! -f "$REALM_CONFIG_FILE" ]; then printf "${WARN_SYMBOL} 无realm配置${PLAIN}\n"; return; fi
+  if [ ! -f "$REALM_CONFIG_FILE" ]; then printf "${WARN_SYMBOL} No Realm config found${PLAIN}\n"; return; fi
   # 生成块索引
   mapfile -t starts < <(nl -ba "$REALM_CONFIG_FILE" | grep "\[\[endpoints\]\]" | awk '{print $1}')
-  if [ ${#starts[@]} -eq 0 ]; then printf "${WARN_SYMBOL} 无规则${PLAIN}\n"; return; fi
+  if [ ${#starts[@]} -eq 0 ]; then printf "${WARN_SYMBOL} No rules found${PLAIN}\n"; return; fi
   # 粗略列出
   list_realm_rules
-  printf "选择删除编号: "; read -r idx
-  [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le ${#starts[@]} ] || { printf "${ERROR_SYMBOL} 无效选择${PLAIN}\n"; return; }
+  printf "Choose a rule number to delete: "; read -r idx
+  [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le ${#starts[@]} ] || { printf "${ERROR_SYMBOL} Invalid choice${PLAIN}\n"; return; }
   local s=${starts[$((idx-1))]}
   # 查找下一个块或文件末尾
   local e; e=$(nl -ba "$REALM_CONFIG_FILE" | awk -v S=$s 'NR>S && /\[\[endpoints\]\]/{print $1; exit}')
@@ -774,23 +782,23 @@ delete_realm_rule() {
 }
 # -------------------- 统一菜单与卸载 --------------------
 install_or_update_menu() {
-  printf "\n${BOLD}${BLUE}=== 安装/升级 引擎 ===${PLAIN}\n"
-  printf "  1) 安装/升级 GOST\n"
-  printf "  2) 安装/升级 Realm\n"
-  printf "  0) 返回\n"
-  printf "选择: "; read -r c
+  printf "\n${BOLD}${BLUE}=== Install/Update Engines ===${PLAIN}\n"
+  printf "  1) Install/Update GOST\n"
+  printf "  2) Install/Update Realm\n"
+  printf "  0) Back\n"
+  printf "Choice: "; read -r c
   case $c in
     1) ensure_gost_layout; install_gost; pause_any ;;
     2) ensure_realm_layout; install_realm; pause_any ;;
     0) return ;;
-    *) printf "${WARN_SYMBOL} 无效选择${PLAIN}\n"; pause_any ;;
+    *) printf "${WARN_SYMBOL} Invalid choice${PLAIN}\n"; pause_any ;;
   esac
 }
 
 # 统一规则列表显示
 list_all_rules() {
-  printf "\n${BOLD}${BLUE}=== 所有转发规则 ===${PLAIN}\n"
-  printf "%-3s %-8s %-35s %-18s %-24s %-8s %-10s\n" "#" "引擎" "名称/备注" "监听地址" "目标地址" "协议" "状态"
+  printf "\n${BOLD}${BLUE}=== All Forwarding Rules ===${PLAIN}\n"
+  printf "%-3s %-8s %-35s %-18s %-24s %-8s %-10s\n" "#" "Engine" "Name/Remark" "Listen" "Target" "Proto" "Status"
   printf "%s\n" "----------------------------------------------------------------------------------------"
   
   local count=0
@@ -800,15 +808,15 @@ list_all_rules() {
     while IFS="|" read -r name listen_addr target_addr proto; do
       if [ -n "$name" ]; then
         count=$((count + 1))
-        local status="未知"
+        local status="Unknown"
         if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
           if systemctl is-active --quiet gost 2>/dev/null; then
-            status="${GREEN}运行中${PLAIN}"
+            status="${GREEN}Running${PLAIN}"
           else
-            status="${RED}已停止${PLAIN}"
+            status="${RED}Stopped${PLAIN}"
           fi
         else
-          status="${YELLOW}手动${PLAIN}"
+          status="${YELLOW}Manual${PLAIN}"
         fi
         # 清理目标地址，移除可能的警告信息和特殊字符
         target_addr=$(echo "$target_addr" | sed 's/⚠️.*$//' | sed 's/[[:space:]]*$//')
@@ -854,8 +862,8 @@ delete_any_rule() {
   local rule_names=()
   local count=0
   
-  printf "\n${BOLD}${BLUE}=== 删除转发规则 ===${PLAIN}\n"
-  printf "%-3s %-8s %-35s %-18s %-24s %-8s\n" "#" "引擎" "名称/备注" "监听地址" "目标地址" "协议"
+  printf "\n${BOLD}${BLUE}=== Delete Forwarding Rules ===${PLAIN}\n"
+  printf "%-3s %-8s %-35s %-18s %-24s %-8s\n" "#" "Engine" "Name/Remark" "Listen" "Target" "Proto"
   printf "%s\n" "--------------------------------------------------------------------------------"
   
   # 收集 GOST 规则
@@ -1129,32 +1137,37 @@ count_total_rules() {
 
 # 新建规则选择引擎
 add_new_rule() {
-  printf "\n${BOLD}${BLUE}=== 新建转发规则 ===${PLAIN}\n"
-  printf "请选择转发引擎:\n"
-  printf "  ${GREEN}1) GOST${PLAIN} - 功能丰富，支持多种协议和端口范围\n"
-  printf "  ${GREEN}2) Realm${PLAIN} - 轻量高效，支持 TCP/UDP 分离转发\n"
-  printf "  0) 返回\n"
-  printf "选择: "; read -r engine_choice
+  printf "\n${BOLD}${BLUE}=== Create New Forwarding Rule ===${PLAIN}\n"
+  # Default on Enter: prefer GOST if installed; otherwise Realm if installed
+  local default_engine=""
+  if command -v gost &>/dev/null; then default_engine="1"; fi
+  if [ -z "$default_engine" ] && [ -x "${REALM_DIR}/realm" ]; then default_engine="2"; fi
+  printf "Please select forwarding engine:\n"
+  printf "  1) GOST - Feature-rich, supports multiple protocols and port ranges\n"
+  printf "  2) Realm - Lightweight and efficient, supports TCP/UDP separate forwarding\n"
+  printf "  0) Back\n"
+  printf "Choice%s ": "${default_engine:+ [default: ${default_engine}]}"; read -r engine_choice
+  engine_choice=${engine_choice:-$default_engine}
   
-  case $engine_choice in
+  case ${engine_choice:-0} in
     1) add_gost_rule ;;
     2) add_realm_rule ;;
-    0) return ;;
-    *) printf "${WARN_SYMBOL} 无效选择${PLAIN}\n"; pause_any ;;
+    0|"") return ;;
+    *) printf "${WARN_SYMBOL} Invalid choice${PLAIN}\n"; pause_any ;;
   esac
 }
 
 engine_rule_menu() {
   while true; do
-    printf "\n${BOLD}${BLUE}=== 规则管理 ===${PLAIN}\n"
-    printf "  ${GREEN}1) 新建规则${PLAIN} (选择引擎)\n"
-    printf "  ${BLUE}2) 列出所有规则${PLAIN} (统一显示)\n"
-    printf "  ${YELLOW}3) 删除规则${PLAIN} (直接选择编号)\n"
+    printf "\n${BOLD}${BLUE}=== Rule Management ===${PLAIN}\n"
+    printf "  ${GREEN}1) Create Rule${PLAIN}\n"
+    printf "  ${BLUE}2) List All Rules${PLAIN}\n"
+    printf "  ${YELLOW}3) Delete Rule${PLAIN}\n"
     printf "  ${BLUE}━━━━━━━━━━━━━━━━━━━━━━${PLAIN}\n"
-    printf "  ${BLUE}4) 列出 GOST 规则${PLAIN} (单独查看)\n"
-    printf "  ${BLUE}5) 列出 Realm 规则${PLAIN} (单独查看)\n"
-    printf "  0) 返回主菜单\n"
-    printf "选择: "; read -r c
+    printf "  ${BLUE}4) List GOST Rules${PLAIN}\n"
+    printf "  ${BLUE}5) List Realm Rules${PLAIN}\n"
+    printf "  0) Back to Main\n"
+    printf "Choice: "; read -r c
     case $c in
       1) add_new_rule; pause_any ;;
       2) list_all_rules; pause_any ;;
@@ -1162,36 +1175,36 @@ engine_rule_menu() {
       4) list_gost_rules; pause_any ;;
       5) list_realm_rules; pause_any ;;
       0) return ;;
-      *) printf "${WARN_SYMBOL} 无效选择${PLAIN}\n"; pause_any ;;
+      *) printf "${WARN_SYMBOL} Invalid choice${PLAIN}\n"; pause_any ;;
     esac
   done
 }
 
 service_menu() {
   detect_os
-  printf "\n${BOLD}${BLUE}=== 服务管理 ===${PLAIN}\n"
+  printf "\n${BOLD}${BLUE}=== Service Management ===${PLAIN}\n"
   
     if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
-    printf "  ${GREEN}GOST 服务:${PLAIN}\n"
-    printf "    1) 启动 gost.service\n"
-    printf "    2) 停止 gost.service\n"
-    printf "    3) 重启 gost.service\n"
-    printf "    4) 查看 gost 状态和日志\n"
-    printf "  ${GREEN}Realm 服务:${PLAIN}\n"
-    printf "    5) 启动 realm.service\n"
-    printf "    6) 停止 realm.service\n"
-    printf "    7) 重启 realm.service\n"
-    printf "    8) 查看 realm 状态和日志\n"
-    printf "  ${BLUE}高级功能:${PLAIN}\n"
-    printf "    9) 服务健康检查和自愈\n"
+    printf "  ${GREEN}GOST Service:${PLAIN}\n"
+    printf "    1) Start gost.service\n"
+    printf "    2) Stop gost.service\n"
+    printf "    3) Restart gost.service\n"
+    printf "    4) View gost status and logs\n"
+    printf "  ${GREEN}Realm Service:${PLAIN}\n"
+    printf "    5) Start realm.service\n"
+    printf "    6) Stop realm.service\n"
+    printf "    7) Restart realm.service\n"
+    printf "    8) View realm status and logs\n"
+    printf "  ${BLUE}Advanced:${PLAIN}\n"
+    printf "    9) Service health check & auto-heal\n"
   else
-    printf "  ${YELLOW}1) 手动启动 GOST${PLAIN}\n"
-    printf "  ${YELLOW}2) 查看 GOST 配置${PLAIN}\n"
-    printf "  ${YELLOW}3) 手动启动 Realm${PLAIN}\n"
-    printf "  ${YELLOW}4) 查看 Realm 配置${PLAIN}\n"
+    printf "  ${YELLOW}1) Manual start GOST${PLAIN}\n"
+    printf "  ${YELLOW}2) View GOST config${PLAIN}\n"
+    printf "  ${YELLOW}3) Manual start Realm${PLAIN}\n"
+    printf "  ${YELLOW}4) View Realm config${PLAIN}\n"
   fi
-  printf "  0) 返回\n"
-  printf "选择: "; read -r c
+  printf "  0) Back\n"
+  printf "Choice: "; read -r c
   
   if [ "$OS_TYPE" = "linux" ] && command -v systemctl &>/dev/null; then
       case $c in
@@ -1227,7 +1240,7 @@ service_menu() {
         auto_heal_service realm
         ;;
       0) return ;;
-      *) printf "${WARN_SYMBOL} 无效选择${PLAIN}\n" ;;
+      *) printf "${WARN_SYMBOL} Invalid choice${PLAIN}\n" ;;
     esac
   else
     case $c in
@@ -1272,18 +1285,18 @@ service_menu() {
         fi
         ;;
       0) return ;;
-      *) printf "${WARN_SYMBOL} 无效选择${PLAIN}\n" ;;
+      *) printf "${WARN_SYMBOL} Invalid choice${PLAIN}\n" ;;
     esac
   fi
   pause_any
 }
 
 uninstall_menu() {
-  printf "\n${BOLD}${BLUE}=== 卸载 ===${PLAIN}\n"
-  printf "  1) 卸载 GOST (移除服务与配置)\n"
-  printf "  2) 卸载 Realm (移除服务与目录)\n"
-  printf "  0) 返回\n"
-  printf "选择: "; read -r c
+  printf "\n${BOLD}${BLUE}=== Uninstall ===${PLAIN}\n"
+  printf "  1) Uninstall GOST (remove service & config)\n"
+  printf "  2) Uninstall Realm (remove service & directories)\n"
+  printf "  0) Back\n"
+  printf "Choice: "; read -r c
   case $c in
     1)
       $SUDO systemctl stop gost || true
@@ -1292,7 +1305,7 @@ uninstall_menu() {
       $SUDO systemctl daemon-reload || true
       $SUDO rm -rf "$GOST_CONFIG_DIR" || true
       if command -v gost &>/dev/null; then $SUDO rm -f "$(command -v gost)" || true; fi
-      printf "${SUCCESS_SYMBOL} GOST 已卸载${PLAIN}\n";
+      printf "${SUCCESS_SYMBOL} GOST uninstalled${PLAIN}\n";
       ;;
     2)
       $SUDO systemctl stop realm || true
@@ -1300,10 +1313,10 @@ uninstall_menu() {
       $SUDO rm -f "${SERVICE_DIR}/realm.service" || true
       $SUDO systemctl daemon-reload || true
       $SUDO rm -rf "$REALM_DIR" "$REALM_CONFIG_DIR" || true
-      printf "${SUCCESS_SYMBOL} Realm 已卸载${PLAIN}\n";
+      printf "${SUCCESS_SYMBOL} Realm uninstalled${PLAIN}\n";
       ;;
     0) return ;;
-    *) printf "${WARN_SYMBOL} 无效选择${PLAIN}\n" ;;
+    *) printf "${WARN_SYMBOL} Invalid choice${PLAIN}\n" ;;
   esac
   pause_any
 }
@@ -1386,8 +1399,8 @@ show_environment_info() {
   fi
   
   if [ "$OS_TYPE" != "linux" ]; then
-    printf "\n${WARN_SYMBOL} ${YELLOW}注意: 当前非Linux环境，实际部署请在远程Linux服务器执行${PLAIN}\n"
-    printf "${INFO_SYMBOL} 远程测试服务器: ssh -i unit04 root@23.141.4.67${PLAIN}\n"
+    printf "\n${WARN_SYMBOL} ${YELLOW}Note: Non-Linux environment detected. Please deploy and test on remote Linux server.${PLAIN}\n"
+    printf "${INFO_SYMBOL} Remote test server: ssh -i unit04 root@23.141.4.67${PLAIN}\n"
   fi
   
 
@@ -1397,28 +1410,28 @@ main_menu() {
   ensure_base_deps
   while true; do
     show_environment_info
-    printf "\n${BOLD}${BLUE}==== FWRD 统一转发管理 ====${PLAIN}\n"
-    printf "  1) 安装/升级 引擎\n"
-    printf "  2) 规则管理 (新增/列表/删除)\n"
-    printf "  3) 服务管理\n"
-    printf "  4) 卸载\n"
-    printf "  ${BLUE}r) 刷新网络信息${PLAIN}\n"
-    printf "  0) 退出\n"
-    printf "选择: "; read -r c
+    printf "\n${BOLD}${BLUE}==== FWRD - Unified Forwarding Manager ====${PLAIN}\n"
+    printf "  1) Install/Update Engines\n"
+    printf "  2) Rule Management (add/list/delete)\n"
+    printf "  3) Service Management\n"
+    printf "  4) Uninstall\n"
+    printf "  ${BLUE}r) Refresh network info${PLAIN}\n"
+    printf "  0) Exit\n"}
+    printf "Choice: "; read -r c
     case $c in
       1) install_or_update_menu ;;
       2) engine_rule_menu ;;
       3) service_menu ;;
       4) uninstall_menu ;;
       r|R) 
-        printf "${INFO_SYMBOL} 正在刷新网络信息...\n"
+        printf "${INFO_SYMBOL} Refreshing network information...\n"
         unset PUBLIC_IPV4 PUBLIC_IPV6 PUBLIC_IPV4_COUNTRY PUBLIC_IPV4_CITY PUBLIC_IPV4_ASN PUBLIC_IPV4_ISP
         unset PUBLIC_IPV6_COUNTRY PUBLIC_IPV6_CITY PUBLIC_IPV6_ASN PUBLIC_IPV6_ISP
         get_public_ip
-        printf "${SUCCESS_SYMBOL} 网络信息已刷新${PLAIN}\n"
+        printf "${SUCCESS_SYMBOL} Network information refreshed${PLAIN}\n"
         sleep 1
         ;;
-      0) printf "${SUCCESS_SYMBOL} 再见${PLAIN}\n"; exit 0 ;;
+      0) printf "${SUCCESS_SYMBOL} Goodbye${PLAIN}\n"; exit 0 ;;
       *) printf "${WARN_SYMBOL} 无效选择${PLAIN}\n"; ;;
     esac
   done
