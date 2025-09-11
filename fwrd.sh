@@ -400,7 +400,8 @@ add_rule_gost() {
 }
 
 create_gost_service() {
-    [[ ! $(id gost 2>/dev/null) ]] && useradd --system --no-create-home --shell /bin/false gost
+    getent group gost >/dev/null 2>&1 || groupadd --system gost
+    id -u gost >/dev/null 2>&1 || useradd --system --no-create-home --shell /bin/false -g gost gost
     
     cat > "/etc/systemd/system/gost.service" << EOF
 [Unit]
@@ -416,6 +417,11 @@ User=gost
 Group=gost
 NoNewPrivileges=true
 LimitNOFILE=infinity
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
@@ -450,7 +456,8 @@ add_rule_realm() {
     local config_file="/etc/realm/config.toml"
     mkdir -p "$(dirname "$config_file")"
     
-    [[ ! $(id realm 2>/dev/null) ]] && useradd --system --no-create-home --shell /bin/false realm
+    getent group realm >/dev/null 2>&1 || groupadd --system realm
+    id -u realm >/dev/null 2>&1 || useradd --system --no-create-home --shell /bin/false -g realm realm
     
     if [[ ! -f "$config_file" ]]; then
         cat > "$config_file" << 'EOF'
@@ -474,6 +481,8 @@ EOF
 }
 
 create_realm_service() {
+    getent group realm >/dev/null 2>&1 || groupadd --system realm
+    id -u realm >/dev/null 2>&1 || useradd --system --no-create-home --shell /bin/false -g realm realm
     cat > "/etc/systemd/system/realm.service" << EOF
 [Unit]
 Description=Realm Service
@@ -488,6 +497,11 @@ RestartSec=5s
 ExecStart=$TOOLS_DIR/realm -c /etc/realm/config.toml
 NoNewPrivileges=true
 LimitNOFILE=infinity
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
@@ -539,7 +553,7 @@ list_forward_rules() {
     
     printf "\n${BOLD}%-3s %-8s %-5s %-15s %-5s %-8s %-8s %-10s${PLAIN}\n" \
            "#" "TOOL" "PORT" "TARGET_IP" "PORT" "PROTOCOL" "STATUS" "CREATED"
-    printf "──────────────────────────────────────────────────────────────────────\n"
+    printf "----------------------------------------------------------------------\n"
     
     local index=0
     while read -r rule; do
@@ -580,6 +594,7 @@ delete_forward_rule() {
     local rule=$(jq ".rules[$((rule_index-1))]" "$CONFIG_FILE")
     local id=$(echo "$rule" | jq -r '.id')
     local tool=$(echo "$rule" | jq -r '.tool')
+    local listen_port=$(echo "$rule" | jq -r '.listen_port')
     
     case "$tool" in
         gost)
