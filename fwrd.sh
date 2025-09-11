@@ -33,6 +33,9 @@ WARN_SYMBOL="${BOLD}${YELLOW}[!]${PLAIN}"
 # Global breadcrumb variable
 BREADCRUMB_PATH="Main"
 
+# Temporary files tracking
+declare -a TEMP_FILES=()
+
 # Supported forwarding tools
 declare -A FORWARD_TOOLS=(
     [gost]="GOST - Feature-rich tunnel"
@@ -47,6 +50,25 @@ declare -A TOOL_SERVICE_STATUS=()
 
 # ==================== UTILITY FUNCTIONS ====================
 
+# Cleanup function
+cleanup() {
+    local exit_code=$?
+    
+    # Remove temporary files
+    for temp_file in "${TEMP_FILES[@]}"; do
+        [[ -f "$temp_file" ]] && rm -f "$temp_file" 2>/dev/null
+    done
+    
+    # Log cleanup
+    [[ $exit_code -ne 0 ]] && log_warn "Script exited with code: $exit_code"
+    
+    exit $exit_code
+}
+
+# Signal handling
+trap cleanup EXIT
+trap 'log_warn "Interrupted by user"; cleanup' SIGINT SIGTERM
+
 # Breadcrumb functions
 show_breadcrumb() {
     printf "\n${BOLD}${BLUE}==== %s ====${PLAIN}\n" "$BREADCRUMB_PATH"
@@ -57,10 +79,32 @@ set_breadcrumb() {
 }
 
 # Logging functions
-log_info() { printf "${INFO_SYMBOL} %s${PLAIN}\n" "$*"; }
-log_success() { printf "${SUCCESS_SYMBOL} %s${PLAIN}\n" "$*"; }
-log_error() { printf "${ERROR_SYMBOL} %s${PLAIN}\n" "$*"; }
-log_warn() { printf "${WARN_SYMBOL} %s${PLAIN}\n" "$*"; }
+# Logging with file support
+LOG_FILE="/var/log/fwrd.log"
+
+log_to_file() {
+    [[ -w "$LOG_FILE" ]] && echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+log_info() { 
+    printf "${INFO_SYMBOL} %s${PLAIN}\n" "$*"
+    log_to_file "INFO: $*"
+}
+
+log_success() { 
+    printf "${SUCCESS_SYMBOL} %s${PLAIN}\n" "$*"
+    log_to_file "SUCCESS: $*"
+}
+
+log_error() { 
+    printf "${ERROR_SYMBOL} %s${PLAIN}\n" "$*"
+    log_to_file "ERROR: $*"
+}
+
+log_warn() { 
+    printf "${WARN_SYMBOL} %s${PLAIN}\n" "$*"
+    log_to_file "WARN: $*"
+}
 
 # Input validation
 sanitize_input() {
@@ -221,6 +265,9 @@ check_system() {
 setup_config() {
     mkdir -p "$CONFIG_DIR" "$TOOLS_DIR"
     
+    # Initialize log file
+    touch "$LOG_FILE" 2>/dev/null && chmod 644 "$LOG_FILE" 2>/dev/null || true
+    
     if [[ ! -f "$CONFIG_FILE" ]]; then
         cat > "$CONFIG_FILE" << 'EOF'
 {
@@ -336,6 +383,177 @@ install_realm() {
     fi
 }
 
+# ==================== BACKUP & RESTORE ====================
+
+backup_config() {
+    local backup_dir="$CONFIG_DIR/backups"
+    mkdir -p "$backup_dir"
+    
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_file="$backup_dir/backup_${timestamp}.tar.gz"
+    
+    log_info "Creating configuration backup..."
+    
+    # Create backup
+    tar -czf "$backup_file" \
+        "$CONFIG_FILE" \
+        "/etc/gost/config.json" \
+        "/etc/realm/config.toml" \
+        "/etc/nftables.d/fwrd.nft" \
+        2>/dev/null || true
+    
+    # Keep only last 10 backups
+    ls -t "$backup_dir"/backup_*.tar.gz 2>/dev/null | tail -n +11 | xargs rm -f 2>/dev/null || true
+    
+    log_success "Backup created: $backup_file"
+    return 0
+}
+
+restore_config() {
+    local backup_dir="$CONFIG_DIR/backups"
+    
+    if [[ ! -d "$backup_dir" ]]; then
+        log_error "No backups found"
+        return 1
+    fi
+    
+    # List available backups
+    local backups=($(ls -t "$backup_dir"/backup_*.tar.gz 2>/dev/null))
+    
+    if [[ ${#backups[@]} -eq 0 ]]; then
+        log_error "No backups available"
+        return 1
+    fi
+    
+    printf "\nAvailable backups:\n"
+    local index=1
+    for backup in "${backups[@]}"; do
+        local name=$(basename "$backup")
+        local date=${name#backup_}
+        date=${date%.tar.gz}
+        printf "  %d. %s\n" "$index" "$date"
+        ((index++))
+    done
+    
+    printf "\n"
+    read -p "Select backup to restore [1]: " choice
+    choice=${choice:-1}
+    
+    if [[ "$choice" -lt 1 || "$choice" -gt ${#backups[@]} ]]; then
+        log_error "Invalid selection"
+        return 1
+    fi
+    
+    local selected_backup="${backups[$((choice-1))]}"
+    
+    printf "\n${YELLOW}Restore from $(basename "$selected_backup")?${PLAIN}\n"
+    printf "Current configuration will be overwritten.\n"
+    printf "\nContinue? [y/N]: "
+    read -r confirm
+    
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "Restore cancelled"
+        return 0
+    fi
+    
+    # Create current backup before restore
+    backup_config
+    
+    # Restore files
+    log_info "Restoring configuration..."
+    tar -xzf "$selected_backup" -C / 2>/dev/null || {
+        log_error "Restore failed"
+        return 1
+    }
+    
+    # Restart services
+    for tool in "${!FORWARD_TOOLS[@]}"; do
+        [[ "${TOOL_STATUS[$tool]}" == "installed" ]] && systemctl restart "$tool" 2>/dev/null
+    done
+    
+    log_success "Configuration restored successfully"
+    return 0
+}
+
+# ==================== HEALTH CHECK ====================
+
+check_rule_health() {
+    local listen_port="$1"
+    local target_ip="$2"
+    local target_port="$3"
+    local protocol="$4"
+    
+    log_info "Checking rule health: 0.0.0.0:$listen_port -> $target_ip:$target_port ($protocol)"
+    
+    # Check if port is listening
+    local listening=false
+    if command -v ss &>/dev/null; then
+        if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
+            ss -tln | grep -q ":$listen_port " && listening=true
+        fi
+        if [[ "$protocol" == "udp" || "$protocol" == "both" ]]; then
+            ss -uln | grep -q ":$listen_port " && listening=true
+        fi
+    else
+        lsof -i :"$listen_port" >/dev/null 2>&1 && listening=true
+    fi
+    
+    if [[ "$listening" == "true" ]]; then
+        log_success "Port $listen_port is listening"
+        
+        # Test connectivity if TCP
+        if [[ "$protocol" == "tcp" || "$protocol" == "both" ]]; then
+            if timeout 2 bash -c "echo >/dev/tcp/$target_ip/$target_port" 2>/dev/null; then
+                log_success "Target $target_ip:$target_port is reachable"
+            else
+                log_warn "Target $target_ip:$target_port may be unreachable"
+            fi
+        fi
+        
+        return 0
+    else
+        log_error "Port $listen_port is not listening"
+        return 1
+    fi
+}
+
+health_check_all() {
+    local rules_count=$(jq '.rules | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
+    
+    if [[ "$rules_count" -eq 0 ]]; then
+        log_warn "No rules to check"
+        return 0
+    fi
+    
+    printf "\n${BOLD}Health Check Results${PLAIN}\n"
+    printf "----------------------------------------------------------------------\n"
+    
+    local healthy=0
+    local unhealthy=0
+    
+    while read -r rule; do
+        local listen_port=$(echo "$rule" | jq -r '.listen_port')
+        local target_ip=$(echo "$rule" | jq -r '.target_ip')
+        local target_port=$(echo "$rule" | jq -r '.target_port')
+        local protocol=$(echo "$rule" | jq -r '.protocol')
+        local tool=$(echo "$rule" | jq -r '.tool')
+        
+        printf "\nRule: %s:%s -> %s:%s [%s/%s]\n" \
+               "0.0.0.0" "$listen_port" "$target_ip" "$target_port" "$tool" "$protocol"
+        
+        if check_rule_health "$listen_port" "$target_ip" "$target_port" "$protocol"; then
+            ((healthy++))
+        else
+            ((unhealthy++))
+        fi
+    done < <(jq -c '.rules[]' "$CONFIG_FILE")
+    
+    printf "\n----------------------------------------------------------------------\n"
+    printf "Summary: ${GREEN}%d healthy${PLAIN}, ${RED}%d unhealthy${PLAIN}\n" "$healthy" "$unhealthy"
+    
+    return 0
+}
+
 # ==================== RULE MANAGEMENT ====================
 
 recommend_tool() {
@@ -353,7 +571,13 @@ recommend_tool() {
 find_available_port() {
     for ((i=0; i<50; i++)); do
         local port=$((RANDOM % 55000 + 10000))
-        if ! lsof -i :"$port" >/dev/null 2>&1; then
+        # Check with both ss and lsof for better coverage
+        if command -v ss &>/dev/null; then
+            if ! ss -tuln | grep -q ":$port "; then
+                echo "$port"
+                return 0
+            fi
+        elif ! lsof -i :"$port" >/dev/null 2>&1; then
             echo "$port"
             return 0
         fi
@@ -367,6 +591,11 @@ setup_nftables_chain() {
     fi
     if ! nft list chains inet fwrd_nat 2>/dev/null | grep -q "fwrd_prerouting"; then
         nft add chain inet fwrd_nat fwrd_prerouting '{ type nat hook prerouting priority 0; }' 2>/dev/null || return 1
+    fi
+    
+    # Ensure persistence
+    if [[ -d /etc/nftables.d ]]; then
+        nft list table inet fwrd_nat > /etc/nftables.d/fwrd.nft 2>/dev/null || true
     fi
 }
 
@@ -465,6 +694,8 @@ add_rule_realm() {
 no_tcp = false
 use_udp = true
 EOF
+        chown realm:realm "$config_file" 2>/dev/null || true
+        chmod 640 "$config_file" 2>/dev/null || true
     fi
     
     cat >> "$config_file" << EOF
@@ -535,6 +766,7 @@ update_config_rule() {
     local rule_id="$1" listen_port="$2" target_ip="$3" target_port="$4" protocol="$5" tool="$6"
     
     local temp_file=$(mktemp)
+    TEMP_FILES+=("$temp_file")
     jq --arg id "$rule_id" --arg listen_port "$listen_port" --arg target_ip "$target_ip" \
        --arg target_port "$target_port" --arg protocol "$protocol" --arg tool "$tool" \
        --arg created "$(date -Iseconds)" \
@@ -616,14 +848,19 @@ delete_forward_rule() {
     esac
     
     local temp_file=$(mktemp)
+    TEMP_FILES+=("$temp_file")
     jq "del(.rules[$((rule_index-1))])" "$CONFIG_FILE" > "$temp_file" && mv "$temp_file" "$CONFIG_FILE"
     log_success "Rule deleted successfully"
 }
 
 # Show system status
 show_system_status() {
-    local ip_forward=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
-    printf "IP Forwarding: %s\n" "$([[ "$ip_forward" == "1" ]] && echo -e "${GREEN}enabled${PLAIN}" || echo -e "${RED}disabled${PLAIN}")"
+    local ipv4_forward=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
+    local ipv6_forward=$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null || echo "0")
+    
+    printf "IP Forwarding:\n"
+    printf "  IPv4: %s\n" "$([[ "$ipv4_forward" == "1" ]] && echo -e "${GREEN}enabled${PLAIN}" || echo -e "${RED}disabled${PLAIN}")"
+    printf "  IPv6: %s\n" "$([[ "$ipv6_forward" == "1" ]] && echo -e "${GREEN}enabled${PLAIN}" || echo -e "${RED}disabled${PLAIN}")"
     
     printf "\nTool Status:\n"
     for tool in "${!FORWARD_TOOLS[@]}"; do
@@ -744,6 +981,9 @@ show_main_menu() {
         printf "  3) List rules\n"
         printf "  4) Delete rule\n"
         printf "  5) Service control\n"
+        printf "  6) Health check\n"
+        printf "  7) Backup configuration\n"
+        printf "  8) Restore configuration\n"
         printf "  0) Exit\n"
         printf "\n"
         
@@ -754,6 +994,9 @@ show_main_menu() {
             3) list_forward_rules; printf "\nPress Enter to continue..."; read -r ;;
             4) delete_rule_interactive ;;
             5) service_control_menu ;;
+            6) health_check_all; printf "\nPress Enter to continue..."; read -r ;;
+            7) backup_config; printf "\nPress Enter to continue..."; read -r ;;
+            8) restore_config; printf "\nPress Enter to continue..."; read -r ;;
             0) printf "${SUCCESS_SYMBOL} Goodbye${PLAIN}\n"; exit 0 ;;
             *) printf "${WARN_SYMBOL} Invalid choice${PLAIN}\n"; sleep 1 ;;
         esac
@@ -874,8 +1117,17 @@ service_control_menu() {
                 ;;
             4)
                 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
-                echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf 2>/dev/null || true
-                log_success "IP forwarding enabled"
+                sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1
+                
+                # Ensure persistence
+                if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null; then
+                    echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+                fi
+                if ! grep -q "net.ipv6.conf.all.forwarding=1" /etc/sysctl.conf 2>/dev/null; then
+                    echo 'net.ipv6.conf.all.forwarding=1' >> /etc/sysctl.conf
+                fi
+                
+                log_success "IPv4/IPv6 forwarding enabled"
                 ;;
             0) return ;;
             *) log_error "Invalid choice"; sleep 1 ;;
