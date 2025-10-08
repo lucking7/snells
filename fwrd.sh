@@ -672,63 +672,148 @@ detect_tools() {
 # ==================== TOOL INSTALLATION ====================
 
 install_gost() {
+    # 安装 GOST（非交互）：使用官方安装脚本并传入 --install，避免版本选择交互卡死
+    # 要求：curl 可用；失败时给出明确提示
+    # 返回：0 成功；非 0 失败
     log_info "Installing GOST..."
-    if curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh | bash; then
+    if ! command -v curl >/dev/null 2>&1; then
+        log_error "curl not installed. Please install curl first (apt install -y curl | yum install -y curl | brew install curl)."
+        return 1
+    fi
+    local tmp
+    tmp=$(mktemp -t gost-install.XXXX 2>/dev/null || echo "/tmp/gost-install.$$")
+    chmod 600 "$tmp" 2>/dev/null || true
+    if ! curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh -o "$tmp"; then
+        log_error "Failed to download GOST installer script"
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+    fi
+    # 非交互运行安装器；部分环境需要 sudo，但此菜单一般以 root 运行
+    # 临时关闭 errexit，避免安装器非零退出导致整个脚本退出
+    set +e
+    bash "$tmp" --install </dev/null
+    local rc=$?
+    set -e
+    rm -f "$tmp" 2>/dev/null || true
+    if [[ $rc -ne 0 ]]; then
+        log_error "GOST installation failed (installer exit code=$rc)"
+        return $rc
+    fi
+    if command -v gost >/dev/null 2>&1; then
         log_success "GOST installed successfully"
         TOOL_STATUS[gost]="installed"
         return 0
     else
-        log_error "GOST installation failed"
+        # 某些环境 PATH 需要重新加载；提示用户手动刷新
+        log_warn "GOST installer finished but 'gost' not found in PATH. Try re-login or source profile."
         return 1
     fi
 }
 
 install_nftables() {
     log_info "Installing NFTables..."
-    if apt-get update -qq && apt-get install -y nftables; then
-        systemctl enable nftables >/dev/null 2>&1
+    # 非交互安装并避免 set -e 导致脚本整体退出
+    local rc=1
+    set +e
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq && apt-get install -y nftables
+        rc=$?
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf -y install nftables; rc=$?
+    elif command -v yum >/dev/null 2>&1; then
+        yum -y install nftables; rc=$?
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper --non-interactive install nftables; rc=$?
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm nftables; rc=$?
+    elif command -v brew >/dev/null 2>&1; then
+        brew install nftables; rc=$?  # macOS 未必有可用包
+    else
+        rc=127
+    fi
+    set -e
+    if [[ $rc -eq 0 ]]; then
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable nftables >/dev/null 2>&1 || true
+        fi
         log_success "NFTables installed successfully"
         TOOL_STATUS[nftables]="installed"
         return 0
-    else
-        log_error "NFTables installation failed"
+    elif [[ $rc -eq 127 ]]; then
+        log_error "No supported package manager found (apt/dnf/yum/zypper/pacman/brew)."
         return 1
+    else
+        log_error "NFTables installation failed (exit code=$rc)"
+        return $rc
     fi
 }
 
 install_realm() {
     log_info "Installing Realm..."
+    if ! command -v curl >/dev/null 2>&1; then
+        log_error "curl not installed. Please install curl first (apt/yum/dnf/zypper/pacman/brew)."
+        return 1
+    fi
+    mkdir -p "$TOOLS_DIR" 2>/dev/null || true
 
-    local arch=$(uname -m)
+    local arch; arch=$(uname -m)
     local realm_arch
-
     case "$arch" in
-        x86_64) realm_arch="x86_64-unknown-linux-gnu" ;;
-        aarch64) realm_arch="aarch64-unknown-linux-gnu" ;;
+        x86_64|amd64) realm_arch="x86_64-unknown-linux-gnu" ;;
+        aarch64|arm64) realm_arch="aarch64-unknown-linux-gnu" ;;
         armv7l) realm_arch="arm-unknown-linux-gnueabi" ;;
         *) log_error "Unsupported architecture: $arch"; return 1 ;;
     esac
 
-    # Get version
+    # 获取版本（优先 GitHub API；无 jq 时用 grep 提取）
     local version="v2.6.2"
-    if curl -s --connect-timeout 5 https://api.github.com/repos/zhboner/realm/releases/latest >/dev/null 2>&1; then
-        version=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest | jq -r '.tag_name // "v2.6.2"')
+    set +e
+    local api json
+    api=$(curl -s --connect-timeout 5 https://api.github.com/repos/zhboner/realm/releases/latest)
+    if [[ -n "$api" ]]; then
+        if command -v jq >/dev/null 2>&1; then
+            json=$(printf "%s" "$api" | jq -r '.tag_name // empty')
+            [[ -n "$json" ]] && version="$json"
+        else
+            json=$(printf "%s" "$api" | grep -E '"tag_name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+            [[ -n "$json" ]] && version="$json"
+        fi
     fi
+    set -e
 
     local download_url="https://github.com/zhboner/realm/releases/download/${version}/realm-${realm_arch}.tar.gz"
 
-    if curl -L -o /tmp/realm.tar.gz "$download_url" && \
-       tar -xzf /tmp/realm.tar.gz -C /tmp && \
-       mv /tmp/realm "$TOOLS_DIR/realm" && \
-       chmod +x "$TOOLS_DIR/realm" && \
-       ln -sf "$TOOLS_DIR/realm" /usr/local/bin/realm; then
-        rm -f /tmp/realm.tar.gz
+    # 下载并安装（局部关闭 errexit）
+    local rc=1
+    set +e
+    curl -L -o /tmp/realm.tar.gz "$download_url"
+    rc=$?
+    if [[ $rc -eq 0 ]]; then
+        tar -xzf /tmp/realm.tar.gz -C /tmp
+        rc=$?
+    fi
+    if [[ $rc -eq 0 ]]; then
+        mv /tmp/realm "$TOOLS_DIR/realm"
+        rc=$?
+    fi
+    if [[ $rc -eq 0 ]]; then
+        chmod +x "$TOOLS_DIR/realm"
+        rc=$?
+    fi
+    if [[ $rc -eq 0 ]]; then
+        ln -sf "$TOOLS_DIR/realm" /usr/local/bin/realm 2>/dev/null
+        rc=$?
+    fi
+    set -e
+
+    rm -f /tmp/realm.tar.gz /tmp/realm 2>/dev/null || true
+
+    if [[ $rc -eq 0 ]] && command -v realm >/dev/null 2>&1; then
         log_success "Realm installed successfully"
         TOOL_STATUS[realm]="installed"
         return 0
     else
-        rm -f /tmp/realm.tar.gz /tmp/realm 2>/dev/null
-        log_error "Realm installation failed"
+        log_error "Realm installation failed (exit code=${rc})"
         return 1
     fi
 }
