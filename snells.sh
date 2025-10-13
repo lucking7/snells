@@ -4,24 +4,24 @@
 current_version="1.3.0"
 
 # Define standard color codes
-PLAIN='\e[0m'
-RED='\e[31m'
-GREEN='\e[92m'
-YELLOW='\e[33m'
-BLUE='\e[34m'
-CYAN='\e[96m'
-PURPLE='\e[35m'
-BOLD='\e[1m'
-BG_BLUE='\e[44m'
-BG_RED='\e[41m'
+PLAIN=$'\033[0m'
+RED=$'\033[31m'
+GREEN=$'\033[92m'
+YELLOW=$'\033[33m'
+BLUE=$'\033[34m'
+CYAN=$'\033[96m'
+PURPLE=$'\033[35m'
+BOLD=$'\033[1m'
+BG_BLUE=$'\033[44m'
+BG_RED=$'\033[41m'
 
 # Backward compatibility - keep old variable names
 red="$RED"
 green="$GREEN"
 yellow="$YELLOW"
 reset="$PLAIN"
-underline='\e[4m'
-blink='\e[5m'
+underline=$'\033[4m'
+blink=$'\033[5m'
 cyan="$CYAN"
 purple="$PURPLE"
 
