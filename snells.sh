@@ -4,32 +4,32 @@
 current_version="1.3.0"
 
 # Define standard color codes
-PLAIN='\e[0m'
-RED='\e[31m'
-GREEN='\e[92m'
-YELLOW='\e[33m'
-BLUE='\e[34m'
-CYAN='\e[96m'
-PURPLE='\e[35m'
-BOLD='\e[1m'
-BG_BLUE='\e[44m'
-BG_RED='\e[41m'
+PLAIN=$'\033[0m'
+RED=$'\033[31m'
+GREEN=$'\033[92m'
+YELLOW=$'\033[33m'
+BLUE=$'\033[34m'
+CYAN=$'\033[96m'
+PURPLE=$'\033[35m'
+BOLD=$'\033[1m'
+BG_BLUE=$'\033[44m'
+BG_RED=$'\033[41m'
 
 # Backward compatibility - keep old variable names
 red="$RED"
 green="$GREEN"
 yellow="$YELLOW"
 reset="$PLAIN"
-underline='\e[4m'
-blink='\e[5m'
+underline=$'\033[4m'
+blink=$'\033[5m'
 cyan="$CYAN"
 purple="$PURPLE"
 
-# Standard message symbols
-SUCCESS_SYMBOL="${BOLD}${GREEN}[✓]${PLAIN}"
-ERROR_SYMBOL="${BOLD}${RED}[✗]${PLAIN}"
-INFO_SYMBOL="${BOLD}${BLUE}[ⓘ]${PLAIN}"
-WARN_SYMBOL="${BOLD}${YELLOW}[⚠]${PLAIN}"
+# Standard message symbols (极简风格，不使用图标)
+SUCCESS_SYMBOL="${GREEN}[OK]${PLAIN}"
+ERROR_SYMBOL="${RED}[ERROR]${PLAIN}"
+INFO_SYMBOL="${BLUE}[INFO]${PLAIN}"
+WARN_SYMBOL="${YELLOW}[WARN]${PLAIN}"
 
 # Color print functions (backward compatibility)
 _red() { echo -e "${RED}$@${PLAIN}"; }
@@ -55,9 +55,9 @@ warn() {
 # Global breadcrumb variable for navigation
 BREADCRUMB_PATH="Main"
 
-# Breadcrumb navigation functions
+# Breadcrumb navigation functions (简化显示)
 show_breadcrumb() {
-    printf "\n${BOLD}${BLUE}━━━━ %s ━━━━${PLAIN}\n" "$BREADCRUMB_PATH"
+    printf "\n${BOLD}%s${PLAIN}\n" "$BREADCRUMB_PATH"
 }
 
 set_breadcrumb() {
@@ -75,58 +75,54 @@ msg() {
     esac
 }
 
-# Enhanced system status dashboard
+# Enhanced system status dashboard (极简风格)
 check_snell_status() {
-    printf "\n${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════════╗${PLAIN}\n"
-    printf "${BOLD}${CYAN}║              System Status Dashboard                        ║${PLAIN}\n"
-    printf "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════════╝${PLAIN}\n"
-    
-    # Table header
-    printf "${BOLD}%-20s %-20s %-10s %-15s${PLAIN}\n" "Service" "Status" "Port" "Version"
-    printf "%-20s %-20s %-10s %-15s\n" "─────────────────" "──────────────────" "────────" "─────────────"
+    printf "\n${BOLD}System Status${PLAIN}\n"
+    printf "%-15s %-15s %-10s %-15s\n" "Service" "Status" "Port" "Version"
+    printf "%-15s %-15s %-10s %-15s\n" "-------" "------" "----" "-------"
     
     # Snell service status
-    local snell_status="${RED}${ERROR_SYMBOL} Stopped${PLAIN}"
+    local snell_status="${RED}Stopped${PLAIN}"
     local snell_port="N/A"
     local snell_version="N/A"
-    
+
     if [[ -f "${snell_workspace}/snell-server.conf" ]]; then
         snell_port=$(grep -oP 'listen = .*?:\K\d+' "${snell_workspace}/snell-server.conf" 2>/dev/null || echo "N/A")
-        
+
         if [[ -f "${snell_workspace}/snell-server" ]]; then
             snell_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+\.[0-9]+(\.[0-9]+[a-zA-Z0-9]*)?' || echo "N/A")
         fi
-        
+
         if systemctl is-active --quiet snell; then
-            snell_status="${GREEN}${SUCCESS_SYMBOL} Running${PLAIN}"
+            snell_status="${GREEN}Running${PLAIN}"
         fi
     else
-        snell_status="${YELLOW}${WARN_SYMBOL} Not installed${PLAIN}"
+        snell_status="${YELLOW}Not installed${PLAIN}"
     fi
-    
-    printf "%-30s %-30s %-10s %-15s\n" "Snell" "$snell_status" "$snell_port" "v$snell_version"
-    
+
+    printf "%-15s %-20s %-10s %-15s\n" "Snell" "$snell_status" "$snell_port" "v$snell_version"
+
     # Shadow-TLS service status
-    local shadow_status="${YELLOW}${WARN_SYMBOL} Not installed${PLAIN}"
+    local shadow_status="${YELLOW}Not installed${PLAIN}"
     local shadow_port="N/A"
     local shadow_version="N/A"
-    
+
     if [[ -f "/usr/local/bin/shadow-tls" ]]; then
         shadow_version=$(/usr/local/bin/shadow-tls --version 2>&1 | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "N/A")
-        
+
         if systemctl list-unit-files | grep -q shadow-tls.service; then
             local shadow_config=$(systemctl cat shadow-tls 2>/dev/null | grep ExecStart)
             shadow_port=$(echo "$shadow_config" | grep -oP '\--listen [^\s]*:\K\d+' || echo "N/A")
-            
+
             if systemctl is-active --quiet shadow-tls; then
-                shadow_status="${GREEN}${SUCCESS_SYMBOL} Running${PLAIN}"
+                shadow_status="${GREEN}Running${PLAIN}"
             else
-                shadow_status="${RED}${ERROR_SYMBOL} Stopped${PLAIN}"
+                shadow_status="${RED}Stopped${PLAIN}"
             fi
         fi
     fi
-    
-    printf "%-30s %-30s %-10s %-15s\n" "Shadow-TLS" "$shadow_status" "$shadow_port" "v$shadow_version"
+
+    printf "%-15s %-20s %-10s %-15s\n" "Shadow-TLS" "$shadow_status" "$shadow_port" "v$shadow_version"
     
     echo ""
 }
@@ -268,7 +264,7 @@ show_loading() {
     local pid=$1
     local message=${2:-"Processing"}
     local delay=0.15
-    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local spinstr='|/-\'
     
     printf "${INFO_SYMBOL} %s " "$message"
     while ps -p "$pid" &>/dev/null; do
@@ -358,8 +354,7 @@ create_snell_conf() {
     [[ -z ${snell_psk} ]] && snell_psk=$(generate_random_psk) && echo "[INFO] Generated a random PSK for Snell: $snell_psk"
     
     # Get DNS settings with improved messaging
-    printf "\n${BOLD}${CYAN}DNS Configuration${PLAIN}\n"
-    printf "${CYAN}─────────────────────────────────────────${PLAIN}\n"
+    printf "\n${BOLD}DNS Configuration${PLAIN}\n"
     
     system_dns=$(grep -oP '(?<=nameserver\s)\S+' /etc/resolv.conf | grep -v '^127\.0\.0\.' | sort -u | tr '\n' ',' | sed 's/,$//')
     
@@ -485,9 +480,7 @@ RestartSec=3s
 # Harden and increase resource limits for high concurrency
 LimitNOFILE=1048576
 NoNewPrivileges=true
-MemoryLimit=512M
 TasksMax=infinity
-CPUQuota=200%
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 StandardOutput=journal
 StandardError=journal
@@ -521,7 +514,7 @@ config_shadow_tls() {
         fi
     done
     
-    echo -e "${yellow}Recommended TLS domain list (supports TLS 1.3):${reset}"
+    echo -e "${YELLOW}Recommended TLS domain list (supports TLS 1.3):${PLAIN}"
     echo -e "1) gateway.icloud.com (Apple services)"
     echo -e "2) p11.douyinpic.com (Douyin related, recommended for free flow)"
     echo -e "3) mp.weixin.qq.com (WeChat related)"
@@ -599,8 +592,8 @@ install_snell_without_ip() {
     
     # Ask for Snell version
     msg info "Choose Snell version to install:"
-    echo -e "${green}1) Snell v4 (Stable)${reset}"
-    echo -e "${yellow}2) Snell v5 (Beta)${reset}"
+    echo -e "${GREEN}1) Snell v4 (Stable)${PLAIN}"
+    echo -e "${YELLOW}2) Snell v5 (Beta)${PLAIN}"
     read -rp "Select version [1-2] (default: 1): " version_choice
     
     local snell_version=""
@@ -810,23 +803,20 @@ install_shadow_tls() {
     install_shadow_tls_without_ip
 }
 
-# Install menu
+# Install menu (极简风格)
 install() {
     while true; do
         clear
         set_breadcrumb "Main > Install"
         show_breadcrumb
-        
-        printf "\n${BOLD}${CYAN}╔═════════════════════════════════════════╗${PLAIN}\n"
-        printf "${BOLD}${CYAN}║        Installation Options             ║${PLAIN}\n"
-        printf "${BOLD}${CYAN}╚═════════════════════════════════════════╝${PLAIN}\n\n"
-        
-        printf "  ${GREEN}1)${PLAIN} Install Snell Only\n"
-        printf "  ${YELLOW}2)${PLAIN} Install Snell + Shadow-TLS\n"
-        printf "  ${CYAN}3)${PLAIN} Install Shadow-TLS Only ${BOLD}(Snell required)${PLAIN}\n"
-        printf "  ${RED}0)${PLAIN} Back to Main Menu\n\n"
-        
-        printf "${BOLD}Choice [0-3]:${PLAIN} "
+
+        printf "\n${BOLD}Installation Options${PLAIN}\n\n"
+        printf "  1) Install Snell Only\n"
+        printf "  2) Install Snell + Shadow-TLS\n"
+        printf "  3) Install Shadow-TLS Only (Snell required)\n"
+        printf "  0) Back\n\n"
+
+        printf "Choice [0-3]: "
         read -r option
         
         case $option in
@@ -839,23 +829,20 @@ install() {
     done
 }
 
-# Uninstall Snell and Shadow-TLS
+# Uninstall Snell and Shadow-TLS (极简风格)
 uninstall() {
     while true; do
         clear
         set_breadcrumb "Main > Uninstall"
         show_breadcrumb
-        
-        printf "\n${BOLD}${CYAN}╔═════════════════════════════════════════╗${PLAIN}\n"
-        printf "${BOLD}${CYAN}║          Uninstall Options              ║${PLAIN}\n"
-        printf "${BOLD}${CYAN}╚═════════════════════════════════════════╝${PLAIN}\n\n"
-        
-        printf "  ${RED}1)${PLAIN} Uninstall Snell and Shadow-TLS\n"
-        printf "  ${YELLOW}2)${PLAIN} Uninstall Snell Only\n"
-        printf "  ${CYAN}3)${PLAIN} Uninstall Shadow-TLS Only\n"
-        printf "  ${GREEN}0)${PLAIN} Back to Main Menu\n\n"
-        
-        printf "${BOLD}Choice [0-3]:${PLAIN} "
+
+        printf "\n${BOLD}Uninstall Options${PLAIN}\n\n"
+        printf "  1) Uninstall Snell and Shadow-TLS\n"
+        printf "  2) Uninstall Snell Only\n"
+        printf "  3) Uninstall Shadow-TLS Only\n"
+        printf "  0) Back\n\n"
+
+        printf "Choice [0-3]: "
         read -r option
 
         case $option in
@@ -984,40 +971,33 @@ show_logs() {
     clear
     set_breadcrumb "Main > Manage > Logs"
     show_breadcrumb
-    
-    printf "\n${BOLD}${CYAN}╔═════════════════════════════════════════╗${PLAIN}\n"
-    printf "${BOLD}${CYAN}║            Service Logs                 ║${PLAIN}\n"
-    printf "${BOLD}${CYAN}╚═════════════════════════════════════════╝${PLAIN}\n\n"
-    
-    printf "${BOLD}${CYAN}Recent Snell Logs:${PLAIN}\n"
-    printf "${CYAN}─────────────────────────────────────────${PLAIN}\n"
+
+    printf "\n${BOLD}Service Logs${PLAIN}\n\n"
+
+    printf "${BOLD}Recent Snell Logs:${PLAIN}\n"
     journalctl -u snell --no-pager -n 20
     echo ""
-    
-    printf "${BOLD}${CYAN}Recent Shadow-TLS Logs:${PLAIN}\n"
-    printf "${CYAN}─────────────────────────────────────────${PLAIN}\n"
+
+    printf "${BOLD}Recent Shadow-TLS Logs:${PLAIN}\n"
     journalctl -u shadow-tls --no-pager -n 20
     echo ""
-    
+
     read -p "Press any key to return..." _
 }
 
-# Modify Snell and Shadow-TLS configuration  
+# Modify Snell and Shadow-TLS configuration (极简风格)
 modify() {
     while true; do
         clear
         set_breadcrumb "Main > Configuration"
         show_breadcrumb
-        
-        printf "\n${BOLD}${CYAN}╔═════════════════════════════════════════╗${PLAIN}\n"
-        printf "${BOLD}${CYAN}║        Configuration Editor             ║${PLAIN}\n"
-        printf "${BOLD}${CYAN}╚═════════════════════════════════════════╝${PLAIN}\n\n"
-        
-        printf "  ${GREEN}1)${PLAIN} Modify Snell Configuration\n"
-        printf "  ${YELLOW}2)${PLAIN} Modify Shadow-TLS Configuration\n"
-        printf "  ${RED}0)${PLAIN} Back\n\n"
-        
-        printf "${BOLD}Choice [0-2]:${PLAIN} "
+
+        printf "\n${BOLD}Configuration Editor${PLAIN}\n\n"
+        printf "  1) Modify Snell Configuration\n"
+        printf "  2) Modify Shadow-TLS Configuration\n"
+        printf "  0) Back\n\n"
+
+        printf "Choice [0-2]: "
         read -r operation
         
         case $operation in  
@@ -1047,29 +1027,26 @@ modify() {
     done
 }
 
-# Manage Snell and Shadow-TLS services  
+# Manage Snell and Shadow-TLS services (极简风格)
 manage() {
     while true; do
         clear
         set_breadcrumb "Main > Manage"
         show_breadcrumb
-        
+
         # Display service status
         check_snell_status
-        
-        printf "\n${BOLD}${CYAN}╔═════════════════════════════════════════╗${PLAIN}\n"
-        printf "${BOLD}${CYAN}║        Service Management               ║${PLAIN}\n"
-        printf "${BOLD}${CYAN}╚═════════════════════════════════════════╝${PLAIN}\n\n"
-        
-        printf "  ${GREEN}1)${PLAIN} Start Services\n"
-        printf "  ${RED}2)${PLAIN} Stop Services\n"
-        printf "  ${YELLOW}3)${PLAIN} Restart Services\n"
-        printf "  ${CYAN}4)${PLAIN} View Detailed Status\n"
-        printf "  ${PURPLE}5)${PLAIN} View Service Logs\n"
-        printf "  ${BLUE}6)${PLAIN} Modify Configuration\n"
-        printf "  ${RED}0)${PLAIN} Back to Main Menu\n\n"
-        
-        printf "${BOLD}Choice [0-6]:${PLAIN} "
+
+        printf "\n${BOLD}Service Management${PLAIN}\n\n"
+        printf "  1) Start Services\n"
+        printf "  2) Stop Services\n"
+        printf "  3) Restart Services\n"
+        printf "  4) View Detailed Status\n"
+        printf "  5) View Service Logs\n"
+        printf "  6) Modify Configuration\n"
+        printf "  0) Back\n\n"
+
+        printf "Choice [0-6]: "
         read -r operation
         
         case $operation in
@@ -1117,9 +1094,7 @@ RestartSec=3s
 # Harden and increase resource limits for high concurrency
 LimitNOFILE=1048576
 NoNewPrivileges=true
-MemoryLimit=1G
 TasksMax=infinity
-CPUQuota=200%
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 StandardOutput=journal
 StandardError=journal
@@ -1133,33 +1108,28 @@ EOF
     msg ok "Snell systemd service created."
 }
 
-# Display beautified main menu
+# Display beautified main menu (极简风格)
 menu() {
     while true; do
         clear
         set_breadcrumb "Main"
         show_breadcrumb
-        
-        printf "\n${BOLD}${BG_BLUE}┌─────────────────────────────────────────────────────────┐${PLAIN}\n"
-        printf "${BOLD}${BG_BLUE}│     ShadowTLS + Snell Management v%-21s│${PLAIN}\n" "${current_version}"
-        printf "${BOLD}${BG_BLUE}└─────────────────────────────────────────────────────────┘${PLAIN}\n"
-        
+
+        printf "\n${BOLD}ShadowTLS + Snell Management v%s${PLAIN}\n" "${current_version}"
+
         # Display service status
         check_snell_status
-        
-        printf "\n${BOLD}${CYAN}╔═════════════════════════════════════════╗${PLAIN}\n"
-        printf "${BOLD}${CYAN}║              MAIN MENU                  ║${PLAIN}\n"
-        printf "${BOLD}${CYAN}╚═════════════════════════════════════════╝${PLAIN}\n\n"
-        
-        printf "  ${GREEN}1)${PLAIN} Install Services\n"
-        printf "  ${RED}2)${PLAIN} Uninstall Services\n"
-        printf "  ${YELLOW}3)${PLAIN} Manage Services\n"
-        printf "  ${CYAN}4)${PLAIN} Modify Configuration\n"
-        printf "  ${PURPLE}5)${PLAIN} Display Configuration\n"
-        printf "  ${BLUE}6)${PLAIN} Update Snell\n"
-        printf "  ${RED}0)${PLAIN} Exit\n\n"
-        
-        printf "${BOLD}Choice [0-6]:${PLAIN} "
+
+        printf "\n${BOLD}Main Menu${PLAIN}\n\n"
+        printf "  1) Install Services\n"
+        printf "  2) Uninstall Services\n"
+        printf "  3) Manage Services\n"
+        printf "  4) Modify Configuration\n"
+        printf "  5) Display Configuration\n"
+        printf "  6) Update Snell\n"
+        printf "  0) Exit\n\n"
+
+        printf "Choice [0-6]: "
         read -r operation
 
         case $operation in  
@@ -1175,15 +1145,13 @@ menu() {
     done
 }
 
-# New function to display configuration information
+# New function to display configuration information (极简风格)
 display_config() {
     clear
     set_breadcrumb "Main > Display Configuration"
     show_breadcrumb
-    
-    printf "\n${BOLD}${CYAN}╔═════════════════════════════════════════╗${PLAIN}\n"
-    printf "${BOLD}${CYAN}║      Configuration Information          ║${PLAIN}\n"
-    printf "${BOLD}${CYAN}╚═════════════════════════════════════════╝${PLAIN}\n\n"
+
+    printf "\n${BOLD}Configuration Information${PLAIN}\n\n"
     
     if [[ ! -f "${snell_workspace}/snell-server.conf" ]]; then
         msg err "Snell not installed or configuration file not found"
@@ -1192,17 +1160,16 @@ display_config() {
     fi
     
     # Display Snell configuration
-    printf "${BOLD}${YELLOW}Snell Configuration${PLAIN}\n"
-    printf "${CYAN}─────────────────────────────────────────${PLAIN}\n"
+    printf "${BOLD}Snell Configuration${PLAIN}\n"
     
     local snell_config=$(cat "${snell_workspace}/snell-server.conf")
     local snell_listen=$(echo "$snell_config" | grep -oP 'listen = \K.*')
     local snell_psk=$(echo "$snell_config" | grep -oP 'psk = \K.*')
     local snell_ipv6=$(echo "$snell_config" | grep -oP 'ipv6 = \K.*')
     
-    echo -e "${green}Listen Address:${reset} $snell_listen"
-    echo -e "${green}PSK:${reset} $snell_psk"
-    echo -e "${green}IPv6 Support:${reset} $snell_ipv6"
+    echo -e "${GREEN}Listen Address:${PLAIN} $snell_listen"
+    echo -e "${GREEN}PSK:${PLAIN} $snell_psk"
+    echo -e "${GREEN}IPv6 Support:${PLAIN} $snell_ipv6"
     
     # Get Snell version
     local snell_version_num="4"
@@ -1210,16 +1177,15 @@ display_config() {
         local installed_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+')
         if [[ "$installed_version" == "5" ]]; then
             snell_version_num="5"
-            echo -e "${green}Version:${reset} Snell v5 (Beta)"
+            echo -e "${GREEN}Version:${PLAIN} Snell v5 (Beta)"
         else
-            echo -e "${green}Version:${reset} Snell v4"
+            echo -e "${GREEN}Version:${PLAIN} Snell v4"
         fi
     fi
     
     # Display ShadowTLS configuration (if exists)
     if systemctl is-active --quiet shadow-tls; then
-        printf "\n${BOLD}${YELLOW}ShadowTLS Configuration${PLAIN}\n"
-        printf "${CYAN}─────────────────────────────────────────${PLAIN}\n"
+        printf "\n${BOLD}ShadowTLS Configuration${PLAIN}\n"
         
         local shadow_tls_config=$(systemctl cat shadow-tls | grep ExecStart)
         local shadow_listen=$(echo "$shadow_tls_config" | grep -oP '\--listen \K[^ ]+')
@@ -1227,29 +1193,28 @@ display_config() {
         local shadow_tls=$(echo "$shadow_tls_config" | grep -oP '\--tls \K[^ ]+')
         local shadow_password=$(echo "$shadow_tls_config" | grep -oP '\--password \K[^ ]+')
         
-        echo -e "${green}Listen Address:${reset} $shadow_listen"
-        echo -e "${green}Server Address:${reset} $shadow_server"
-        echo -e "${green}TLS Domain:${reset} $shadow_tls"
-        echo -e "${green}Password:${reset} $shadow_password"
+        echo -e "${GREEN}Listen Address:${PLAIN} $shadow_listen"
+        echo -e "${GREEN}Server Address:${PLAIN} $shadow_server"
+        echo -e "${GREEN}TLS Domain:${PLAIN} $shadow_tls"
+        echo -e "${GREEN}Password:${PLAIN} $shadow_password"
         
         # Check if wildcard-sni is enabled
         if echo "$shadow_tls_config" | grep -q "wildcard-sni"; then
-            echo -e "${green}Wildcard SNI:${reset} Enabled (Client can customize SNI)"
+            echo -e "${GREEN}Wildcard SNI:${PLAIN} Enabled (Client can customize SNI)"
         else
-            echo -e "${green}Wildcard SNI:${reset} Disabled"
+            echo -e "${GREEN}Wildcard SNI:${PLAIN} Disabled"
         fi
         
         # Check if strict mode is enabled
         if echo "$shadow_tls_config" | grep -q "\--strict"; then
-            echo -e "${green}Strict Mode:${reset} Enabled"
+            echo -e "${GREEN}Strict Mode:${PLAIN} Enabled"
         else
-            echo -e "${green}Strict Mode:${reset} Disabled"
+            echo -e "${GREEN}Strict Mode:${PLAIN} Disabled"
         fi
     fi
     
     # Display client configuration
-    printf "\n${BOLD}${YELLOW}Client Configuration Example${PLAIN}\n"
-    printf "${CYAN}─────────────────────────────────────────${PLAIN}\n"
+    printf "\n${BOLD}Client Configuration Example${PLAIN}\n"
     
     # Get server IP
     local server_ip=$(curl -s4 --connect-timeout 5 https://api.ipify.org)
@@ -1275,11 +1240,11 @@ display_config() {
     
     if systemctl is-active --quiet shadow-tls; then
         local shadow_port=$(echo "$shadow_listen" | grep -oP ':\K\d+$')
-        echo -e "${cyan}Surge Configuration:${reset}"
+        echo -e "${CYAN}Surge Configuration:${PLAIN}"
         echo -e "[Proxy]"
         echo -e "Snell = snell, ${server_ip}, ${shadow_port}, psk=${snell_psk}, version=${snell_version_num}, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${shadow_password}, shadow-tls-sni=${shadow_tls%%:*}, shadow-tls-version=3"
     else
-        echo -e "${cyan}Surge Configuration:${reset}"
+        echo -e "${CYAN}Surge Configuration:${PLAIN}"
         echo -e "[Proxy]"
         echo -e "Snell = snell, ${server_ip}, ${port}, psk=${snell_psk}, version=${snell_version_num}, reuse=${client_reuse_value}, tfo=${client_tfo_value}"
     fi
@@ -1291,34 +1256,28 @@ display_config() {
     read -p "Press any key to return..." _
 }
 
-# Check Snell and ShadowTLS service status command
+# Check Snell and ShadowTLS service status command (极简风格)
 check_service() {
     clear
     set_breadcrumb "Main > Manage > Detailed Status"
     show_breadcrumb
-    
-    printf "\n${BOLD}${CYAN}╔═════════════════════════════════════════╗${PLAIN}\n"
-    printf "${BOLD}${CYAN}║       Detailed Service Status           ║${PLAIN}\n"
-    printf "${BOLD}${CYAN}╚═════════════════════════════════════════╝${PLAIN}\n\n"
-    
-    printf "${BOLD}${YELLOW}Snell Service Status:${PLAIN}\n"
-    printf "${CYAN}─────────────────────────────────────────${PLAIN}\n"
+
+    printf "\n${BOLD}Detailed Service Status${PLAIN}\n\n"
+
+    printf "${BOLD}Snell Service Status:${PLAIN}\n"
     systemctl status snell
-    
-    printf "\n${BOLD}${YELLOW}ShadowTLS Service Status:${PLAIN}\n"
-    printf "${CYAN}─────────────────────────────────────────${PLAIN}\n"
+
+    printf "\n${BOLD}ShadowTLS Service Status:${PLAIN}\n"
     if systemctl is-active --quiet shadow-tls; then
         systemctl status shadow-tls
     else
         msg warn "ShadowTLS is not installed or not running"
     fi
     
-    printf "\n${BOLD}${YELLOW}Port Listening Status:${PLAIN}\n"
-    printf "${CYAN}─────────────────────────────────────────${PLAIN}\n"
+    printf "\n${BOLD}Port Listening Status:${PLAIN}\n"
     ss -tuln | grep -E ':(10000|2000|8388|443)' || echo "No matching ports found"
-    
-    printf "\n${BOLD}${YELLOW}System Resource Usage:${PLAIN}\n"
-    printf "${CYAN}─────────────────────────────────────────${PLAIN}\n"
+
+    printf "\n${BOLD}System Resource Usage:${PLAIN}\n"
     local snell_pid=$(pgrep -f "snell-server" 2>/dev/null)
     local shadow_pid=$(pgrep -f "shadow-tls" 2>/dev/null)
     if [[ -n "$snell_pid" || -n "$shadow_pid" ]]; then
@@ -1332,15 +1291,13 @@ check_service() {
     read -p "Press any key to return..." _
 }
 
-# Restart services
+# Restart services (极简风格)
 restart_services() {
     clear
     set_breadcrumb "Main > Manage > Restart"
     show_breadcrumb
-    
-    printf "\n${BOLD}${CYAN}╔═════════════════════════════════════════╗${PLAIN}\n"
-    printf "${BOLD}${CYAN}║          Restart Services               ║${PLAIN}\n"
-    printf "${BOLD}${CYAN}╚═════════════════════════════════════════╝${PLAIN}\n\n"
+
+    printf "\n${BOLD}Restart Services${PLAIN}\n\n"
     
     msg info "Restarting services..."
     echo ""
@@ -1373,21 +1330,19 @@ restart_services() {
         msg warn "Shadow-TLS service is not installed or not running"
     fi
     
-    printf "\n${CYAN}─────────────────────────────────────────${PLAIN}\n"
+    echo ""
     check_snell_status
-    
+
     read -p "Press any key to return..." _
 }
 
-# Update Snell
+# Update Snell (极简风格)
 update_snell() {
     clear
     set_breadcrumb "Main > Update Snell"
     show_breadcrumb
-    
-    printf "\n${BOLD}${CYAN}╔═════════════════════════════════════════╗${PLAIN}\n"
-    printf "${BOLD}${CYAN}║            Update Snell                 ║${PLAIN}\n"
-    printf "${BOLD}${CYAN}╚═════════════════════════════════════════╝${PLAIN}\n\n"
+
+    printf "\n${BOLD}Update Snell${PLAIN}\n\n"
     
     if [[ ! -f "${snell_workspace}/snell-server" ]]; then
         msg err "Snell is not installed, cannot update."
@@ -1407,10 +1362,10 @@ update_snell() {
 
     # Ask which version to update to
     printf "${BOLD}Choose version to update to:${PLAIN}\n\n"
-    printf "  ${GREEN}1)${PLAIN} Latest Snell v4 (Stable)\n"
-    printf "  ${YELLOW}2)${PLAIN} Snell v5 Beta (v5.0.0b1)\n"
-    printf "  ${RED}0)${PLAIN} Cancel\n\n"
-    printf "${BOLD}Choice [0-2]:${PLAIN} "
+    printf "  1) Latest Snell v4 (Stable)\n"
+    printf "  2) Snell v5 Beta (v5.0.0b1)\n"
+    printf "  0) Cancel\n\n"
+    printf "Choice [0-2]: "
     read -rp "" update_choice
 
     local target_version=""
