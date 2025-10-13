@@ -264,7 +264,7 @@ show_loading() {
     local pid=$1
     local message=${2:-"Processing"}
     local delay=0.15
-    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local spinstr='|/-\'
     
     printf "${INFO_SYMBOL} %s " "$message"
     while ps -p "$pid" &>/dev/null; do
@@ -516,7 +516,7 @@ config_shadow_tls() {
         fi
     done
     
-    echo -e "${yellow}Recommended TLS domain list (supports TLS 1.3):${reset}"
+    echo -e "${YELLOW}Recommended TLS domain list (supports TLS 1.3):${PLAIN}"
     echo -e "1) gateway.icloud.com (Apple services)"
     echo -e "2) p11.douyinpic.com (Douyin related, recommended for free flow)"
     echo -e "3) mp.weixin.qq.com (WeChat related)"
@@ -594,8 +594,8 @@ install_snell_without_ip() {
     
     # Ask for Snell version
     msg info "Choose Snell version to install:"
-    echo -e "${green}1) Snell v4 (Stable)${reset}"
-    echo -e "${yellow}2) Snell v5 (Beta)${reset}"
+    echo -e "${GREEN}1) Snell v4 (Stable)${PLAIN}"
+    echo -e "${YELLOW}2) Snell v5 (Beta)${PLAIN}"
     read -rp "Select version [1-2] (default: 1): " version_choice
     
     local snell_version=""
@@ -1171,9 +1171,9 @@ display_config() {
     local snell_psk=$(echo "$snell_config" | grep -oP 'psk = \K.*')
     local snell_ipv6=$(echo "$snell_config" | grep -oP 'ipv6 = \K.*')
     
-    echo -e "${green}Listen Address:${reset} $snell_listen"
-    echo -e "${green}PSK:${reset} $snell_psk"
-    echo -e "${green}IPv6 Support:${reset} $snell_ipv6"
+    echo -e "${GREEN}Listen Address:${PLAIN} $snell_listen"
+    echo -e "${GREEN}PSK:${PLAIN} $snell_psk"
+    echo -e "${GREEN}IPv6 Support:${PLAIN} $snell_ipv6"
     
     # Get Snell version
     local snell_version_num="4"
@@ -1181,9 +1181,9 @@ display_config() {
         local installed_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+')
         if [[ "$installed_version" == "5" ]]; then
             snell_version_num="5"
-            echo -e "${green}Version:${reset} Snell v5 (Beta)"
+            echo -e "${GREEN}Version:${PLAIN} Snell v5 (Beta)"
         else
-            echo -e "${green}Version:${reset} Snell v4"
+            echo -e "${GREEN}Version:${PLAIN} Snell v4"
         fi
     fi
     
@@ -1197,23 +1197,23 @@ display_config() {
         local shadow_tls=$(echo "$shadow_tls_config" | grep -oP '\--tls \K[^ ]+')
         local shadow_password=$(echo "$shadow_tls_config" | grep -oP '\--password \K[^ ]+')
         
-        echo -e "${green}Listen Address:${reset} $shadow_listen"
-        echo -e "${green}Server Address:${reset} $shadow_server"
-        echo -e "${green}TLS Domain:${reset} $shadow_tls"
-        echo -e "${green}Password:${reset} $shadow_password"
+        echo -e "${GREEN}Listen Address:${PLAIN} $shadow_listen"
+        echo -e "${GREEN}Server Address:${PLAIN} $shadow_server"
+        echo -e "${GREEN}TLS Domain:${PLAIN} $shadow_tls"
+        echo -e "${GREEN}Password:${PLAIN} $shadow_password"
         
         # Check if wildcard-sni is enabled
         if echo "$shadow_tls_config" | grep -q "wildcard-sni"; then
-            echo -e "${green}Wildcard SNI:${reset} Enabled (Client can customize SNI)"
+            echo -e "${GREEN}Wildcard SNI:${PLAIN} Enabled (Client can customize SNI)"
         else
-            echo -e "${green}Wildcard SNI:${reset} Disabled"
+            echo -e "${GREEN}Wildcard SNI:${PLAIN} Disabled"
         fi
         
         # Check if strict mode is enabled
         if echo "$shadow_tls_config" | grep -q "\--strict"; then
-            echo -e "${green}Strict Mode:${reset} Enabled"
+            echo -e "${GREEN}Strict Mode:${PLAIN} Enabled"
         else
-            echo -e "${green}Strict Mode:${reset} Disabled"
+            echo -e "${GREEN}Strict Mode:${PLAIN} Disabled"
         fi
     fi
     
@@ -1244,11 +1244,11 @@ display_config() {
     
     if systemctl is-active --quiet shadow-tls; then
         local shadow_port=$(echo "$shadow_listen" | grep -oP ':\K\d+$')
-        echo -e "${cyan}Surge Configuration:${reset}"
+        echo -e "${CYAN}Surge Configuration:${PLAIN}"
         echo -e "[Proxy]"
         echo -e "Snell = snell, ${server_ip}, ${shadow_port}, psk=${snell_psk}, version=${snell_version_num}, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${shadow_password}, shadow-tls-sni=${shadow_tls%%:*}, shadow-tls-version=3"
     else
-        echo -e "${cyan}Surge Configuration:${reset}"
+        echo -e "${CYAN}Surge Configuration:${PLAIN}"
         echo -e "[Proxy]"
         echo -e "Snell = snell, ${server_ip}, ${port}, psk=${snell_psk}, version=${snell_version_num}, reuse=${client_reuse_value}, tfo=${client_tfo_value}"
     fi
