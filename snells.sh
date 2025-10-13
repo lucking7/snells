@@ -480,9 +480,7 @@ RestartSec=3s
 # Harden and increase resource limits for high concurrency
 LimitNOFILE=1048576
 NoNewPrivileges=true
-MemoryLimit=512M
 TasksMax=infinity
-CPUQuota=200%
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 StandardOutput=journal
 StandardError=journal
@@ -1096,9 +1094,7 @@ RestartSec=3s
 # Harden and increase resource limits for high concurrency
 LimitNOFILE=1048576
 NoNewPrivileges=true
-MemoryLimit=1G
 TasksMax=infinity
-CPUQuota=200%
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 StandardOutput=journal
 StandardError=journal

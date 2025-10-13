@@ -23,12 +23,26 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 BOLD='\033[1m'
+UNDERLINE='\033[4m'
+
+# Semantic color aliases for better code readability
+COLOR_INFO_TEXT="${BLUE}"      # General information, prompts
+COLOR_INFO_ACCENT="${BLUE}"    # Supplementary information, static hints
+COLOR_SUCCESS="${GREEN}"       # Success operations
+COLOR_ERROR="${RED}"           # Error messages
+COLOR_WARNING="${YELLOW}"      # Warning messages
+COLOR_MENU_BORDER="${BLUE}"    # Menu borders and main titles
+COLOR_MENU_ITEM="${GREEN}"     # Menu item numbers
+COLOR_IP_INFO="${GREEN}"       # IP information highlight
+COLOR_STATUS_RUNNING="${GREEN}"   # Running status
+COLOR_STATUS_STOPPED="${RED}"     # Stopped status
 
 # Consistent symbols for different message types
-SUCCESS_SYMBOL="${BOLD}${GREEN}[+]${PLAIN}"
-ERROR_SYMBOL="${BOLD}${RED}[x]${PLAIN}"
-INFO_SYMBOL="${BOLD}${BLUE}[i]${PLAIN}"
-WARN_SYMBOL="${BOLD}${YELLOW}[!]${PLAIN}"
+SUCCESS_SYMBOL="${BOLD}${COLOR_SUCCESS}[+]${PLAIN}"
+ERROR_SYMBOL="${BOLD}${COLOR_ERROR}[x]${PLAIN}"
+INFO_SYMBOL="${BOLD}${COLOR_INFO_TEXT}[i]${PLAIN}"
+WARN_SYMBOL="${BOLD}${COLOR_WARNING}[!]${PLAIN}"
+OK_SYMBOL="${BOLD}${COLOR_SUCCESS}[OK]${PLAIN}"
 # Bash version check (must be >=4.0)
 if [[ -z "${BASH_VERSINFO+x}" || ${BASH_VERSINFO[0]} -lt 4 ]]; then
   echo "[x] Bash 4.0+ required" >&2
@@ -126,11 +140,58 @@ trap 'log_warn "Interrupted by user"; cleanup' SIGINT SIGTERM
 
 # Breadcrumb functions
 show_breadcrumb() {
-    printf "\n${BOLD}${BLUE}==== %s ====${PLAIN}\n" "$BREADCRUMB_PATH"
+    printf "\n%b%b==== %s ====%b\n" "$BOLD" "$BLUE" "$BREADCRUMB_PATH" "$PLAIN"
 }
 
 set_breadcrumb() {
     BREADCRUMB_PATH="$1"
+}
+
+# show_loading: display ASCII spinner animation while process is running
+# Params: $1 process PID
+# Return: displays spinner and completion status
+show_loading() {
+    local pid=$1
+    local delay=0.2
+    local spinstr='|/-\\'
+    local temp
+    printf " "
+    while ps -p "$pid" &>/dev/null; do
+        temp=${spinstr#?}
+        printf "[%c]  " "$spinstr"
+        spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        printf "\\b\\b\\b\\b\\b"
+    done
+    printf "\\b\\b\\b\\b\\b"
+    printf "%b\n" "$OK_SYMBOL"
+}
+
+# get_ip_info: retrieve primary IP address information
+# Return: prints IPv4 address or status message
+get_ip_info() {
+    local ip=""
+
+    # Try to get primary IPv4 address from default route interface
+    if command -v ip &>/dev/null; then
+        local default_if
+        default_if=$(ip route | grep '^default' | head -1 | awk '{print $5}')
+        if [[ -n "$default_if" ]]; then
+            ip=$(ip -4 addr show "$default_if" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+        fi
+    fi
+
+    # Fallback to ifconfig if available
+    if [[ -z "$ip" ]] && command -v ifconfig &>/dev/null; then
+        ip=$(ifconfig 2>/dev/null | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0.1' | head -1)
+    fi
+
+    # Return result
+    if [[ -n "$ip" ]]; then
+        echo "$ip"
+    else
+        echo "无法获取IP信息"
+    fi
 }
 
 # Logging functions (enhanced)
@@ -524,13 +585,13 @@ check_conntrack_usage() {
     printf "连接跟踪: %d/%d (使用率 %d%%)" "$current" "$max" "$usage"
 
     if [[ $usage -gt 90 ]]; then
-        printf " ${RED}[危险: 即将耗尽]${PLAIN}\n"
+        printf " %b[危险: 即将耗尽]%b\n" "$RED" "$PLAIN"
         log_error "连接跟踪表使用率 ${usage}%，即将耗尽！"
     elif [[ $usage -gt 80 ]]; then
-        printf " ${YELLOW}[警告: 使用率过高]${PLAIN}\n"
+        printf " %b[警告: 使用率过高]%b\n" "$YELLOW" "$PLAIN"
         log_warn "连接跟踪表使用率 ${usage}%，建议增加 nf_conntrack_max"
     else
-        printf " ${GREEN}[正常]${PLAIN}\n"
+        printf " %b[正常]%b\n" "$GREEN" "$PLAIN"
     fi
 }
 
@@ -545,13 +606,13 @@ check_fd_usage() {
     printf "文件描述符: %d/%d (使用率 %d%%)" "$allocated" "$max" "$usage"
 
     if [[ $usage -gt 85 ]]; then
-        printf " ${RED}[危险]${PLAIN}\n"
+        printf " %b[危险]%b\n" "$RED" "$PLAIN"
         log_error "文件描述符使用率 ${usage}%，即将耗尽！"
     elif [[ $usage -gt 70 ]]; then
-        printf " ${YELLOW}[警告]${PLAIN}\n"
+        printf " %b[警告]%b\n" "$YELLOW" "$PLAIN"
         log_warn "文件描述符使用率 ${usage}%"
     else
-        printf " ${GREEN}[正常]${PLAIN}\n"
+        printf " %b[正常]%b\n" "$GREEN" "$PLAIN"
     fi
 }
 
@@ -559,8 +620,8 @@ check_fd_usage() {
 # Params: none
 # Return: 0
 show_resource_status() {
-    printf "\n${BOLD}系统资源状态${PLAIN}\n"
-    printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    printf "\n%b系统资源状态%b\n" "$BOLD" "$PLAIN"
+    printf "=================================================\n"
     check_conntrack_usage
     check_fd_usage
 
@@ -570,12 +631,12 @@ show_resource_status() {
     local mem_usage=$((mem_used * 100 / mem_total))
     printf "系统内存: %dMB/%dMB (使用率 %d%%)" "$mem_used" "$mem_total" "$mem_usage"
     if [[ $mem_usage -gt 80 ]]; then
-        printf " ${YELLOW}[警告]${PLAIN}\n"
+        printf " %b[警告]%b\n" "$YELLOW" "$PLAIN"
     else
-        printf " ${GREEN}[正常]${PLAIN}\n"
+        printf " %b[正常]%b\n" "$GREEN" "$PLAIN"
     fi
 
-    printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    printf "=================================================\n"
 }
 
 # Create system user and group for service
@@ -701,6 +762,7 @@ install_gost() {
     fi
     if command -v gost >/dev/null 2>&1; then
         log_success "GOST installed successfully"
+        printf "%b GOST is ready to use\n" "$OK_SYMBOL"
         TOOL_STATUS[gost]="installed"
         return 0
     else
@@ -737,6 +799,7 @@ install_nftables() {
             systemctl enable nftables >/dev/null 2>&1 || true
         fi
         log_success "NFTables installed successfully"
+        printf "%b NFTables is ready to use\n" "$OK_SYMBOL"
         TOOL_STATUS[nftables]="installed"
         return 0
     elif [[ $rc -eq 127 ]]; then
@@ -810,6 +873,7 @@ install_realm() {
 
     if [[ $rc -eq 0 ]] && command -v realm >/dev/null 2>&1; then
         log_success "Realm installed successfully"
+        printf "%b Realm is ready to use\n" "$OK_SYMBOL"
         TOOL_STATUS[realm]="installed"
         return 0
     else
@@ -881,7 +945,7 @@ restore_config() {
 
     local selected_backup="${backups[$((choice-1))]}"
 
-    printf "\n${YELLOW}Restore from $(basename "$selected_backup")?${PLAIN}\n"
+    printf "\n%bRestore from $(basename "$selected_backup")?%b\n" "$YELLOW" "$PLAIN"
     printf "Current configuration will be overwritten.\n"
     printf "\nContinue? [y/N]: "
     read -r confirm
@@ -960,8 +1024,8 @@ health_check_all() {
         return 0
     fi
 
-    printf "\n${BOLD}Health Check Results${PLAIN}\n"
-    printf "----------------------------------------------------------------------\n"
+    printf "\n%bHealth Check Results%b\n" "$BOLD" "$PLAIN"
+    printf "======================================================================\n"
 
     local healthy=0
     local unhealthy=0
@@ -983,8 +1047,8 @@ health_check_all() {
         fi
     done < <(jq -c '.rules[]' "$CONFIG_FILE")
 
-    printf "\n----------------------------------------------------------------------\n"
-    printf "Summary: ${GREEN}%d healthy${PLAIN}, ${RED}%d unhealthy${PLAIN}\n" "$healthy" "$unhealthy"
+    printf "\n======================================================================\n"
+    printf "Summary: %b%d healthy%b, %b%d unhealthy%b\n" "$GREEN" "$healthy" "$PLAIN" "$RED" "$unhealthy" "$PLAIN"
 
     return 0
 }
@@ -1284,9 +1348,9 @@ list_forward_rules() {
         return 0
     fi
 
-    printf "\n${BOLD}%-3s %-8s %-5s %-15s %-5s %-8s %-8s %-10s${PLAIN}\n" \
-           "#" "TOOL" "PORT" "TARGET_IP" "PORT" "PROTOCOL" "STATUS" "CREATED"
-    printf "----------------------------------------------------------------------\n"
+    printf "\n%b%-3s %-8s %-5s %-15s %-5s %-8s %-8s %-10s%b\n" \
+           "$BOLD" "#" "TOOL" "PORT" "TARGET_IP" "PORT" "PROTOCOL" "STATUS" "CREATED" "$PLAIN"
+    printf "======================================================================\n"
 
     local index=0
     while read -r rule; do
@@ -1303,10 +1367,10 @@ list_forward_rules() {
         local status="unknown"
         case "$tool" in
             gost|realm)
-                status=$( systemctl is-active --quiet "$tool" 2>/dev/null && echo "${GREEN}running${PLAIN}" || echo "${RED}stopped${PLAIN}" )
+                status=$( systemctl is-active --quiet "$tool" 2>/dev/null && printf "%brunning%b" "$GREEN" "$PLAIN" || printf "%bstopped%b" "$RED" "$PLAIN" )
                 ;;
             nftables)
-                status=$( nft list chain inet fwrd_nat fwrd_prerouting 2>/dev/null | grep -q "fwrd-${id}" && echo "${GREEN}active${PLAIN}" || echo "${RED}inactive${PLAIN}" )
+                status=$( nft list chain inet fwrd_nat fwrd_prerouting 2>/dev/null | grep -q "fwrd-${id}" && printf "%bactive%b" "$GREEN" "$PLAIN" || printf "%binactive%b" "$RED" "$PLAIN" )
                 ;;
         esac
 
@@ -1381,8 +1445,8 @@ show_system_status() {
     local ipv6_forward=$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null || echo "0")
 
     printf "IP Forwarding:\n"
-    printf "  IPv4: %s\n" "$([[ "$ipv4_forward" == "1" ]] && echo -e "${GREEN}enabled${PLAIN}" || echo -e "${RED}disabled${PLAIN}")"
-    printf "  IPv6: %s\n" "$([[ "$ipv6_forward" == "1" ]] && echo -e "${GREEN}enabled${PLAIN}" || echo -e "${RED}disabled${PLAIN}")"
+    printf "  IPv4: %b\n" "$([[ "$ipv4_forward" == "1" ]] && printf "%benabled%b" "$GREEN" "$PLAIN" || printf "%bdisabled%b" "$RED" "$PLAIN")"
+    printf "  IPv6: %b\n" "$([[ "$ipv6_forward" == "1" ]] && printf "%benabled%b" "$GREEN" "$PLAIN" || printf "%bdisabled%b" "$RED" "$PLAIN")"
 
     printf "\nTool Status:\n"
     for tool in "${!FORWARD_TOOLS[@]}"; do
@@ -1390,17 +1454,17 @@ show_system_status() {
         local service_status="${TOOL_SERVICE_STATUS[$tool]:-disabled}"
 
         case "$install_status" in
-            installed) install_status="${GREEN}installed${PLAIN}" ;;
-            *) install_status="${RED}not installed${PLAIN}" ;;
+            installed) install_status=$(printf "%binstalled%b" "$GREEN" "$PLAIN") ;;
+            *) install_status=$(printf "%bnot installed%b" "$RED" "$PLAIN") ;;
         esac
 
         case "$service_status" in
-            active) service_status="${GREEN}running${PLAIN}" ;;
-            inactive) service_status="${YELLOW}stopped${PLAIN}" ;;
-            *) service_status="${RED}disabled${PLAIN}" ;;
+            active) service_status=$(printf "%brunning%b" "$GREEN" "$PLAIN") ;;
+            inactive) service_status=$(printf "%bstopped%b" "$YELLOW" "$PLAIN") ;;
+            *) service_status=$(printf "%bdisabled%b" "$RED" "$PLAIN") ;;
         esac
 
-        printf "  %s: %s (%s)\n" "$tool" "$install_status" "$service_status"
+        printf "  %s: %b (%b)\n" "$tool" "$install_status" "$service_status"
     done
 
     local rules_count=$(jq '.rules | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
@@ -1464,13 +1528,12 @@ interactive_add_rule() {
     fi
 
     # Show summary and confirm
-    # Show summary and confirm
-    printf "\n${YELLOW}═══ Rule Summary ═══${PLAIN}\n"
+    printf "\n%b=== Rule Summary ===%b\n" "$YELLOW" "$PLAIN"
     printf "  Listen: 0.0.0.0:%s\n" "$listen_port"
     printf "  Target: %s:%s\n" "$target_ip" "$target_port"
     printf "  Protocol: %s\n" "$protocol"
     printf "  Tool: %s\n" "$tool"
-    printf "════════════════════\n"
+    printf "====================\n"
 
     printf "\nCreate this rule? [Y/n]: "
     read -r confirm
@@ -1494,21 +1557,36 @@ interactive_add_rule() {
 show_main_menu() {
     while true; do
         clear
-        set_breadcrumb "Main"
-        show_breadcrumb
+
+        # Display title with version
+        local ip_info
+        ip_info=$(get_ip_info)
+        printf "\n%b%b========== Forward Manager (v%s) ==========%b\n" "$BOLD" "$COLOR_MENU_BORDER" "$VERSION" "$PLAIN"
+
+        # Display IP information
+        if [[ "$ip_info" != "无法获取IP信息" ]]; then
+            printf "%b 本机IP: %b%s%b\n" "$INFO_SYMBOL" "$COLOR_IP_INFO" "$ip_info" "$PLAIN"
+        else
+            printf "%b 本机IP: %b%s%b\n" "$WARN_SYMBOL" "$COLOR_WARNING" "$ip_info" "$PLAIN"
+        fi
+
+        printf "%b%b----------------------------------------------------%b\n" "$BOLD" "$COLOR_MENU_BORDER" "$PLAIN"
+
+        # Display system status
         show_system_status
 
-        printf "\n${BOLD}${GREEN}==== Menu Options ====${PLAIN}\n"
-        printf "  1) Install tools\n"
-        printf "  2) Add forwarding rule\n"
-        printf "  3) List rules\n"
-        printf "  4) Delete rule\n"
-        printf "  5) Service control\n"
-        printf "  6) Health check\n"
-        printf "  7) Backup configuration\n"
-        printf "  8) Restore configuration\n"
-        printf "  9) System optimization\n"
-        printf "  0) Exit\n"
+        printf "\n%b%b==== Menu Options ====%b\n" "$BOLD" "$COLOR_MENU_BORDER" "$PLAIN"
+        printf "  %b1.%b Install tools\n" "$COLOR_MENU_ITEM" "$PLAIN"
+        printf "  %b2.%b Add forwarding rule\n" "$COLOR_MENU_ITEM" "$PLAIN"
+        printf "  %b3.%b List rules\n" "$COLOR_MENU_ITEM" "$PLAIN"
+        printf "  %b4.%b Delete rule\n" "$COLOR_MENU_ITEM" "$PLAIN"
+        printf "  %b5.%b Service control\n" "$COLOR_MENU_ITEM" "$PLAIN"
+        printf "  %b6.%b Health check\n" "$COLOR_MENU_ITEM" "$PLAIN"
+        printf "  %b7.%b Backup configuration\n" "$COLOR_MENU_ITEM" "$PLAIN"
+        printf "  %b8.%b Restore configuration\n" "$COLOR_MENU_ITEM" "$PLAIN"
+        printf "  %b9.%b System optimization\n" "$COLOR_MENU_ITEM" "$PLAIN"
+        printf "  %b0.%b Exit\n" "$COLOR_MENU_ITEM" "$PLAIN"
+        printf "%b%b====================================================%b\n" "$BOLD" "$COLOR_MENU_BORDER" "$PLAIN"
         printf "\n"
 
         read -p "Choice: " choice
@@ -1522,8 +1600,8 @@ show_main_menu() {
             7) backup_config; printf "\nPress Enter to continue..."; read -r ;;
             8) restore_config; printf "\nPress Enter to continue..."; read -r ;;
             9) system_optimization_menu ;;
-            0) printf "${SUCCESS_SYMBOL} Goodbye${PLAIN}\n"; exit 0 ;;
-            *) printf "${WARN_SYMBOL} Invalid choice${PLAIN}\n"; sleep 1 ;;
+            0) printf "%b Goodbye%b\n" "$SUCCESS_SYMBOL" "$PLAIN"; exit 0 ;;
+            *) printf "%b Invalid choice%b\n" "$WARN_SYMBOL" "$PLAIN"; sleep 1 ;;
         esac
     done
 }
@@ -1532,14 +1610,14 @@ install_tools_menu() {
     clear
     show_breadcrumb
 
-    printf "\n${BOLD}Tool Installation${PLAIN}\n\n"
+    printf "\n%bTool Installation%b\n\n" "$BOLD" "$PLAIN"
 
     local tools_order=(gost nftables realm)
     local index=1
     for tool in "${tools_order[@]}"; do
         local status="${TOOL_STATUS[$tool]}"
-        local status_color=$([[ "$status" == "installed" ]] && echo "${GREEN}installed${PLAIN}" || echo "${RED}not installed${PLAIN}")
-        printf "  %d. %s - %s (%s)\n" "$index" "$tool" "${FORWARD_TOOLS[$tool]}" "$status_color"
+        local status_color=$([[ "$status" == "installed" ]] && printf "%binstalled%b" "$GREEN" "$PLAIN" || printf "%bnot installed%b" "$RED" "$PLAIN")
+        printf "  %d. %s - %s (%b)\n" "$index" "$tool" "${FORWARD_TOOLS[$tool]}" "$status_color"
         ((index++))
     done
 
@@ -1571,7 +1649,7 @@ delete_rule_interactive() {
     read -p "Rule number to delete: " rule_num
 
     if [[ "$rule_num" =~ ^[0-9]+$ ]]; then
-        printf "\n${YELLOW}Delete rule #%s?${PLAIN}\n" "$rule_num"
+        printf "\n%bDelete rule #%s?%b\n" "$YELLOW" "$rule_num" "$PLAIN"
         printf "This action cannot be undone.\n"
         printf "\nContinue? [y/N]: "
         read -r confirm
@@ -1593,23 +1671,32 @@ service_control_menu() {
         clear
         show_breadcrumb
 
-        printf "\n${BOLD}Service Control${PLAIN}\n\n"
+        printf "\n%bService Control%b\n\n" "$BOLD" "$PLAIN"
 
-        printf "Current Status:\n"
+        printf "%bCurrent Status:%b\n" "$BOLD" "$PLAIN"
         for tool in "${!FORWARD_TOOLS[@]}"; do
             if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
                 local status="${TOOL_SERVICE_STATUS[$tool]}"
-                local status_color
+                local status_symbol status_text
                 case "$status" in
-                    active) status_color="${GREEN}running${PLAIN}" ;;
-                    inactive) status_color="${YELLOW}stopped${PLAIN}" ;;
-                    *) status_color="${RED}disabled${PLAIN}" ;;
+                    active)
+                        status_symbol="$SUCCESS_SYMBOL"
+                        status_text=$(printf "%brunning%b" "$COLOR_STATUS_RUNNING" "$PLAIN")
+                        ;;
+                    inactive)
+                        status_symbol="$WARN_SYMBOL"
+                        status_text=$(printf "%bstopped%b" "$COLOR_WARNING" "$PLAIN")
+                        ;;
+                    *)
+                        status_symbol="$ERROR_SYMBOL"
+                        status_text=$(printf "%bdisabled%b" "$COLOR_STATUS_STOPPED" "$PLAIN")
+                        ;;
                 esac
-                printf "  %s: %s\n" "$tool" "$status_color"
+                printf "  %b %s: %b\n" "$status_symbol" "$tool" "$status_text"
             fi
         done
 
-        printf "\n${BOLD}Actions:${PLAIN}\n"
+        printf "\n%bActions:%b\n" "$BOLD" "$PLAIN"
         printf "  1. Start all services\n"
         printf "  2. Stop all services\n"
         printf "  3. Restart all services\n"
@@ -1622,25 +1709,42 @@ service_control_menu() {
             1)
                 log_info "Starting services..."
                 for tool in "${!FORWARD_TOOLS[@]}"; do
-                    [[ "${TOOL_STATUS[$tool]}" == "installed" ]] && systemctl start "$tool" 2>/dev/null
+                    if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
+                        if systemctl start "$tool" 2>/dev/null; then
+                            printf "%b %s started\n" "$OK_SYMBOL" "$tool"
+                        fi
+                    fi
                 done
                 detect_tools
+                printf "\nPress Enter to continue..."
+                read -r
                 ;;
             2)
                 log_info "Stopping services..."
                 for tool in "${!FORWARD_TOOLS[@]}"; do
-                    systemctl stop "$tool" 2>/dev/null
+                    if systemctl stop "$tool" 2>/dev/null; then
+                        printf "%b %s stopped\n" "$OK_SYMBOL" "$tool"
+                    fi
                 done
                 detect_tools
+                printf "\nPress Enter to continue..."
+                read -r
                 ;;
             3)
                 log_info "Restarting services..."
                 for tool in "${!FORWARD_TOOLS[@]}"; do
-                    [[ "${TOOL_STATUS[$tool]}" == "installed" ]] && systemctl restart "$tool" 2>/dev/null
+                    if [[ "${TOOL_STATUS[$tool]}" == "installed" ]]; then
+                        if systemctl restart "$tool" 2>/dev/null; then
+                            printf "%b %s restarted\n" "$OK_SYMBOL" "$tool"
+                        fi
+                    fi
                 done
                 detect_tools
+                printf "\nPress Enter to continue..."
+                read -r
                 ;;
             4)
+                log_info "Enabling IP forwarding..."
                 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
                 sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1
 
@@ -1653,12 +1757,13 @@ service_control_menu() {
                 fi
 
                 log_success "IPv4/IPv6 forwarding enabled"
+                printf "%b Configuration saved to /etc/sysctl.conf\n" "$OK_SYMBOL"
+                printf "\nPress Enter to continue..."
+                read -r
                 ;;
             0) return ;;
             *) log_error "Invalid choice"; sleep 1 ;;
         esac
-
-        [[ "$choice" != "0" ]] && { printf "\nPress Enter to continue..."; read -r; }
     done
 }
 
@@ -1673,24 +1778,24 @@ system_optimization_menu() {
         local kernel_optimized=$(jq -r '.global_settings.kernel_optimized // false' "$CONFIG_FILE" 2>/dev/null)
         local protection_level=$(jq -r '.global_settings.protection_level // "balanced"' "$CONFIG_FILE" 2>/dev/null)
 
-        printf "\n${BOLD}当前配置${PLAIN}\n"
-        printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        printf "\n%b当前配置%b\n" "$BOLD" "$PLAIN"
+        printf "=================================================\n"
         printf "内核优化: "
         if [[ "$kernel_optimized" == "true" ]]; then
-            printf "${GREEN}已启用${PLAIN}\n"
+            printf "%b已启用%b\n" "$GREEN" "$PLAIN"
         else
-            printf "${YELLOW}未启用${PLAIN}\n"
+            printf "%b未启用%b\n" "$YELLOW" "$PLAIN"
         fi
         printf "保护级别: "
         case "$protection_level" in
-            aggressive) printf "${RED}激进保护${PLAIN} (OOMScore=-1000)\n" ;;
-            balanced) printf "${GREEN}平衡保护${PLAIN} (OOMScore=-900)\n" ;;
-            conservative) printf "${BLUE}保守保护${PLAIN} (OOMScore=-500)\n" ;;
-            *) printf "${YELLOW}未知${PLAIN}\n" ;;
+            aggressive) printf "%b激进保护%b (OOMScore=-1000)\n" "$RED" "$PLAIN" ;;
+            balanced) printf "%b平衡保护%b (OOMScore=-900)\n" "$GREEN" "$PLAIN" ;;
+            conservative) printf "%b保守保护%b (OOMScore=-500)\n" "$BLUE" "$PLAIN" ;;
+            *) printf "%b未知%b\n" "$YELLOW" "$PLAIN" ;;
         esac
-        printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        printf "=================================================\n"
 
-        printf "\n${BOLD}操作菜单${PLAIN}\n"
+        printf "\n%b操作菜单%b\n" "$BOLD" "$PLAIN"
         printf "  1) 优化内核参数\n"
         printf "  2) 查看资源使用状态\n"
         printf "  3) 设置服务保护级别\n"
@@ -1702,14 +1807,14 @@ system_optimization_menu() {
         case "$opt_choice" in
             1)
                 clear
-                printf "\n${BOLD}内核参数优化${PLAIN}\n"
-                printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                printf "\n%b内核参数优化%b\n" "$BOLD" "$PLAIN"
+                printf "=================================================\n"
                 printf "此操作将优化以下参数：\n"
-                printf "  • 连接跟踪表: 1048576\n"
-                printf "  • TCP 连接队列: 65535\n"
-                printf "  • 文件描述符: 1048576\n"
-                printf "  • 端口范围优化\n"
-                printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                printf "  - 连接跟踪表: 1048576\n"
+                printf "  - TCP 连接队列: 65535\n"
+                printf "  - 文件描述符: 1048576\n"
+                printf "  - 端口范围优化\n"
+                printf "=================================================\n"
                 printf "\n继续优化? [Y/n]: "
                 read -r confirm
                 if [[ ! "$confirm" =~ ^[Nn]$ ]]; then
@@ -1731,27 +1836,27 @@ system_optimization_menu() {
                 ;;
             3)
                 clear
-                printf "\n${BOLD}设置服务保护级别${PLAIN}\n"
-                printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                printf "\n%b设置服务保护级别%b\n" "$BOLD" "$PLAIN"
+                printf "=================================================\n"
                 printf "\n选择保护级别:\n"
-                printf "  1) ${RED}激进保护${PLAIN}\n"
-                printf "     • OOMScore: -1000 (最高优先级)\n"
-                printf "     • Nice: -10 (CPU 高优先级)\n"
-                printf "     • 内存: 无限制\n"
-                printf "     • 适用: 生产环境，关键服务\n"
+                printf "  1) %b激进保护%b\n" "$RED" "$PLAIN"
+                printf "     - OOMScore: -1000 (最高优先级)\n"
+                printf "     - Nice: -10 (CPU 高优先级)\n"
+                printf "     - 内存: 无限制\n"
+                printf "     - 适用: 生产环境，关键服务\n"
                 printf "\n"
-                printf "  2) ${GREEN}平衡保护${PLAIN} (推荐)\n"
-                printf "     • OOMScore: -900\n"
-                printf "     • Nice: -5\n"
-                printf "     • 内存: 2G/4G\n"
-                printf "     • 适用: 一般环境\n"
+                printf "  2) %b平衡保护%b (推荐)\n" "$GREEN" "$PLAIN"
+                printf "     - OOMScore: -900\n"
+                printf "     - Nice: -5\n"
+                printf "     - 内存: 2G/4G\n"
+                printf "     - 适用: 一般环境\n"
                 printf "\n"
-                printf "  3) ${BLUE}保守保护${PLAIN}\n"
-                printf "     • OOMScore: -500\n"
-                printf "     • Nice: 0\n"
-                printf "     • 内存: 1G/2G\n"
-                printf "     • 适用: 测试环境\n"
-                printf "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                printf "  3) %b保守保护%b\n" "$BLUE" "$PLAIN"
+                printf "     - OOMScore: -500\n"
+                printf "     - Nice: 0\n"
+                printf "     - 内存: 1G/2G\n"
+                printf "     - 适用: 测试环境\n"
+                printf "\n=================================================\n"
                 printf "\n选择 [2]: "
                 read -r level_choice
                 level_choice=${level_choice:-2}
@@ -1771,14 +1876,14 @@ system_optimization_menu() {
                     mv "$temp_file" "$CONFIG_FILE"
 
                 log_success "保护级别已设置为: $level_name"
-                printf "\n${YELLOW}提示:${PLAIN} 需要选择菜单项 4 重建服务单元以应用新保护级别\n"
+                printf "\n%b提示:%b 需要选择菜单项 4 重建服务单元以应用新保护级别\n" "$YELLOW" "$PLAIN"
                 printf "\nPress Enter to continue..."
                 read -r
                 ;;
             4)
                 clear
-                printf "\n${BOLD}重建服务单元${PLAIN}\n"
-                printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                printf "\n%b重建服务单元%b\n" "$BOLD" "$PLAIN"
+                printf "=================================================\n"
                 printf "此操作将使用当前保护级别重建所有已安装工具的服务单元\n"
                 printf "\n继续? [Y/n]: "
                 read -r confirm
@@ -2035,11 +2140,13 @@ install_cli_traps() {
 # build_realm_toml_from_endpoints: generate Realm TOML config from ENDPOINTS_JSON
 # Params: $1 output file path; $2 JSON array of endpoints
 # Return: 0 on success; 3 on invalid data
+# Note: Realm uses global [network] section for protocol control (no_tcp, use_udp)
+#       Individual [[endpoints]] only contain listen/remote addresses
 build_realm_toml_from_endpoints() {
   local out="$1"; local arr="$2"
   umask 077
   : >"$out" || { log_error "无法写入 $out"; return 3; }
-  # Compute global flags
+  # Compute global protocol flags from all endpoints
   local any_tcp=false any_udp=false i len
   len=$(jq 'length' <<<"$arr")
   for ((i=0; i<len; i++)); do
@@ -2047,31 +2154,29 @@ build_realm_toml_from_endpoints() {
     [[ "$proto" == "tcp" || "$proto" == "both" ]] && any_tcp=true
     [[ "$proto" == "udp" || "$proto" == "both" ]] && any_udp=true
   done
+  # Write [network] section with global protocol settings
   {
+    echo "# Realm configuration - Global network settings"
     echo "[network]"
     if $any_tcp; then echo "no_tcp = false"; else echo "no_tcp = true"; fi
     if $any_udp; then echo "use_udp = true"; else echo "use_udp = false"; fi
     echo
   } >>"$out"
-  # Endpoints
+  # Write [[endpoints]] sections - only listen/remote per Realm spec
+  # Protocol handling is inherited from [network] section
   for ((i=0; i<len; i++)); do
-    local listen remote proto
+    local listen remote
     listen=$(jq -r ".[$i].listen" <<<"$arr")
     remote=$(jq -r ".[$i].remote" <<<"$arr")
-    proto=$(jq -r ".[$i].proto" <<<"$arr")
-    local use_tcp=false use_udp=false
-    [[ "$proto" == "tcp" || "$proto" == "both" ]] && use_tcp=true
-    [[ "$proto" == "udp" || "$proto" == "both" ]] && use_udp=true
     {
       echo "[[endpoints]]"
       echo "listen = \"$listen\""
       echo "remote = \"$remote\""
-      echo "use_tcp = ${use_tcp}"
-      echo "use_udp = ${use_udp}"
       echo
     } >>"$out"
   done
   chmod 600 "$out" 2>/dev/null || true
+  log_info "Realm 配置已生成,符合官方 TOML 规范"
   return 0
 }
 
