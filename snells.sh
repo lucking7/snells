@@ -75,16 +75,22 @@ msg() {
     esac
 }
 
-# Enhanced system status dashboard (极简风格)
+# Enhanced system status dashboard with ASCII table borders
 check_snell_status() {
-    printf "\n${BOLD}System Status${PLAIN}\n"
-    printf "%-15s %-15s %-10s %-15s\n" "Service" "Status" "Port" "Version"
-    printf "%-15s %-15s %-10s %-15s\n" "-------" "------" "----" "-------"
+    printf "\n${BOLD}System Status${PLAIN}\n\n"
+    
+    # ASCII table header
+    printf "+%-17s+%-20s+%-12s+%-17s+\n" \
+        "-----------------" "--------------------" "------------" "-----------------"
+    printf "| %-15s | %-18s | %-10s | %-15s |\n" "Service" "Status" "Port" "Version"
+    printf "+%-17s+%-20s+%-12s+%-17s+\n" \
+        "-----------------" "--------------------" "------------" "-----------------"
     
     # Snell service status
     local snell_status="${RED}Stopped${PLAIN}"
     local snell_port="N/A"
     local snell_version="N/A"
+    local snell_status_plain="Stopped"
 
     if [[ -f "${snell_workspace}/snell-server.conf" ]]; then
         snell_port=$(grep -oP 'listen = .*?:\K\d+' "${snell_workspace}/snell-server.conf" 2>/dev/null || echo "N/A")
@@ -95,17 +101,23 @@ check_snell_status() {
 
         if systemctl is-active --quiet snell; then
             snell_status="${GREEN}Running${PLAIN}"
+            snell_status_plain="Running"
         fi
     else
         snell_status="${YELLOW}Not installed${PLAIN}"
+        snell_status_plain="Not installed"
     fi
 
-    printf "%-15s %-20s %-10s %-15s\n" "Snell" "$snell_status" "$snell_port" "v$snell_version"
+    # Calculate padding for colored status text
+    local snell_padding=$((18 - ${#snell_status_plain}))
+    printf "| %-15s | %s%${snell_padding}s | %-10s | %-15s |\n" \
+        "Snell" "$snell_status" "" "$snell_port" "v$snell_version"
 
     # Shadow-TLS service status
     local shadow_status="${YELLOW}Not installed${PLAIN}"
     local shadow_port="N/A"
     local shadow_version="N/A"
+    local shadow_status_plain="Not installed"
 
     if [[ -f "/usr/local/bin/shadow-tls" ]]; then
         shadow_version=$(/usr/local/bin/shadow-tls --version 2>&1 | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "N/A")
@@ -116,14 +128,20 @@ check_snell_status() {
 
             if systemctl is-active --quiet shadow-tls; then
                 shadow_status="${GREEN}Running${PLAIN}"
+                shadow_status_plain="Running"
             else
                 shadow_status="${RED}Stopped${PLAIN}"
+                shadow_status_plain="Stopped"
             fi
         fi
     fi
 
-    printf "%-15s %-20s %-10s %-15s\n" "Shadow-TLS" "$shadow_status" "$shadow_port" "v$shadow_version"
+    local shadow_padding=$((18 - ${#shadow_status_plain}))
+    printf "| %-15s | %s%${shadow_padding}s | %-10s | %-15s |\n" \
+        "Shadow-TLS" "$shadow_status" "" "$shadow_port" "v$shadow_version"
     
+    printf "+%-17s+%-20s+%-12s+%-17s+\n" \
+        "-----------------" "--------------------" "------------" "-----------------"
     echo ""
 }
 
@@ -218,6 +236,42 @@ snell_service="/etc/systemd/system/snell.service"
 shadow_tls_workspace="/etc/shadow-tls"  
 shadow_tls_service="/etc/systemd/system/shadow-tls.service"
 dependencies="wget unzip jq net-tools curl cron"
+LOG_FILE="/var/log/snells-manager.log"
+
+# Enhanced error handling with logging
+handle_error() {
+    local error_code=${1:-"E000"}
+    local error_msg=${2:-"Unknown error"}
+    local suggestion=${3:-""}
+    
+    msg err "$error_msg"
+    [ -n "$suggestion" ] && msg info "Suggestion: $suggestion"
+    
+    # Log error
+    log_operation "ERROR" "SYSTEM" "$error_code: $error_msg"
+    
+    return 1
+}
+
+# Log operations for troubleshooting
+log_operation() {
+    local level=${1:-"INFO"}    # INFO, WARN, ERROR
+    local category=${2:-"GENERAL"} # INSTALL, CONFIG, MANAGE, SYSTEM
+    local message=${3:-""}
+    
+    # Create log directory if doesn't exist
+    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null
+    
+    # Write to log file
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] [$category] $message" >> "$LOG_FILE" 2>/dev/null
+}
+
+# Success operation log
+log_success() {
+    local category=${1:-"GENERAL"}
+    local message=${2:-""}
+    log_operation "INFO" "$category" "$message"
+}
 
 # Simplified installation of missing packages  
 install_pkg() {
@@ -236,26 +290,69 @@ generate_random_password() {
     echo "$(openssl rand -base64 16)"
 }
 
-# Input validation functions
+# Enhanced input validation functions with real-time feedback
 validate_port() {
     local port=$1
-    if [[ ! "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-        msg err "Invalid port number: $port (must be 1-65535)"
+    local show_usage=${2:-false}
+    
+    # Check if port is numeric
+    if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+        msg err "Invalid port: '$port' is not a number"
         return 1
     fi
+    
+    # Check port range
+    if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        msg err "Invalid port: $port (must be 1-65535)"
+        return 1
+    fi
+    
+    # Check if port is in use
+    if [ "$show_usage" = true ]; then
+        if ss -tuln | grep -q ":${port} "; then
+            local process=$(ss -tulpn 2>/dev/null | grep ":${port} " | grep -oP 'users:\(\(".*?"\)' | sed 's/users:((//' | sed 's/".*//' || echo "unknown")
+            msg warn "Port $port is already in use"
+            [ "$process" != "unknown" ] && msg info "Used by: $process"
+            return 2  # Return 2 to indicate port is in use but valid format
+        else
+            msg ok "Port $port is available"
+        fi
+    fi
+    
     return 0
 }
 
 validate_domain() {
     local domain=$1
+    local check_dns=${2:-false}
+    
     if [[ -z "$domain" ]]; then
         msg err "Domain cannot be empty"
         return 1
     fi
+    
+    # Check domain format
     if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
         msg err "Invalid domain format: $domain"
+        msg info "Example: gateway.icloud.com"
         return 1
     fi
+    
+    # Optional DNS check
+    if [ "$check_dns" = true ]; then
+        msg info "Checking DNS resolution..."
+        if host -W 2 "$domain" &>/dev/null; then
+            local ip=$(host "$domain" 2>/dev/null | grep "has address" | head -1 | awk '{print $NF}')
+            if [ -n "$ip" ]; then
+                msg ok "Domain resolves to: $ip"
+            else
+                msg ok "Domain is valid"
+            fi
+        else
+            msg warn "Cannot resolve domain (may still work for SNI)"
+        fi
+    fi
+    
     return 0
 }
 
@@ -313,17 +410,23 @@ find_unused_port() {
 
 # Function to create Snell configuration file
 create_snell_conf() {
-    # Get port with validation
+    # Get port with enhanced validation
+    printf "\n${BOLD}Port Configuration${PLAIN}\n"
     while true; do
-        read -rp "Assign a port for Snell (Leave blank for random, 1-65535): " snell_port
+        read -rp "Assign a port for Snell [1-65535] (blank for random): " snell_port
         if [[ -z ${snell_port} ]]; then
             snell_port=$(find_unused_port)
-            msg info "Assigned random port for Snell: $snell_port"
+            msg info "Assigned random port: $snell_port"
             break
-        elif validate_port "$snell_port"; then
-            # Check if port is already in use
-            if ss -tuln | grep -q ":${snell_port} "; then
-                msg err "Port $snell_port is already in use"
+        elif validate_port "$snell_port" true; then
+            local result=$?
+            if [ $result -eq 2 ]; then
+                # Port is in use, ask if want to continue
+                read -rp "Use this port anyway? [y/N]: " force_port
+                if [[ $force_port =~ ^[Yy]$ ]]; then
+                    msg warn "Using port $snell_port (may cause conflicts)"
+                    break
+                fi
                 continue
             fi
             break
@@ -497,34 +600,47 @@ EOF
 
 # Configure Shadow-TLS  
 config_shadow_tls() {
-    # Get Shadow-TLS port with validation
+    # Get Shadow-TLS port with enhanced validation
+    printf "\n${BOLD}Shadow-TLS Port Configuration${PLAIN}\n"
     while true; do
-        read -rp "Choose port for Shadow-TLS (default: 443): " shadow_tls_port
+        read -rp "Choose port for Shadow-TLS [1-65535] (default: 443): " shadow_tls_port
         if [[ -z ${shadow_tls_port} ]]; then
             shadow_tls_port="443"
-            msg info "Using default port 443 for Shadow-TLS"
+            msg info "Using default port: 443"
+            # Check if default port is available
+            if ss -tuln | grep -q ":443 "; then
+                msg warn "Port 443 is already in use"
+                read -rp "Use anyway? [y/N]: " force_443
+                [[ ! $force_443 =~ ^[Yy]$ ]] && continue
+            fi
             break
-        elif validate_port "$shadow_tls_port"; then
-            # Check if port is already in use
-            if ss -tuln | grep -q ":${shadow_tls_port} "; then
-                msg err "Port $shadow_tls_port is already in use"
+        elif validate_port "$shadow_tls_port" true; then
+            local result=$?
+            if [ $result -eq 2 ]; then
+                read -rp "Use this port anyway? [y/N]: " force_port
+                if [[ $force_port =~ ^[Yy]$ ]]; then
+                    msg warn "Using port $shadow_tls_port (may cause conflicts)"
+                    break
+                fi
                 continue
             fi
             break
         fi
     done
     
-    echo -e "${YELLOW}Recommended TLS domain list (supports TLS 1.3):${PLAIN}"
-    echo -e "1) gateway.icloud.com (Apple services)"
-    echo -e "2) p11.douyinpic.com (Douyin related, recommended for free flow)"
-    echo -e "3) mp.weixin.qq.com (WeChat related)"
-    echo -e "4) sns-img-qc.xhscdn.com (Xiaohongshu related)"
-    echo -e "5) p9-dy.byteimg.com (Byte related)"
-    echo -e "6) weather-data.apple.com (Apple weather service)"
-    echo -e "7) Custom"
-    read -rp "Select TLS domain [1-7]: " domain_choice
+    printf "\n${BOLD}TLS Domain Selection${PLAIN}\n"
+    echo -e "${CYAN}Recommended domains (TLS 1.3 compatible):${PLAIN}"
+    echo -e "  1) gateway.icloud.com (Apple services)"
+    echo -e "  2) p11.douyinpic.com (Douyin related, recommended for free flow)"
+    echo -e "  3) mp.weixin.qq.com (WeChat related)"
+    echo -e "  4) sns-img-qc.xhscdn.com (Xiaohongshu related)"
+    echo -e "  5) p9-dy.byteimg.com (Byte related)"
+    echo -e "  6) weather-data.apple.com (Apple weather service)"
+    echo -e "  7) Custom domain"
+    echo ""
+    read -rp "Select TLS domain [1-7] (default: 1): " domain_choice
     
-    case $domain_choice in
+    case ${domain_choice:-1} in
         1) shadow_tls_tls_domain="gateway.icloud.com" ;;
         2) shadow_tls_tls_domain="p11.douyinpic.com" ;;
         3) shadow_tls_tls_domain="mp.weixin.qq.com" ;;
@@ -533,12 +649,13 @@ config_shadow_tls() {
         6) shadow_tls_tls_domain="weather-data.apple.com" ;;
         7) 
             while true; do
+                echo ""
                 read -rp "Enter custom TLS domain: " shadow_tls_tls_domain
                 if [[ -z ${shadow_tls_tls_domain} ]]; then
                     shadow_tls_tls_domain="gateway.icloud.com"
                     msg info "Using default domain: $shadow_tls_tls_domain"
                     break
-                elif validate_domain "$shadow_tls_tls_domain"; then
+                elif validate_domain "$shadow_tls_tls_domain" true; then
                     msg ok "Using custom domain: $shadow_tls_tls_domain"
                     break
                 fi
@@ -549,6 +666,7 @@ config_shadow_tls() {
             msg info "Using default domain: $shadow_tls_tls_domain"
             ;;
     esac
+    msg ok "Selected TLS domain: $shadow_tls_tls_domain"
     
     read -rp "Input Shadow-TLS password (leave blank to generate a random one): " shadow_tls_password
     [[ -z ${shadow_tls_password} ]] && shadow_tls_password=$(generate_random_password) && echo "[INFO] Generated a random password for Shadow-TLS: $shadow_tls_password"
@@ -649,8 +767,10 @@ install_snell_without_ip() {
     if [[ -f snell-server ]]; then
         local installed_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+\.[0-9]+(\.[0-9]+)?')
         msg ok "Snell server binary installed successfully (version: ${installed_version})"
+        log_success "INSTALL" "Snell v${installed_version} binary installed successfully"
     else
         msg err "Failed to install Snell server binary"
+        handle_error "E001" "Failed to install Snell server binary" "Check network connection or try a different version"
         return 1
     fi
     
@@ -666,8 +786,10 @@ install_snell_without_ip() {
     
     if systemctl is-active --quiet snell; then
         msg ok "Snell service started successfully"
+        log_success "INSTALL" "Snell service started successfully on port ${snell_port}"
     else
         msg err "Failed to start Snell service, please check logs with: journalctl -u snell"
+        handle_error "E002" "Failed to start Snell service" "Check logs: journalctl -u snell"
     fi
 }
 
@@ -803,7 +925,7 @@ install_shadow_tls() {
     install_shadow_tls_without_ip
 }
 
-# Install menu (极简风格)
+# Install menu with improved formatting
 install() {
     while true; do
         clear
@@ -811,18 +933,33 @@ install() {
         show_breadcrumb
 
         printf "\n${BOLD}Installation Options${PLAIN}\n\n"
-        printf "  1) Install Snell Only\n"
-        printf "  2) Install Snell + Shadow-TLS\n"
-        printf "  3) Install Shadow-TLS Only (Snell required)\n"
-        printf "  0) Back\n\n"
+        printf "  ${GREEN}1${PLAIN}) Install Snell Only\n"
+        printf "  ${GREEN}2${PLAIN}) Install Snell + Shadow-TLS\n"
+        printf "  ${GREEN}3${PLAIN}) Install Shadow-TLS Only ${CYAN}(Snell required)${PLAIN}\n"
+        printf "  ${YELLOW}0${PLAIN}) Back\n\n"
 
         printf "Choice [0-3]: "
         read -r option
         
         case $option in
-            1) set_breadcrumb "Main > Install > Snell Only"; install_snell; break ;;
-            2) set_breadcrumb "Main > Install > Snell + Shadow-TLS"; install_snell_and_shadow_tls; break ;;
-            3) set_breadcrumb "Main > Install > Shadow-TLS Only"; install_shadow_tls; break ;;
+            1) 
+                set_breadcrumb "Main > Install > Snell Only"
+                log_operation "INFO" "INSTALL" "Starting Snell installation"
+                install_snell
+                break 
+                ;;
+            2) 
+                set_breadcrumb "Main > Install > Snell + Shadow-TLS"
+                log_operation "INFO" "INSTALL" "Starting Snell + Shadow-TLS installation"
+                install_snell_and_shadow_tls
+                break 
+                ;;
+            3) 
+                set_breadcrumb "Main > Install > Shadow-TLS Only"
+                log_operation "INFO" "INSTALL" "Starting Shadow-TLS installation"
+                install_shadow_tls
+                break 
+                ;;
             0) break ;;
             *) msg warn "Invalid option"; sleep 1 ;;
         esac
@@ -921,8 +1058,10 @@ run() {
     sleep 2
     if systemctl is-active --quiet snell && systemctl is-active --quiet shadow-tls; then  
         msg ok "Snell and Shadow-TLS are now running."
+        log_success "MANAGE" "All services started successfully"
     else
-        msg err "Failed to start Snell or Shadow-TLS, please check logs."  
+        msg err "Failed to start Snell or Shadow-TLS, please check logs."
+        log_operation "ERROR" "MANAGE" "Failed to start one or more services"
     fi
 }
 
@@ -930,7 +1069,8 @@ run() {
 stop() {  
     systemctl stop snell
     systemctl stop shadow-tls
-    msg ok "Snell and Shadow-TLS have been stopped."  
+    msg ok "Snell and Shadow-TLS have been stopped."
+    log_success "MANAGE" "All services stopped"
 }
 
 # Restart Snell and Shadow-TLS  
@@ -1027,7 +1167,7 @@ modify() {
     done
 }
 
-# Manage Snell and Shadow-TLS services (极简风格)
+# Manage Snell and Shadow-TLS services with improved formatting
 manage() {
     while true; do
         clear
@@ -1037,22 +1177,36 @@ manage() {
         # Display service status
         check_snell_status
 
-        printf "\n${BOLD}Service Management${PLAIN}\n\n"
-        printf "  1) Start Services\n"
-        printf "  2) Stop Services\n"
-        printf "  3) Restart Services\n"
-        printf "  4) View Detailed Status\n"
-        printf "  5) View Service Logs\n"
-        printf "  6) Modify Configuration\n"
-        printf "  0) Back\n\n"
+        printf "${BOLD}Service Management${PLAIN}\n\n"
+        printf "  ${GREEN}1${PLAIN}) Start Services\n"
+        printf "  ${GREEN}2${PLAIN}) Stop Services\n"
+        printf "  ${GREEN}3${PLAIN}) Restart Services\n"
+        printf "  ${BLUE}4${PLAIN}) View Detailed Status\n"
+        printf "  ${BLUE}5${PLAIN}) View Service Logs\n"
+        printf "  ${CYAN}6${PLAIN}) Modify Configuration\n"
+        printf "  ${YELLOW}0${PLAIN}) Back\n\n"
 
         printf "Choice [0-6]: "
         read -r operation
         
         case $operation in
-            1) set_breadcrumb "Main > Manage > Start"; run; sleep 2 ;;  
-            2) set_breadcrumb "Main > Manage > Stop"; stop; sleep 2 ;;
-            3) set_breadcrumb "Main > Manage > Restart"; restart_services ;;
+            1) 
+                set_breadcrumb "Main > Manage > Start"
+                log_operation "INFO" "MANAGE" "Starting services"
+                run
+                sleep 2 
+                ;;  
+            2) 
+                set_breadcrumb "Main > Manage > Stop"
+                log_operation "INFO" "MANAGE" "Stopping services"
+                stop
+                sleep 2 
+                ;;
+            3) 
+                set_breadcrumb "Main > Manage > Restart"
+                log_operation "INFO" "MANAGE" "Restarting services"
+                restart_services 
+                ;;
             4) set_breadcrumb "Main > Manage > Status"; check_service ;; 
             5) set_breadcrumb "Main > Manage > Logs"; show_logs ;;
             6) set_breadcrumb "Main > Manage > Config"; modify ;; 
@@ -1108,38 +1262,42 @@ EOF
     msg ok "Snell systemd service created."
 }
 
-# Display beautified main menu (极简风格)
+# Display beautified main menu with improved spacing
 menu() {
     while true; do
         clear
         set_breadcrumb "Main"
         show_breadcrumb
 
-        printf "\n${BOLD}ShadowTLS + Snell Management v%s${PLAIN}\n" "${current_version}"
+        printf "\n${BOLD}${BLUE}ShadowTLS + Snell Management${PLAIN} ${CYAN}v%s${PLAIN}\n" "${current_version}"
 
         # Display service status
         check_snell_status
 
-        printf "\n${BOLD}Main Menu${PLAIN}\n\n"
-        printf "  1) Install Services\n"
-        printf "  2) Uninstall Services\n"
-        printf "  3) Manage Services\n"
-        printf "  4) Modify Configuration\n"
-        printf "  5) Display Configuration\n"
-        printf "  6) Update Snell\n"
-        printf "  0) Exit\n\n"
+        printf "${BOLD}Main Menu${PLAIN}\n\n"
+        printf "  ${GREEN}1${PLAIN}) Install Services\n"
+        printf "  ${GREEN}2${PLAIN}) Uninstall Services\n"
+        printf "  ${GREEN}3${PLAIN}) Manage Services\n"
+        printf "  ${GREEN}4${PLAIN}) Modify Configuration\n"
+        printf "  ${GREEN}5${PLAIN}) Display Configuration\n"
+        printf "  ${GREEN}6${PLAIN}) Update Snell\n"
+        printf "  ${YELLOW}0${PLAIN}) Exit\n\n"
 
         printf "Choice [0-6]: "
         read -r operation
 
         case $operation in  
-            1) install ;;
-            2) uninstall ;;
-            3) manage ;;
-            4) modify ;;
-            5) display_config ;;
-            6) update_snell ;;
-            0) printf "\n${SUCCESS_SYMBOL} Thank you for using this script! Goodbye!\n\n"; exit 0 ;;
+            1) log_operation "INFO" "MENU" "User selected: Install Services"; install ;;
+            2) log_operation "INFO" "MENU" "User selected: Uninstall Services"; uninstall ;;
+            3) log_operation "INFO" "MENU" "User selected: Manage Services"; manage ;;
+            4) log_operation "INFO" "MENU" "User selected: Modify Configuration"; modify ;;
+            5) log_operation "INFO" "MENU" "User selected: Display Configuration"; display_config ;;
+            6) log_operation "INFO" "MENU" "User selected: Update Snell"; update_snell ;;
+            0) 
+                log_operation "INFO" "SYSTEM" "Script exited by user"
+                printf "\n${SUCCESS_SYMBOL} Thank you for using this script! Goodbye!\n\n"
+                exit 0 
+                ;;
             *) msg warn "Invalid selection"; sleep 1 ;;
         esac
     done
