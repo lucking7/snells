@@ -182,9 +182,54 @@ get_ip() {
     fi
 }
 
+# Get server location (country/region) from IP
+get_server_location() {
+    local ip=${1:-$server_ip}
+    
+    msg info "Detecting server location..."
+    
+    # Try multiple APIs for reliability
+    # API 1: ip-api.com (free, no key required, supports batch)
+    local location=$(curl -s --connect-timeout 3 "http://ip-api.com/json/${ip}?fields=country,countryCode" 2>/dev/null)
+    if [[ -n "$location" ]]; then
+        # Use sed for JSON parsing (macOS compatible)
+        country=$(echo "$location" | sed -n 's/.*"country":"\([^"]*\)".*/\1/p')
+        country_code=$(echo "$location" | sed -n 's/.*"countryCode":"\([^"]*\)".*/\1/p')
+        
+        if [[ -n "$country" && -n "$country_code" ]]; then
+            msg ok "Server location: ${country} (${country_code})"
+            log_success "SYSTEM" "Detected location: ${country} (${country_code})"
+            return 0
+        fi
+    fi
+    
+    # API 2: ipapi.co (backup, rate limited)
+    local location2=$(curl -s --connect-timeout 3 "https://ipapi.co/${ip}/json/" 2>/dev/null)
+    if [[ -n "$location2" ]]; then
+        country=$(echo "$location2" | sed -n 's/.*"country_name":"\([^"]*\)".*/\1/p')
+        country_code=$(echo "$location2" | sed -n 's/.*"country_code":"\([^"]*\)".*/\1/p')
+        
+        if [[ -n "$country" && -n "$country_code" ]]; then
+            msg ok "Server location: ${country} (${country_code})"
+            log_success "SYSTEM" "Detected location: ${country} (${country_code})"
+            return 0
+        fi
+    fi
+    
+    # Fallback: Use colo code if APIs fail
+    country="${colo:-Unknown}"
+    country_code="${colo:-XX}"
+    msg warn "Unable to detect country, using datacenter code: ${country}"
+    log_operation "WARN" "SYSTEM" "Location detection failed, using fallback: ${country}"
+    
+    return 0
+}
+
 # Detect server IP (wrapper for get_ip)
 detect_server_ip() {
     get_ip
+    # Also detect location after getting IP
+    get_server_location "$server_ip"
 }
 
 # Check IPv6 support
@@ -691,16 +736,13 @@ config_shadow_tls() {
         client_reuse_value="true"
     fi
 
-    # Get Snell version
-    local snell_version_num="4"
-    if [[ -f "${snell_workspace}/snell-server" ]]; then
-        local installed_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+')
-        if [[ "$installed_version" == "5" ]]; then
-            snell_version_num="5"
-        fi
-    fi
+    # Snell v5 only (fixed version)
+    local snell_version_num="5"
 
-    echo -e "${colo} = snell, ${server_ip}, ${shadow_tls_port}, psk=${client_snell_psk}, version=${snell_version_num}, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${shadow_tls_password}, shadow-tls-sni=${shadow_tls_tls_domain}, shadow-tls-version=3"
+    # Use country code as node name (or fallback to colo/Server)
+    local node_name="${country_code:-${colo:-Server}}"
+    
+    echo -e "${node_name} = snell, ${server_ip}, ${shadow_tls_port}, psk=${client_snell_psk}, version=${snell_version_num}, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${shadow_tls_password}, shadow-tls-sni=${shadow_tls_tls_domain}, shadow-tls-version=3"
     msg ok "Shadow-TLS configuration completed."
 }
 
@@ -708,35 +750,12 @@ config_shadow_tls() {
 install_snell_without_ip() {
     install_pkg
     
-    # Ask for Snell version
-    msg info "Choose Snell version to install:"
-    echo -e "${GREEN}1) Snell v4 (Stable)${PLAIN}"
-    echo -e "${YELLOW}2) Snell v5 (Beta)${PLAIN}"
-    read -rp "Select version [1-2] (default: 1): " version_choice
+    # Install Snell v5 directly (no version selection)
+    msg info "Installing Snell v5 (Latest Protocol)"
+    log_operation "INFO" "INSTALL" "Installing Snell v5"
     
-    local snell_version=""
-    local is_beta=false
-    
-    case ${version_choice:-1} in
-        1)
-            # Get latest v4 version from official page
-            snell_version=$(curl -s https://manual.nssurge.com/others/snell.html | grep -oP 'snell-server-v\K[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
-            if [[ -z "$snell_version" ]]; then
-                msg err "Failed to get latest Snell v4 version"
-                return 1
-            fi
-            msg info "Installing Snell v${snell_version} (Stable)"
-            ;;
-        2)
-            snell_version="5.0.0b1"
-            is_beta=true
-            msg info "Installing Snell v${snell_version} (Beta)"
-            ;;
-        *)
-            msg err "Invalid selection"
-            return 1
-            ;;
-    esac
+    local snell_version="5.0.0b1"
+    local is_beta=true
     
     mkdir -p "${snell_workspace}"
     cd "${snell_workspace}" || exit 1
@@ -1329,16 +1348,11 @@ display_config() {
     echo -e "${GREEN}PSK:${PLAIN} $snell_psk"
     echo -e "${GREEN}IPv6 Support:${PLAIN} $snell_ipv6"
     
-    # Get Snell version
-    local snell_version_num="4"
+    # Get Snell version (v5 only)
+    local snell_version_num="5"
     if [[ -f "${snell_workspace}/snell-server" ]]; then
-        local installed_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+')
-        if [[ "$installed_version" == "5" ]]; then
-            snell_version_num="5"
-            echo -e "${GREEN}Version:${PLAIN} Snell v5 (Beta)"
-        else
-            echo -e "${GREEN}Version:${PLAIN} Snell v4"
-        fi
+        local installed_version=$("${snell_workspace}/snell-server" --version 2>&1 | grep -oP 'v\K[0-9]+\.[0-9]+(\.[0-9]+[a-zA-Z0-9]*)?')
+        echo -e "${GREEN}Version:${PLAIN} Snell v${installed_version}"
     fi
     
     # Display ShadowTLS configuration (if exists)
@@ -1380,6 +1394,11 @@ display_config() {
         server_ip=$(curl -s6 --connect-timeout 5 https://api6.ipify.org)
     fi
     
+    # Detect server location if not already done
+    if [[ -z "$country" || -z "$country_code" ]]; then
+        get_server_location "$server_ip"
+    fi
+    
     local port=$(echo "$snell_listen" | grep -oP ':\K\d+$')
     
     # Client configuration options
@@ -1396,15 +1415,21 @@ display_config() {
         client_reuse_value="true"
     fi
     
+    # Use country code as node name (or fallback)
+    local node_name="${country_code:-${colo:-Server}}"
+    
+    # Snell v5 only
+    local snell_version_num="5"
+    
     if systemctl is-active --quiet shadow-tls; then
         local shadow_port=$(echo "$shadow_listen" | grep -oP ':\K\d+$')
         echo -e "${CYAN}Surge Configuration:${PLAIN}"
         echo -e "[Proxy]"
-        echo -e "Snell = snell, ${server_ip}, ${shadow_port}, psk=${snell_psk}, version=${snell_version_num}, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${shadow_password}, shadow-tls-sni=${shadow_tls%%:*}, shadow-tls-version=3"
+        echo -e "${node_name} = snell, ${server_ip}, ${shadow_port}, psk=${snell_psk}, version=${snell_version_num}, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${shadow_password}, shadow-tls-sni=${shadow_tls%%:*}, shadow-tls-version=3"
     else
         echo -e "${CYAN}Surge Configuration:${PLAIN}"
         echo -e "[Proxy]"
-        echo -e "Snell = snell, ${server_ip}, ${port}, psk=${snell_psk}, version=${snell_version_num}, reuse=${client_reuse_value}, tfo=${client_tfo_value}"
+        echo -e "${node_name} = snell, ${server_ip}, ${port}, psk=${snell_psk}, version=${snell_version_num}, reuse=${client_reuse_value}, tfo=${client_tfo_value}"
     fi
     
     echo ""
@@ -1518,12 +1543,11 @@ update_snell() {
     msg info "Current Snell version: v${snell_current_version}"
     echo ""
 
-    # Ask which version to update to
-    printf "${BOLD}Choose version to update to:${PLAIN}\n\n"
-    printf "  1) Latest Snell v4 (Stable)\n"
-    printf "  2) Snell v5 Beta (v5.0.0b1)\n"
-    printf "  0) Cancel\n\n"
-    printf "Choice [0-2]: "
+    # Update to Snell v5 (only option)
+    printf "${BOLD}Update to Snell v5${PLAIN}\n\n"
+    printf "  ${GREEN}1${PLAIN}) Update to Snell v5.0.0b1 (Latest)\n"
+    printf "  ${YELLOW}0${PLAIN}) Cancel\n\n"
+    printf "Choice [0-1]: "
     read -rp "" update_choice
 
     local target_version=""
@@ -1534,19 +1558,9 @@ update_snell() {
             return
             ;;
         1)
-            # Get latest v4 version
-            msg info "Fetching latest v4 version..."
-            target_version=$(curl -s https://manual.nssurge.com/others/snell.html | grep -oP 'snell-server-v\K[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
-            if [ -z "$target_version" ]; then
-                msg err "Failed to get latest Snell v4 version."
-                sleep 2
-                return
-            fi
-            msg ok "Latest Snell v4 version: v${target_version}"
-            ;;
-        2)
             target_version="5.0.0b1"
-            msg info "Target Snell v5 Beta version: v${target_version}"
+            msg info "Target Snell v5 version: v${target_version}"
+            log_operation "INFO" "UPDATE" "Updating to Snell v${target_version}"
             ;;
         *)
             msg err "Invalid selection"
