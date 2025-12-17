@@ -482,7 +482,10 @@ create_snell_conf() {
     
     # Get PSK
     read -rp "Enter PSK for Snell (Leave it blank to generate a random one): " snell_psk
-    [[ -z ${snell_psk} ]] && snell_psk=$(generate_random_psk) && echo "[INFO] Generated a random PSK for Snell: $snell_psk"
+    if [[ -z ${snell_psk} ]]; then
+        snell_psk=$(generate_random_psk)
+        msg info "Generated a random PSK for Snell: $snell_psk"
+    fi
     
     # Get DNS settings with improved messaging
     printf "\n${BOLD}DNS Configuration${PLAIN}\n"
@@ -542,10 +545,13 @@ EOF
 create_shadow_tls_systemd() {
     if [[ -z ${snell_port} ]]; then
         read -rp "Input ShadowTLS forwarding port (default: random unused port): " shadow_tls_f_port
-        [[ -z ${shadow_tls_f_port} ]] && shadow_tls_f_port=$(find_unused_port) && echo "[INFO] Randomly selected port for ShadowTLS forwarding: $shadow_tls_f_port"
+        if [[ -z ${shadow_tls_f_port} ]]; then
+            shadow_tls_f_port=$(find_unused_port)
+            msg info "Randomly selected port for Shadow-TLS forwarding: $shadow_tls_f_port"
+        fi
     else
         shadow_tls_f_port=${snell_port}
-        echo "[INFO] Using Snell port as ShadowTLS forwarding port: $shadow_tls_f_port"
+        msg info "Using Snell port as Shadow-TLS forwarding port: $shadow_tls_f_port"
     fi
 
     # Determine listening address based on IPv6 support
@@ -697,7 +703,10 @@ config_shadow_tls() {
     msg ok "Selected TLS domain: $shadow_tls_tls_domain"
     
     read -rp "Input Shadow-TLS password (leave blank to generate a random one): " shadow_tls_password
-    [[ -z ${shadow_tls_password} ]] && shadow_tls_password=$(generate_random_password) && echo "[INFO] Generated a random password for Shadow-TLS: $shadow_tls_password"
+    if [[ -z ${shadow_tls_password} ]]; then
+        shadow_tls_password=$(generate_random_password)
+        msg info "Generated a random password for Shadow-TLS: $shadow_tls_password"
+    fi
 
     # Determine Snell PSK for client configuration
     local client_snell_psk="${snell_psk}" # Prioritize PSK set during script execution
