@@ -723,7 +723,7 @@ config_shadow_tls() {
         client_snell_psk=$(grep -oP 'psk = \K.*' "${snell_workspace}/snell-server.conf")
     fi
 
-    # Client configuration options
+    # Client configuration options（保留安装时交互选择，并保存为全局变量给后续输出复用）
     read -rp "Enable TFO (TCP Fast Open) for client? (Y/n): " client_tfo_choice
     local client_tfo_value="true"
     if [[ $client_tfo_choice =~ ^[Nn]$ ]]; then
@@ -735,6 +735,10 @@ config_shadow_tls() {
     if [[ $client_reuse_choice =~ ^[Yy]$ ]]; then
         client_reuse_value="true"
     fi
+
+    # 保存给安装完成后的 Surge 输出复用
+    CLIENT_TFO_VALUE="$client_tfo_value"
+    CLIENT_REUSE_VALUE="$client_reuse_value"
 
     # Snell v5 only (fixed version)
     local snell_version_num="5"
@@ -809,6 +813,13 @@ install_snell_without_ip() {
     else
         msg err "Failed to start Snell service, please check logs with: journalctl -u snell"
         handle_error "E002" "Failed to start Snell service" "Check logs: journalctl -u snell"
+    fi
+
+    # 安装结束后输出 Surge 标准配置（仅 Snell-only 场景）
+    if [[ "${install_with_shadow_tls:-false}" != "true" ]]; then
+        echo ""
+        print_surge_proxy_config "snell"
+        echo ""
     fi
 }
 
@@ -933,6 +944,11 @@ install_shadow_tls_without_ip() {
     
     config_shadow_tls
     create_shadow_tls_systemd
+
+    # 安装结束后输出 Surge 标准配置（Shadow-TLS / Snell+Shadow-TLS）
+    echo ""
+    print_surge_proxy_config "shadow-tls"
+    echo ""
 }
 
 # Install Shadow-TLS only
@@ -1401,19 +1417,9 @@ display_config() {
     
     local port=$(echo "$snell_listen" | grep -oP ':\K\d+$')
     
-    # Client configuration options
-    msg info "Please select options for the client configuration:"
-    read -rp "Enable TFO (TCP Fast Open)? (Y/n): " client_tfo_choice
+    # Client configuration options (默认值；显示配置时不再询问)
     local client_tfo_value="true"
-    if [[ $client_tfo_choice =~ ^[Nn]$ ]]; then
-        client_tfo_value="false"
-    fi
-
-    read -rp "Enable Session Reuse? (y/N): " client_reuse_choice
     local client_reuse_value="false"
-    if [[ $client_reuse_choice =~ ^[Yy]$ ]]; then
-        client_reuse_value="true"
-    fi
     
     # Use country code as node name (or fallback)
     local node_name="${country_code:-${colo:-Server}}"
@@ -1437,6 +1443,79 @@ display_config() {
     
     echo ""
     read -p "Press any key to return..." _
+}
+
+# 统一输出 Surge Proxy 配置（安装完成/显示配置复用）
+print_surge_proxy_config() {
+    local mode="${1:-auto}" # auto|snell|shadow-tls
+
+    # server_ip 优先使用已检测到的全局变量，否则临时探测
+    local cfg_server_ip="${server_ip:-}"
+    if [[ -z "$cfg_server_ip" ]]; then
+        cfg_server_ip=$(curl -s4 --connect-timeout 5 https://api.ipify.org)
+        [[ -z "$cfg_server_ip" ]] && cfg_server_ip=$(curl -s6 --connect-timeout 5 https://api6.ipify.org)
+    fi
+
+    # 尝试补齐 country_code（用于节点名）
+    if [[ -n "$cfg_server_ip" && ( -z "${country:-}" || -z "${country_code:-}" ) ]]; then
+        get_server_location "$cfg_server_ip" >/dev/null 2>&1 || true
+    fi
+
+    local node_name="${country_code:-${colo:-Server}}"
+
+    # 读取 snell 配置（优先全局变量，其次从文件读）
+    local cfg_snell_psk="${snell_psk:-}"
+    local cfg_snell_listen=""
+    if [[ -f "${snell_workspace}/snell-server.conf" ]]; then
+        cfg_snell_listen=$(grep -oP 'listen = \K.*' "${snell_workspace}/snell-server.conf" 2>/dev/null || echo "")
+        [[ -z "$cfg_snell_psk" ]] && cfg_snell_psk=$(grep -oP 'psk = \K.*' "${snell_workspace}/snell-server.conf" 2>/dev/null || echo "")
+    fi
+
+    local cfg_snell_port=""
+    [[ -n "$cfg_snell_listen" ]] && cfg_snell_port=$(echo "$cfg_snell_listen" | grep -oP ':\K\d+$' 2>/dev/null || echo "")
+
+    # 默认 client 参数（不做交互）
+    local client_reuse_value="${CLIENT_REUSE_VALUE:-false}"
+    local client_tfo_value="${CLIENT_TFO_VALUE:-true}"
+
+    # Shadow-TLS 参数（可能来自运行中的服务，或来自安装时变量）
+    local cfg_shadow_listen=""
+    local cfg_shadow_port=""
+    local cfg_shadow_password="${shadow_tls_password:-}"
+    local cfg_shadow_sni="${shadow_tls_tls_domain:-}"
+    if systemctl is-active --quiet shadow-tls 2>/dev/null; then
+        local shadow_exec
+        shadow_exec=$(systemctl cat shadow-tls 2>/dev/null | grep ExecStart || true)
+        cfg_shadow_listen=$(echo "$shadow_exec" | grep -oP '\--listen \K[^ ]+' 2>/dev/null || echo "")
+        cfg_shadow_port=$(echo "$cfg_shadow_listen" | grep -oP ':\K\d+$' 2>/dev/null || echo "")
+        [[ -z "$cfg_shadow_password" ]] && cfg_shadow_password=$(echo "$shadow_exec" | grep -oP '\--password \K[^ ]+' 2>/dev/null || echo "")
+        if [[ -z "$cfg_shadow_sni" ]]; then
+            # --tls domain:443
+            local tls_arg
+            tls_arg=$(echo "$shadow_exec" | grep -oP '\--tls \K[^ ]+' 2>/dev/null || echo "")
+            cfg_shadow_sni=${tls_arg%%:*}
+        fi
+    fi
+
+    # auto 模式：shadow-tls 运行则输出 shadow-tls 组合，否则输出 snell
+    if [[ "$mode" == "auto" ]]; then
+        if systemctl is-active --quiet shadow-tls 2>/dev/null; then
+            mode="shadow-tls"
+        else
+            mode="snell"
+        fi
+    fi
+
+    echo -e "${CYAN}Surge Configuration:${PLAIN}"
+    echo -e "[Proxy]"
+
+    if [[ "$mode" == "shadow-tls" ]]; then
+        local out_port="${cfg_shadow_port:-${shadow_tls_port:-}}"
+        echo -e "${node_name} = snell, ${cfg_server_ip}, ${out_port}, psk=${cfg_snell_psk}, version=5, reuse=${client_reuse_value}, tfo=${client_tfo_value}, shadow-tls-password=${cfg_shadow_password}, shadow-tls-sni=${cfg_shadow_sni}, shadow-tls-version=3"
+    else
+        local out_port="${cfg_snell_port:-${snell_port:-}}"
+        echo -e "${node_name} = snell, ${cfg_server_ip}, ${out_port}, psk=${cfg_snell_psk}, version=5, reuse=${client_reuse_value}, tfo=${client_tfo_value}"
+    fi
 }
 
 # Check Snell and ShadowTLS service status command (极简风格)
