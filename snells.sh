@@ -18,8 +18,6 @@ ERROR_SYMBOL="${RED}[ERROR]${PLAIN}"
 INFO_SYMBOL="${BLUE}[INFO]${PLAIN}"
 WARN_SYMBOL="${YELLOW}[WARN]${PLAIN}"
 
-err() { echo -e "${ERROR_SYMBOL} $*"; return 1; }
-warn() { echo -e "${WARN_SYMBOL} $*"; }
 
 # Global breadcrumb variable for navigation
 BREADCRUMB_PATH="主菜单"
@@ -133,7 +131,8 @@ get_ip() {
     elif [[ -n $ipv6 ]]; then
         ip_type="ipv6"
     else
-        msg err "Unable to get server IP address." && exit 1
+        msg err "Unable to get server IP address."
+        exit 1
     fi
 
     server_ip=${ipv4:-$ipv6}
@@ -219,7 +218,7 @@ check_ipv6_support() {
 check_preconditions() {
     # Check for root privileges
     if [[ $EUID -ne 0 ]]; then
-        err "需要 root 权限运行此脚本。"
+        msg err "需要 root 权限运行此脚本。"
         exit 1
     fi
 
@@ -229,13 +228,13 @@ check_preconditions() {
     elif command -v apt >/dev/null 2>&1; then
         cmd="apt"
     else
-        err "仅支持 Debian/Ubuntu（需要 apt-get/apt）。"
+        msg err "仅支持 Debian/Ubuntu（需要 apt-get/apt）。"
         exit 1
     fi
 
     # Check for systemd
     if ! command -v systemctl >/dev/null 2>&1; then
-        err "缺少 systemd。请先安装：\n${cmd} update -y; ${cmd} install -y systemd"
+        msg err "缺少 systemd。请先安装：\n${cmd} update -y; ${cmd} install -y systemd"
         exit 1
     fi
 }
@@ -446,18 +445,18 @@ create_snell_conf() {
             snell_port=$(find_unused_port)
             msg info "Assigned random port: $snell_port"
             break
-        elif validate_port "$snell_port" true; then
+        else
+            validate_port "$snell_port" true
             local result=$?
-            if [ $result -eq 2 ]; then
-                # Port is in use, ask if want to continue
+            if [ $result -eq 0 ]; then
+                break
+            elif [ $result -eq 2 ]; then
                 read -rp "Use this port anyway? [y/N]: " force_port
                 if [[ $force_port =~ ^[Yy]$ ]]; then
                     msg warn "Using port $snell_port (may cause conflicts)"
                     break
                 fi
-                continue
             fi
-            break
         fi
     done
     
@@ -648,17 +647,18 @@ config_shadow_tls() {
                 [[ ! $force_443 =~ ^[Yy]$ ]] && continue
             fi
             break
-        elif validate_port "$shadow_tls_port" true; then
+        else
+            validate_port "$shadow_tls_port" true
             local result=$?
-            if [ $result -eq 2 ]; then
+            if [ $result -eq 0 ]; then
+                break
+            elif [ $result -eq 2 ]; then
                 read -rp "Use this port anyway? [y/N]: " force_port
                 if [[ $force_port =~ ^[Yy]$ ]]; then
                     msg warn "Using port $shadow_tls_port (may cause conflicts)"
                     break
                 fi
-                continue
             fi
-            break
         fi
     done
     
@@ -744,13 +744,11 @@ install_snell_without_ip() {
         aarch64) snell_url="https://dl.nssurge.com/snell/snell-server-v${snell_version}-linux-aarch64.zip" ;;
         armv7l) snell_url="https://dl.nssurge.com/snell/snell-server-v${snell_version}-linux-armv7l.zip" ;;
         i386) snell_url="https://dl.nssurge.com/snell/snell-server-v${snell_version}-linux-i386.zip" ;;
-        *) msg err "Unsupported architecture: $arch" && exit 1 ;;
+        *) msg err "Unsupported architecture: $arch"; exit 1 ;;
     esac
     
     msg info "Downloading Snell from: ${snell_url}"
-    wget -O snell-server.zip "${snell_url}"
-    
-    if [ $? -ne 0 ]; then
+    if ! wget -O snell-server.zip "${snell_url}"; then
         msg err "Failed to download Snell. Please check your network connection."
         return 1
     fi
@@ -867,7 +865,7 @@ install_shadow_tls_without_ip() {
     case $arch in
         x86_64) shadow_tls_url=$(echo "$latest_release" | jq -r '.assets[] | select(.name | contains("x86_64-unknown-linux-musl")) | .browser_download_url') ;;
         aarch64) shadow_tls_url=$(echo "$latest_release" | jq -r '.assets[] | select(.name | contains("aarch64-unknown-linux-musl")) | .browser_download_url') ;;
-        *) msg err "Unsupported architecture: $arch" && exit 1 ;;
+        *) msg err "Unsupported architecture: $arch"; exit 1 ;;
     esac
 
     wget -O shadow-tls "${shadow_tls_url}"
@@ -1061,59 +1059,61 @@ uninstall_shadow_tls_internal() {
 
 # Run Snell and Shadow-TLS  
 run() {
-    systemctl start snell  
-    systemctl start shadow-tls
-    sleep 2
-    if systemctl is-active --quiet snell && systemctl is-active --quiet shadow-tls; then  
-        msg ok "Snell and Shadow-TLS are now running."
-        log_success "MANAGE" "All services started successfully"
+    local ok=true
+
+    if systemctl list-unit-files snell.service &>/dev/null; then
+        systemctl start snell
+        sleep 1
+        if systemctl is-active --quiet snell; then
+            msg ok "Snell started."
+        else
+            msg err "Snell failed to start."
+            ok=false
+        fi
     else
-        msg err "Failed to start Snell or Shadow-TLS, please check logs."
+        msg warn "Snell is not installed, skipping."
+        ok=false
+    fi
+
+    if systemctl list-unit-files shadow-tls.service 2>/dev/null | grep -q shadow-tls; then
+        systemctl start shadow-tls
+        sleep 1
+        if systemctl is-active --quiet shadow-tls; then
+            msg ok "Shadow-TLS started."
+        else
+            msg err "Shadow-TLS failed to start."
+            ok=false
+        fi
+    else
+        msg info "Shadow-TLS is not installed, skipping."
+    fi
+
+    if $ok; then
+        log_success "MANAGE" "Services started successfully"
+    else
         log_operation "ERROR" "MANAGE" "Failed to start one or more services"
     fi
 }
 
 # Stop Snell and Shadow-TLS
-stop() {  
-    systemctl stop snell
-    systemctl stop shadow-tls
-    msg ok "Snell and Shadow-TLS have been stopped."
-    log_success "MANAGE" "All services stopped"
-}
-
-# Restart Snell and Shadow-TLS  
-restart() {
-    systemctl restart snell
-    systemctl restart shadow-tls  
-    sleep 2
-    if systemctl is-active --quiet snell && systemctl is-active --quiet shadow-tls; then
-        msg ok "Snell and Shadow-TLS have been restarted."  
+stop() {
+    if systemctl stop snell 2>/dev/null; then
+        msg ok "Snell stopped."
     else
-        msg err "Failed to restart Snell or Shadow-TLS, please check logs."
-    fi  
-}
-
-# Check Snell and Shadow-TLS configuration  
-checkconfig() {
-    if [ -f "${snell_workspace}/snell-server.conf" ]; then  
-        echo "Snell configuration:"
-        cat "${snell_workspace}/snell-server.conf"
-    else
-        msg err "Snell configuration file not found."  
+        msg warn "Snell is not running."
     fi
 
-    echo "Shadow-TLS configuration:"  
-    systemctl cat shadow-tls | grep -E "listen|server|tls|password"
+    if systemctl list-unit-files shadow-tls.service 2>/dev/null | grep -q shadow-tls; then
+        if systemctl stop shadow-tls 2>/dev/null; then
+            msg ok "Shadow-TLS stopped."
+        else
+            msg warn "Shadow-TLS is not running."
+        fi
+    fi
+
+    log_success "MANAGE" "Services stopped"
 }
 
-show_snell_log() {
-    if [ -f "/var/log/snell.log" ]; then
-        echo "Snell Server Log:"
-        cat /var/log/snell.log
-    else
-        msg err "Snell log file not found."
-    fi
-}
 
 show_logs() {
     clear
@@ -1130,7 +1130,7 @@ show_logs() {
     journalctl -u shadow-tls --no-pager -n 20
     echo ""
 
-    read -p "Press any key to return..." _
+    read -rp "Press any key to return..." _
 }
 
 # Modify Snell and Shadow-TLS configuration (极简风格)
@@ -1153,7 +1153,7 @@ modify() {
                 if [[ -f "${snell_workspace}/snell-server.conf" ]]; then
                     nano "${snell_workspace}/snell-server.conf"
                     msg info "Don't forget to restart services to apply changes!"
-                    read -p "Press any key to continue..." _
+                    read -rp "Press any key to continue..." _
                 else
                     msg err "Snell configuration file not found"
                     sleep 2
@@ -1163,7 +1163,7 @@ modify() {
                 if [[ -f "${shadow_tls_service}" ]]; then
                     nano "${shadow_tls_service}"
                     msg info "Don't forget to restart services to apply changes!"
-                    read -p "Press any key to continue..." _
+                    read -rp "Press any key to continue..." _
                 else
                     msg err "Shadow-TLS service file not found"
                     sleep 2
@@ -1321,7 +1321,7 @@ display_config() {
     
     if [[ ! -f "${snell_workspace}/snell-server.conf" ]]; then
         msg err "未找到 Snell 配置文件（可能未安装）。"
-        read -p "Press any key to return..." _
+        read -rp "Press any key to return..." _
         return
     fi
     
@@ -1384,47 +1384,15 @@ display_config() {
         fi
     fi
     
-    # Display client configuration
+    # Surge 客户端配置
     printf "\n${BOLD}客户端配置示例（Surge）${PLAIN}\n"
-    
-    # Get server IP
-    local server_ip
-    server_ip=$(curl -s4 --connect-timeout 5 https://api.ipify.org)
-    if [[ -z "$server_ip" ]]; then
-        server_ip=$(curl -s6 --connect-timeout 5 https://api6.ipify.org)
-    fi
-    
-    # Detect server location if not already done
-    if [[ -z "$country" || -z "$country_code" ]]; then
-        get_server_location "$server_ip"
-    fi
-    
-    local port
-    port=$(echo "$snell_listen" | grep -oP ':\K\d+$')
-    
-    # Use country code as node name (or fallback)
-    local node_name="${country_code:-${colo:-Server}}"
-    
-    # Snell v5 only
-    local snell_version_num="5"
-    
-    if systemctl is-active --quiet shadow-tls; then
-        local shadow_port
-        shadow_port=$(echo "$shadow_listen" | grep -oP ':\K\d+$')
-        echo -e "${CYAN}Surge Configuration:${PLAIN}"
-        echo -e "[Proxy]"
-        echo -e "${node_name} = snell, ${server_ip}, ${shadow_port}, psk=${snell_psk}, version=${snell_version_num}, shadow-tls-password=${shadow_password}, shadow-tls-sni=${shadow_tls%%:*}, shadow-tls-version=3"
-    else
-        echo -e "${CYAN}Surge Configuration:${PLAIN}"
-        echo -e "[Proxy]"
-        echo -e "${node_name} = snell, ${server_ip}, ${port}, psk=${snell_psk}, version=${snell_version_num}"
-    fi
-    
+    print_surge_proxy_config
+
     echo ""
     msg warn "如有需要，请将 server 地址替换为你的实际可用入口。"
-    
+
     echo ""
-    read -p "Press any key to return..." _
+    read -rp "Press any key to return..." _
 }
 
 # 统一输出 Surge Proxy 配置（安装完成/显示配置复用）
@@ -1535,7 +1503,7 @@ check_service() {
     
     printf "\n${SUCCESS_SYMBOL} Check completed!\n"
     
-    read -p "Press any key to return..." _
+    read -rp "Press any key to return..." _
 }
 
 # Restart services (极简风格)
@@ -1580,7 +1548,7 @@ restart_services() {
     echo ""
     check_snell_status
 
-    read -p "Press any key to return..." _
+    read -rp "Press any key to return..." _
 }
 
 # Update Snell (极简风格)
@@ -1663,8 +1631,7 @@ update_snell() {
     esac
 
     msg info "Downloading Snell v${target_version}..."
-    wget -q --show-progress -O snell-server.zip "${snell_url}"
-    if [ $? -ne 0 ]; then
+    if ! wget -q --show-progress -O snell-server.zip "${snell_url}"; then
         msg err "Failed to download Snell. Restarting old version."
         systemctl start snell
         sleep 2
@@ -1691,7 +1658,7 @@ update_snell() {
     fi
     
     echo ""
-    read -p "Press any key to continue..." _
+    read -rp "Press any key to continue..." _
 }
 
 # Script starts here  
