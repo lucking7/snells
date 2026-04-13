@@ -18,6 +18,7 @@ REALM_DIR="/opt/realm"
 REALM_CONFIG="$CONFIG_DIR/realm/config.toml"
 GOST_CONFIG="$CONFIG_DIR/gost/config.json"
 BROOK_CONFIG="$CONFIG_DIR/brook/forwards.conf"
+SOCAT_CONFIG="$CONFIG_DIR/socat/forwards.conf"
 
 # ==================== COLOR SYSTEM ====================
 
@@ -151,7 +152,7 @@ install_dependencies() {
 
 setup_config_dirs() {
     $SUDO mkdir -p "$CONFIG_DIR" "$BACKUP_DIR"
-    $SUDO mkdir -p "$CONFIG_DIR/realm" "$CONFIG_DIR/gost" "$CONFIG_DIR/brook"
+    $SUDO mkdir -p "$CONFIG_DIR/realm" "$CONFIG_DIR/gost" "$CONFIG_DIR/brook" "$CONFIG_DIR/socat"
 
     if [ ! -f "$CONFIG_FILE" ]; then
         cat > /tmp/fwrd_config.json << 'EOF'
@@ -243,10 +244,27 @@ detect_brook() {
     fi
 }
 
+detect_socat() {
+    if command -v socat &>/dev/null; then
+        TOOL_STATUS[socat]="installed"
+        local cnt
+        cnt=$(systemctl list-units --full -all 2>/dev/null | grep -c 'socat-forward.*\.service' || echo 0)
+        if [ "$cnt" -gt 0 ]; then
+            TOOL_SERVICE_STATUS[socat]="active($cnt)"
+        else
+            TOOL_SERVICE_STATUS[socat]="inactive"
+        fi
+    else
+        TOOL_STATUS[socat]="not_installed"
+        TOOL_SERVICE_STATUS[socat]="disabled"
+    fi
+}
+
 detect_all_tools() {
     detect_realm
     detect_gost
     detect_brook
+    detect_socat
 }
 
 # ==================== TOOL INSTALLATION ====================
@@ -409,6 +427,31 @@ install_brook() {
     log_success "Brook v${version} 安装成功"
 }
 
+install_socat() {
+    log_info "安装 socat..."
+    local pm=""
+    if command -v apt-get &>/dev/null; then pm="apt-get"
+    elif command -v yum &>/dev/null; then pm="yum"
+    elif command -v dnf &>/dev/null; then pm="dnf"
+    else log_error "未找到包管理器"; return 1; fi
+
+    [ "$pm" = "apt-get" ] && $SUDO apt-get update -qq 2>/dev/null
+    if $SUDO "$pm" install -y socat 2>/dev/null; then
+        log_success "socat 安装成功"
+    else
+        log_error "socat 安装失败"; return 1
+    fi
+
+    if ! id "socat" &>/dev/null; then
+        $SUDO useradd --system --no-create-home --shell /bin/false socat 2>/dev/null || true
+    fi
+
+    $SUDO mkdir -p "$CONFIG_DIR/socat"
+    [ ! -f "$SOCAT_CONFIG" ] && $SUDO touch "$SOCAT_CONFIG"
+
+    TOOL_STATUS[socat]="installed"
+}
+
 # ==================== TOOL UNINSTALL ====================
 
 uninstall_realm() {
@@ -452,6 +495,21 @@ uninstall_brook() {
     TOOL_STATUS[brook]="not_installed"
     TOOL_SERVICE_STATUS[brook]="disabled"
     log_success "Brook 已卸载"
+}
+
+uninstall_socat() {
+    log_info "卸载 socat 转发服务..."
+    local svc
+    for svc in $(systemctl list-units --full -all 2>/dev/null | grep 'socat-forward.*\.service' | awk '{print $1}'); do
+        $SUDO systemctl stop "$svc" 2>/dev/null || true
+        $SUDO systemctl disable "$svc" 2>/dev/null || true
+        $SUDO rm -f "/etc/systemd/system/$svc"
+    done
+    $SUDO rm -rf "$CONFIG_DIR/socat"
+    $SUDO systemctl daemon-reload
+    TOOL_STATUS[socat]="not_installed"
+    TOOL_SERVICE_STATUS[socat]="disabled"
+    log_success "socat 转发服务已卸载 (socat 系统包保留)"
 }
 
 # ==================== FORWARD RULE MANAGEMENT ====================
@@ -542,6 +600,99 @@ EOF
     echo "${svc_name}|${listen_addr}|${target}|${protocol}" | $SUDO tee -a "$BROOK_CONFIG" > /dev/null
 }
 
+add_rule_socat() {
+    local listen_port=$1 target_ip=$2 target_port=$3 protocol=$4
+
+    if [ "$protocol" = "both" ]; then
+        # TCP service
+        local tcp_svc="socat-forward-${listen_port}-tcp"
+        cat > "/tmp/${tcp_svc}.service" << EOF
+[Unit]
+Description=Socat TCP Forward :${listen_port} -> ${target_ip}:${target_port}
+After=network.target
+
+[Service]
+Type=simple
+User=socat
+Group=socat
+ExecStart=/usr/bin/socat TCP-LISTEN:${listen_port},reuseaddr,fork TCP:${target_ip}:${target_port}
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+LimitNOFILE=infinity
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        $SUDO mv "/tmp/${tcp_svc}.service" "/etc/systemd/system/${tcp_svc}.service"
+        $SUDO systemctl daemon-reload
+        $SUDO systemctl enable "${tcp_svc}" >/dev/null 2>&1
+        $SUDO systemctl start "${tcp_svc}"
+
+        # UDP service
+        local udp_svc="socat-forward-${listen_port}-udp"
+        cat > "/tmp/${udp_svc}.service" << EOF
+[Unit]
+Description=Socat UDP Forward :${listen_port} -> ${target_ip}:${target_port}
+After=network.target
+
+[Service]
+Type=simple
+User=socat
+Group=socat
+ExecStart=/usr/bin/socat UDP-LISTEN:${listen_port},reuseaddr,fork UDP:${target_ip}:${target_port}
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+LimitNOFILE=infinity
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        $SUDO mv "/tmp/${udp_svc}.service" "/etc/systemd/system/${udp_svc}.service"
+        $SUDO systemctl daemon-reload
+        $SUDO systemctl enable "${udp_svc}" >/dev/null 2>&1
+        $SUDO systemctl start "${udp_svc}"
+
+        echo "${tcp_svc}|:${listen_port}|${target_ip}:${target_port}|tcp" | $SUDO tee -a "$SOCAT_CONFIG" > /dev/null
+        echo "${udp_svc}|:${listen_port}|${target_ip}:${target_port}|udp" | $SUDO tee -a "$SOCAT_CONFIG" > /dev/null
+    else
+        local proto_upper="TCP"
+        [ "$protocol" = "udp" ] && proto_upper="UDP"
+        local svc_name="socat-forward-${listen_port}-${protocol}"
+        cat > "/tmp/${svc_name}.service" << EOF
+[Unit]
+Description=Socat ${proto_upper} Forward :${listen_port} -> ${target_ip}:${target_port}
+After=network.target
+
+[Service]
+Type=simple
+User=socat
+Group=socat
+ExecStart=/usr/bin/socat ${proto_upper}-LISTEN:${listen_port},reuseaddr,fork ${proto_upper}:${target_ip}:${target_port}
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+LimitNOFILE=infinity
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        $SUDO mv "/tmp/${svc_name}.service" "/etc/systemd/system/${svc_name}.service"
+        $SUDO systemctl daemon-reload
+        $SUDO systemctl enable "${svc_name}" >/dev/null 2>&1
+        $SUDO systemctl start "${svc_name}"
+
+        echo "${svc_name}|:${listen_port}|${target_ip}:${target_port}|${protocol}" | $SUDO tee -a "$SOCAT_CONFIG" > /dev/null
+    fi
+}
+
 update_master_config() {
     local rule_id=$1 tool=$2 listen_port=$3 target_ip=$4 target_port=$5 protocol=$6
     local remark=${7:-""}
@@ -574,6 +725,7 @@ add_forward_rule() {
         realm) add_rule_realm "$listen_port" "$target_ip" "$target_port" "$protocol" ;;
         gost)  add_rule_gost  "$listen_port" "$target_ip" "$target_port" "$protocol" ;;
         brook) add_rule_brook "$listen_port" "$target_ip" "$target_port" "$protocol" ;;
+        socat) add_rule_socat "$listen_port" "$target_ip" "$target_port" "$protocol" ;;
         *) log_error "未知工具: $tool"; return 1 ;;
     esac
 
@@ -587,7 +739,7 @@ add_forward_rule() {
 }
 
 recommend_tool() {
-    for t in realm gost brook; do
+    for t in realm gost brook socat; do
         [ "${TOOL_STATUS[$t]}" = "installed" ] && { echo "$t"; return; }
     done
     echo "none"
@@ -621,6 +773,13 @@ list_all_rules() {
                     fi ;;
                 brook)
                     local sn="brook-forward-${listen_port}-${protocol}"
+                    if systemctl is-active --quiet "$sn" 2>/dev/null; then
+                        status="${GREEN}运行中${PLAIN}"
+                    else
+                        status="${RED}已停止${PLAIN}"
+                    fi ;;
+                socat)
+                    local sn="socat-forward-${listen_port}-${protocol}"
                     if systemctl is-active --quiet "$sn" 2>/dev/null; then
                         status="${GREEN}运行中${PLAIN}"
                     else
@@ -677,6 +836,14 @@ delete_forward_rule() {
             $SUDO rm -f "/etc/systemd/system/${sn}.service"
             $SUDO systemctl daemon-reload
             $SUDO sed -i "/^${sn}|/d" "$BROOK_CONFIG" 2>/dev/null || true
+            ;;
+        socat)
+            local sn="socat-forward-${listen_port}-${protocol}"
+            $SUDO systemctl stop "$sn" 2>/dev/null || true
+            $SUDO systemctl disable "$sn" 2>/dev/null || true
+            $SUDO rm -f "/etc/systemd/system/${sn}.service"
+            $SUDO systemctl daemon-reload
+            $SUDO sed -i "/^${sn}|/d" "$SOCAT_CONFIG" 2>/dev/null || true
             ;;
     esac
 
@@ -743,13 +910,13 @@ view_service_logs() {
         fi
     done
 
-    if [ "${TOOL_STATUS[brook]}" = "installed" ]; then
+    for pattern in 'brook-forward' 'socat-forward'; do
         local svc
-        for svc in $(systemctl list-units --full -all 2>/dev/null | grep 'brook-forward.*\.service' | awk '{print $1}'); do
+        for svc in $(systemctl list-units --full -all 2>/dev/null | grep "${pattern}.*\\.service" | awk '{print $1}'); do
             printf "\n${BOLD}=== %s ===\n${PLAIN}" "$svc"
             journalctl -u "$svc" --no-pager -n 10 2>/dev/null || true
         done
-    fi
+    done
     press_enter
 }
 
@@ -789,11 +956,12 @@ interactive_add_rule() {
     printf "  ${GREEN}1.${PLAIN} 自动选择 (推荐)\n"
     printf "  ${GREEN}2.${PLAIN} Realm\n"
     printf "  ${GREEN}3.${PLAIN} GOST\n"
-    printf "  ${GREEN}4.${PLAIN} Brook\n\n"
-    read -rp "请选择 [1-4, 默认1]: " tc
+    printf "  ${GREEN}4.${PLAIN} Brook\n"
+    printf "  ${GREEN}5.${PLAIN} Socat\n\n"
+    read -rp "请选择 [1-5, 默认1]: " tc
     local tool="auto"
     case "${tc:-1}" in
-        2) tool="realm" ;; 3) tool="gost" ;; 4) tool="brook" ;; *) tool="auto" ;;
+        2) tool="realm" ;; 3) tool="gost" ;; 4) tool="brook" ;; 5) tool="socat" ;; *) tool="auto" ;;
     esac
 
     # --- 选择协议 ---
@@ -927,17 +1095,18 @@ install_tools_menu() {
         clear
         printf "\n${BOLD}${BLUE}========== 工具管理 ==========${PLAIN}\n\n"
         printf "${BLUE}安装:${PLAIN}\n"
-        for i_tool in realm gost brook; do
+        for i_tool in realm gost brook socat; do
             local label=""
-            case "$i_tool" in realm) label="Realm - 高性能Rust代理";; gost) label="GOST - 功能丰富的隧道";; brook) label="Brook - 简洁高效";; esac
-            local idx; case "$i_tool" in realm) idx=1;; gost) idx=2;; brook) idx=3;; esac
+            case "$i_tool" in realm) label="Realm - 高性能Rust代理";; gost) label="GOST - 功能丰富的隧道";; brook) label="Brook - 简洁高效";; socat) label="Socat - 轻量双向通道";; esac
+            local idx; case "$i_tool" in realm) idx=1;; gost) idx=2;; brook) idx=3;; socat) idx=4;; esac
             printf "  ${GREEN}%s.${PLAIN} %s " "$idx" "$label"
             [ "${TOOL_STATUS[$i_tool]}" = "installed" ] && printf "${GREEN}[已安装]${PLAIN}\n" || printf "${RED}[未安装]${PLAIN}\n"
         done
         printf "\n${BLUE}卸载:${PLAIN}\n"
-        printf "  ${YELLOW}4.${PLAIN} 卸载 Realm\n"
-        printf "  ${YELLOW}5.${PLAIN} 卸载 GOST\n"
-        printf "  ${YELLOW}6.${PLAIN} 卸载 Brook\n"
+        printf "  ${YELLOW}5.${PLAIN} 卸载 Realm\n"
+        printf "  ${YELLOW}6.${PLAIN} 卸载 GOST\n"
+        printf "  ${YELLOW}7.${PLAIN} 卸载 Brook\n"
+        printf "  ${YELLOW}8.${PLAIN} 卸载 Socat 转发服务\n"
         printf "\n  ${GREEN}0.${PLAIN} 返回\n\n"
 
         read -rp "选择: " choice
@@ -945,20 +1114,26 @@ install_tools_menu() {
             1) if [ "${TOOL_STATUS[realm]}" = "installed" ]; then log_info "已安装"; else install_realm; fi; detect_realm; press_enter ;;
             2) if [ "${TOOL_STATUS[gost]}" = "installed" ]; then log_info "已安装"; else install_gost; fi; detect_gost; press_enter ;;
             3) if [ "${TOOL_STATUS[brook]}" = "installed" ]; then log_info "已安装"; else install_brook; fi; detect_brook; press_enter ;;
-            4)
+            4) if [ "${TOOL_STATUS[socat]}" = "installed" ]; then log_info "已安装"; else install_socat; fi; detect_socat; press_enter ;;
+            5)
                 if [ "${TOOL_STATUS[realm]}" = "installed" ]; then
                     read -rp "确认卸载 Realm? [y/N]: " c; [[ "$c" =~ ^[Yy]$ ]] && uninstall_realm
                 else log_warn "Realm 未安装"; fi
                 press_enter ;;
-            5)
+            6)
                 if [ "${TOOL_STATUS[gost]}" = "installed" ]; then
                     read -rp "确认卸载 GOST? [y/N]: " c; [[ "$c" =~ ^[Yy]$ ]] && uninstall_gost
                 else log_warn "GOST 未安装"; fi
                 press_enter ;;
-            6)
+            7)
                 if [ "${TOOL_STATUS[brook]}" = "installed" ]; then
                     read -rp "确认卸载 Brook? [y/N]: " c; [[ "$c" =~ ^[Yy]$ ]] && uninstall_brook
                 else log_warn "Brook 未安装"; fi
+                press_enter ;;
+            8)
+                if [ "${TOOL_STATUS[socat]}" = "installed" ]; then
+                    read -rp "确认卸载 Socat 转发服务? [y/N]: " c; [[ "$c" =~ ^[Yy]$ ]] && uninstall_socat
+                else log_warn "Socat 未安装"; fi
                 press_enter ;;
             0) return ;;
             *) log_error "无效选择"; sleep 1 ;;
@@ -972,7 +1147,7 @@ service_control_menu() {
         printf "\n${BOLD}${BLUE}========== 服务管理 ==========${PLAIN}\n\n"
 
         printf "${BOLD}状态:${PLAIN}\n"
-        for tool in realm gost brook; do
+        for tool in realm gost brook socat; do
             [ "${TOOL_STATUS[$tool]}" != "installed" ] && continue
             printf "  %s: " "$tool"
             case "${TOOL_SERVICE_STATUS[$tool]}" in
@@ -993,37 +1168,40 @@ service_control_menu() {
                 for tool in realm gost; do
                     [ "${TOOL_STATUS[$tool]}" = "installed" ] && $SUDO systemctl start "$tool" 2>/dev/null && log_success "$tool 已启动"
                 done
-                if [ "${TOOL_STATUS[brook]}" = "installed" ]; then
+                for pattern in 'brook-forward' 'socat-forward'; do
                     local svc
-                    for svc in $(systemctl list-units --full -all 2>/dev/null | grep 'brook-forward.*\.service' | awk '{print $1}'); do
+                    for svc in $(systemctl list-units --full -all 2>/dev/null | grep "${pattern}.*\\.service" | awk '{print $1}'); do
                         $SUDO systemctl start "$svc" 2>/dev/null
                     done
-                    log_success "Brook 服务已启动"
-                fi
+                done
+                [ "${TOOL_STATUS[brook]}" = "installed" ] && log_success "Brook 服务已启动"
+                [ "${TOOL_STATUS[socat]}" = "installed" ] && log_success "Socat 服务已启动"
                 detect_all_tools; press_enter ;;
             2)
                 for tool in realm gost; do
                     $SUDO systemctl stop "$tool" 2>/dev/null && log_success "$tool 已停止"
                 done
-                if [ "${TOOL_STATUS[brook]}" = "installed" ]; then
+                for pattern in 'brook-forward' 'socat-forward'; do
                     local svc
-                    for svc in $(systemctl list-units --full -all 2>/dev/null | grep 'brook-forward.*\.service' | awk '{print $1}'); do
+                    for svc in $(systemctl list-units --full -all 2>/dev/null | grep "${pattern}.*\\.service" | awk '{print $1}'); do
                         $SUDO systemctl stop "$svc" 2>/dev/null
                     done
-                    log_success "Brook 服务已停止"
-                fi
+                done
+                [ "${TOOL_STATUS[brook]}" = "installed" ] && log_success "Brook 服务已停止"
+                [ "${TOOL_STATUS[socat]}" = "installed" ] && log_success "Socat 服务已停止"
                 detect_all_tools; press_enter ;;
             3)
                 for tool in realm gost; do
                     [ "${TOOL_STATUS[$tool]}" = "installed" ] && $SUDO systemctl restart "$tool" 2>/dev/null && log_success "$tool 已重启"
                 done
-                if [ "${TOOL_STATUS[brook]}" = "installed" ]; then
+                for pattern in 'brook-forward' 'socat-forward'; do
                     local svc
-                    for svc in $(systemctl list-units --full -all 2>/dev/null | grep 'brook-forward.*\.service' | awk '{print $1}'); do
+                    for svc in $(systemctl list-units --full -all 2>/dev/null | grep "${pattern}.*\\.service" | awk '{print $1}'); do
                         $SUDO systemctl restart "$svc" 2>/dev/null
                     done
-                    log_success "Brook 服务已重启"
-                fi
+                done
+                [ "${TOOL_STATUS[brook]}" = "installed" ] && log_success "Brook 服务已重启"
+                [ "${TOOL_STATUS[socat]}" = "installed" ] && log_success "Socat 服务已重启"
                 detect_all_tools; press_enter ;;
             4)
                 for tool in realm gost; do
@@ -1048,7 +1226,7 @@ backup_configs() {
     $SUDO mkdir -p "$BACKUP_DIR"
 
     $SUDO tar -czf "$backup_file" -C / \
-        etc/fwrd/config.json etc/fwrd/realm etc/fwrd/gost etc/fwrd/brook 2>/dev/null || true
+        etc/fwrd/config.json etc/fwrd/realm etc/fwrd/gost etc/fwrd/brook etc/fwrd/socat 2>/dev/null || true
 
     find "$BACKUP_DIR" -maxdepth 1 -name 'backup_*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -rn | awk 'NR>10{print $2}' | xargs $SUDO rm -f 2>/dev/null || true
     log_success "备份: $backup_file"
@@ -1067,7 +1245,7 @@ show_main_menu() {
         printf "${INFO_SYMBOL} 本机IP: ${GREEN}%s${PLAIN}\n" "$ip_info"
 
         printf "\n${BOLD}工具:${PLAIN} "
-        for tool in realm gost brook; do
+        for tool in realm gost brook socat; do
             if [ "${TOOL_STATUS[$tool]}" = "installed" ]; then
                 case "${TOOL_SERVICE_STATUS[$tool]}" in
                     active*) printf "${GREEN}%s✓${PLAIN} " "$tool" ;;

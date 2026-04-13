@@ -10,18 +10,12 @@
 bash <(curl -Ls https://github.com/lucking7/snells/raw/main/snells.sh)
 ```
 
-### 端口转发 (Realm / GOST / Brook)
+### 端口转发 (Realm / GOST / Brook / Socat)
 
-统一管理 Realm、GOST、Brook 三种转发工具，支持安装/卸载、规则增删改、TCP/UDP 分流。
+统一管理四种转发工具，支持安装/卸载、规则增删改、TCP/UDP 分流。
 
 ```bash
 bash <(curl -Ls https://github.com/lucking7/snells/raw/main/fwrd.sh)
-```
-
-### Socat
-
-```bash
-bash <(curl -Ls https://github.com/lucking7/snells/raw/main/socat.sh)
 ```
 
 ### NFTables
