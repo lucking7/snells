@@ -6,6 +6,8 @@
 
 ### Snell + Shadow-TLS
 
+Snell 代理服务器 + Shadow-TLS 前置，支持 Surge 客户端配置导出。
+
 ```bash
 bash <(curl -Ls https://github.com/lucking7/snells/raw/main/snells.sh)
 ```
@@ -18,14 +20,7 @@ bash <(curl -Ls https://github.com/lucking7/snells/raw/main/snells.sh)
 bash <(curl -Ls https://github.com/lucking7/snells/raw/main/fwrd.sh)
 ```
 
-### NFTables
-
-```bash
-bash <(curl -Ls https://github.com/lucking7/snells/raw/main/nftables.sh)
-```
-
 ## 注意事项
 
 - 所有脚本均需要 root 权限运行
-- 请在使用前了解相关工具的功能和用途
-- 脚本会自动安装所需依赖并配置系统服务
+- 脚本会自动安装所需依赖并配置 systemd 服务
